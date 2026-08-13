@@ -2585,6 +2585,476 @@ class SybaseASEConnector(DatabaseConnector):
             rewritten.append(f"{variable} = {value}")
         return ', '.join(rewritten)
 
+    ## ------------------------------------------------------------------------------------
+    ## The pseudo tables of a trigger, read as a parsed statement
+    ##
+    ## The conversion below reads the statement the way convert_view_code() reads a view - it
+    ## is parsed, the tree is rewritten and the result is generated again - instead of looking
+    ## for the clause keywords in the text. A FROM list which names the pseudo table beside a
+    ## real table, a JOIN against it, both pseudo tables in one statement and the FROM clause
+    ## of the DELETE and UPDATE of Transact-SQL are all the same thing in a parsed statement:
+    ## an entry of the sources of a query. The clause positions in the text they are written
+    ## at are not, which is why every one of those shapes had to be refused before.
+    ## ------------------------------------------------------------------------------------
+
+    ## The name a local variable of Sybase ASE is masked under while the statement is parsed.
+    ## '@' is the absolute value operator of PostgreSQL, so '@old = created' parses as a
+    ## comparison of the column 'old' against 'created' and the variable is lost. The name is
+    ## written in lower case and carries no character which would make the generator quote it.
+    SYBASE_VARIABLE_MASK = 'sybvar_mask_'
+
+    def mask_sybase_variables(self, statement):
+        """
+        The statement with its local variables replaced by plain names, and what they stood for.
+
+        Pass 9 of the parser renames '@var' to 'locvar_var' and runs after this conversion, so
+        the variables have to be given back exactly as they were written.
+        """
+        variables = {}
+
+        def mask(match):
+            name = f"{self.SYBASE_VARIABLE_MASK}{len(variables)}"
+            variables[name] = match.group(0)
+            return name
+
+        return re.sub(r'@@?[\w#$]+', mask, statement), variables
+
+    def unmask_sybase_variables(self, statement, variables):
+        """ The statement with the masked names written as the variables they stand for. """
+        for name, variable in variables.items():
+            statement = re.sub(rf'(?i)"?\b{re.escape(name)}\b"?', variable.replace('\\', '\\\\'), statement)
+        return statement
+
+    def is_masked_sybase_variable(self, name):
+        return bool(name) and name.lower().startswith(self.SYBASE_VARIABLE_MASK)
+
+    def normalise_tsql_dml(self, statement):
+        """
+        The DELETE of Transact-SQL written so that a SQL parser reads it.
+
+        'delete from t from t, deleted where ...' names the table twice - once as the target of
+        the DELETE and once as the first entry of a FROM clause which lists the tables the
+        condition reads. The second FROM is the one carrying the pseudo table. No parser reads
+        two FROM clauses in one DELETE, and dropping the first keyword leaves 'delete t from
+        t, deleted where ...', which is the other spelling of the same statement and parses.
+        """
+        match = re.match(r'(?is)^(\s*DELETE\s+)FROM(\s+.+)$', statement)
+        if not match:
+            return statement
+        rest = match.group(2)
+        ## only when a second FROM follows on the level of the statement itself
+        masked, depths = self.scan_sql_text(rest)
+        if not any(depths[found.start()] == 0 for found in re.finditer(r'(?i)\bFROM\b', masked)):
+            return statement
+        return match.group(1) + rest.lstrip()
+
+    def is_pseudo_table_node(self, node):
+        """ The record a table node of a parsed statement stands for, or None. """
+        if not isinstance(node, sqlglot.exp.Table):
+            return None
+        if node.args.get('db') or node.args.get('catalog'):
+            ## 'dbo.inserted' is a table of the schema, not the pseudo table
+            return None
+        return self.PSEUDO_TABLE_RECORDS.get((node.name or '').lower())
+
+    def scope_sources(self, scope):
+        """
+        The tables a query reads, as a list of (table, join) - the join being the node which
+        attaches the table to the query, or None for the first one.
+
+        A query of PostgreSQL keeps the entries behind the first one on the query itself, the
+        DELETE and the UPDATE of Transact-SQL keep them on the table which heads their FROM
+        clause. Both are a list of joins whose 'this' is a table, so they are read the same way.
+        """
+        if isinstance(scope, sqlglot.exp.Select):
+            from_clause = scope.args.get('from_') or scope.args.get('from')
+            head = from_clause.this if from_clause else None
+            joins = list(scope.args.get('joins') or [])
+        elif isinstance(scope, sqlglot.exp.Update):
+            from_clause = scope.args.get('from_') or scope.args.get('from')
+            head = from_clause.this if from_clause else None
+            joins = list(head.args.get('joins') or []) if head is not None else []
+        elif isinstance(scope, sqlglot.exp.Delete):
+            head, joins = self.delete_source_head(scope)
+        else:
+            return []
+
+        if head is None:
+            return []
+        sources = [(head, None)]
+        sources.extend((join.this, join) for join in joins)
+        return [(table, join) for table, join in sources if isinstance(table, sqlglot.exp.Table)]
+
+    @staticmethod
+    def delete_target(scope):
+        """
+        The table a DELETE removes rows from, in either of the two spellings it arrives in.
+
+        Transact-SQL names the target in front of its FROM clause and repeats it inside that
+        clause, which sqlglot keeps as 'tables' (the target) and 'this' (the head of the FROM
+        list). PostgreSQL names it once behind FROM and lists the tables the condition reads in
+        a USING clause, which is 'this' (the target) and 'using'.
+        """
+        tables = scope.args.get('tables')
+        if tables:
+            return tables[0]
+        return scope.args.get('this')
+
+    def delete_source_head(self, scope):
+        """ The first table a DELETE reads besides its target, and the joins behind it. """
+        using = scope.args.get('using')
+        if using and isinstance(using[0], sqlglot.exp.Table):
+            head = using[0]
+        elif scope.args.get('tables'):
+            ## the FROM list of Transact-SQL, which repeats the target as its first entry
+            head = scope.args.get('this')
+        else:
+            return None, []
+        if not isinstance(head, sqlglot.exp.Table):
+            return None, []
+        return head, list(head.args.get('joins') or [])
+
+    @staticmethod
+    def join_is_outer(join):
+        """ Whether a join keeps the rows of one side which the other side does not match. """
+        if join is None:
+            return False
+        side = (join.args.get('side') or '').upper()
+        kind = (join.args.get('kind') or '').upper()
+        return side in ('LEFT', 'RIGHT', 'FULL') or kind == 'OUTER'
+
+    def set_scope_sources(self, scope, sources):
+        """
+        The query rewritten to read the given tables, in the places its kind keeps them.
+
+        A query left without a table reads no table at all - PostgreSQL allows a SELECT with a
+        WHERE clause and no FROM clause, which is what a query over the one row of a pseudo
+        table becomes. The target of a DELETE or an UPDATE is not one of these entries: it is
+        named by the statement itself and is removed from the FROM clause it was repeated in.
+
+        Every source but the first keeps the join it was attached by, so that the condition of a
+        JOIN and the side an outer join keeps are not lost. The first one cannot: it heads the
+        FROM clause and there is nothing in front of it to join it to, so its condition is given
+        to the caller to put into the WHERE clause instead.
+        """
+        head, head_join = sources[0] if sources else (None, None)
+        joins = []
+        for table, join in sources[1:]:
+            joins.append(join.copy() if join is not None else sqlglot.exp.Join(this=table))
+            joins[-1].set('this', table)
+
+        if isinstance(scope, sqlglot.exp.Select):
+            key = 'from_' if 'from_' in scope.args or scope.args.get('from') is None else 'from'
+            if head is None:
+                scope.args.pop('from_', None)
+                scope.args.pop('from', None)
+            else:
+                head.set('joins', None)
+                scope.set(key, sqlglot.exp.From(this=head))
+            scope.set('joins', joins or None)
+            return
+
+        if isinstance(scope, sqlglot.exp.Update):
+            key = 'from_' if 'from_' in scope.args or scope.args.get('from') is None else 'from'
+            if head is None:
+                scope.args.pop('from_', None)
+                scope.args.pop('from', None)
+            else:
+                head.set('joins', joins or None)
+                scope.set(key, sqlglot.exp.From(this=head))
+            return
+
+        if isinstance(scope, sqlglot.exp.Delete):
+            ## PostgreSQL names the target once, behind its own FROM keyword, so the target
+            ## moves into 'this' and the FROM list Transact-SQL repeated it in disappears.
+            target = self.delete_target(scope).copy()
+            target.set('joins', None)
+            scope.set('tables', None)
+            scope.set('this', target)
+            ## a table left beside the target is one the condition reads - PostgreSQL lists
+            ## those in a USING clause, where Transact-SQL wrote them in its second FROM clause
+            if head is None:
+                scope.set('using', None)
+            else:
+                head.set('joins', None)
+                scope.set('using', [head] + [join.this for join in joins])
+
+    ## The condition under which the row a pseudo table stands for exists at all. A trigger
+    ## fired by an INSERT has no OLD row and one fired by a DELETE has no NEW row, which is
+    ## what 'if not exists (select 1 from deleted)' asks about - the Transact-SQL way of
+    ## telling an INSERT from an UPDATE inside a trigger written for both.
+    PSEUDO_TABLE_PRESENCE = {'NEW': "TG_OP <> 'DELETE'", 'OLD': "TG_OP <> 'INSERT'"}
+
+    def rewrite_scope_pseudo_tables(self, scope, trigger_name, scope_records):
+        """
+        One query of a statement with the pseudo tables it reads replaced by the records.
+
+        The table leaves the sources of the query, the condition which attached it to the other
+        tables moves into the WHERE clause and the columns addressed through it become fields of
+        the record. Nothing else about the query changes: a real table it read stays where it
+        was, and so do the condition and the aggregate over that table.
+        """
+        sources = self.scope_sources(scope)
+        pseudo = [(table, join, self.is_pseudo_table_node(table)) for table, join in sources
+                  if self.is_pseudo_table_node(table)]
+        if not pseudo:
+            return False
+
+        ## A group over the pseudo table asks for one row per group of the rows the statement
+        ## changed, which is a question about the whole set. One row is one group, so the
+        ## conversion would answer a different question and has to refuse instead.
+        if scope.args.get('group') or scope.args.get('having') or scope.args.get('distinct'):
+            return None
+
+        conditions = []
+        for table, join, record in pseudo:
+            if self.join_is_outer(join):
+                ## the rows of the other table which the statement did not touch - a question
+                ## about the whole set, which one row cannot answer
+                return None
+
+            names = {(table.name or '').lower()}
+            if table.alias:
+                names.add(table.alias.lower())
+
+            ## A column addressed through the pseudo table or its alias is a field of the record
+            ## wherever it stands - the subquery of an EXISTS reads the row of the query around
+            ## it, so the whole tree of the query is rewritten, not its own level alone.
+            for column in scope.find_all(sqlglot.exp.Column):
+                if (column.table or '').lower() in names:
+                    column.set('table', sqlglot.exp.Identifier(this=record, quoted=False))
+
+            if join is not None and join.args.get('on') is not None:
+                conditions.append(join.args['on'])
+
+        remaining = [(table, join) for table, join in sources if not self.is_pseudo_table_node(table)]
+
+        ## The target of a DELETE or an UPDATE of Transact-SQL is repeated in its FROM clause.
+        ## PostgreSQL names it once, and leaving it in the FROM clause would read it a second
+        ## time - 'UPDATE t SET ... FROM t' joins the table with itself and updates every row.
+        if isinstance(scope, (sqlglot.exp.Delete, sqlglot.exp.Update)):
+            target = (self.delete_target(scope) if isinstance(scope, sqlglot.exp.Delete)
+                      else scope.args.get('this'))
+            target_name = (target.name or '').lower() if isinstance(target, sqlglot.exp.Table) else None
+            for position, (table, join) in enumerate(list(remaining)):
+                if (table.name or '').lower() == target_name and not table.alias:
+                    remaining.pop(position)
+                    break
+
+        ## Only a SELECT reads the pseudo table alone. The target of a DELETE or an UPDATE is a
+        ## table of its own, so a column written there without a qualifier - the column an
+        ## UPDATE assigns above all - is one of that table and has to be left as it stands.
+        sole_source = (isinstance(scope, sqlglot.exp.Select)
+                       and not remaining and len(pseudo) == 1)
+
+        if sole_source:
+            ## the query reads the one row and nothing else, so a name written without a
+            ## qualifier is one of its columns and an aggregate over it is the value itself
+            self.qualify_bare_columns(scope, pseudo[0][2])
+            self.unwrap_aggregates_over_one_row(scope)
+
+        ## The first source heads the FROM clause and cannot keep the join it was attached by.
+        ## An outer join cannot be promoted that way - the side it keeps would be lost - and the
+        ## condition of an inner one becomes a condition of the query.
+        if remaining and remaining[0][1] is not None:
+            if self.join_is_outer(remaining[0][1]):
+                return None
+            if remaining[0][1].args.get('on') is not None:
+                conditions.append(remaining[0][1].args['on'])
+            remaining[0] = (remaining[0][0], None)
+
+        self.set_scope_sources(scope, remaining)
+
+        for condition in conditions:
+            self.add_scope_condition(scope, condition)
+
+        ## which records this query stood for, for the EXISTS over it - keyed by identity
+        ## because a node of sqlglot is not hashable by value
+        scope_records[id(scope)] = [record for _, _, record in pseudo]
+        return True
+
+    def own_level_expressions(self, scope, node_type):
+        """
+        The nodes of a query which belong to the query itself and not to a subquery of it.
+        """
+        for node in scope.find_all(node_type):
+            parent = node.parent
+            while parent is not None and parent is not scope:
+                if isinstance(parent, (sqlglot.exp.Select, sqlglot.exp.Delete, sqlglot.exp.Update)):
+                    break
+                parent = parent.parent
+            if parent is scope:
+                yield node
+
+    def qualify_bare_columns(self, scope, record):
+        """
+        The columns of a query written without a qualifier as fields of the record.
+
+        A masked variable is a name of the same shape and is not a column of the pseudo table,
+        and neither is a name which belongs to a subquery reading a table of its own.
+        """
+        for column in self.own_level_expressions(scope, sqlglot.exp.Column):
+            if column.table:
+                continue
+            if self.is_masked_sybase_variable(column.name):
+                continue
+            column.set('table', sqlglot.exp.Identifier(this=record, quoted=False))
+
+    def unwrap_aggregates_over_one_row(self, scope):
+        """
+        An aggregate over the one row of a pseudo table as the value it aggregates.
+
+        'min(id)' over the rows the statement changed is the column itself once the rows are
+        seen one at a time, and 'count(*)' is 1.
+        """
+        for node in list(self.own_level_expressions(scope, sqlglot.exp.AggFunc)):
+            name = type(node).__name__.upper()
+            if name == 'COUNT':
+                node.replace(sqlglot.exp.Literal.number(1))
+            elif name in ('MIN', 'MAX', 'SUM', 'AVG') and node.this is not None:
+                node.replace(node.this.copy())
+
+    def add_scope_condition(self, scope, condition):
+        """ The condition of a removed join added to the WHERE clause of the query. """
+        where = scope.args.get('where')
+        if where is None:
+            scope.set('where', sqlglot.exp.Where(this=condition.copy()))
+        else:
+            where.set('this', sqlglot.exp.And(this=where.this.copy(), expression=condition.copy()))
+
+    def collapse_one_row_existence_tests(self, parsed, scope_records):
+        """
+        An EXISTS over a query which reads a pseudo table and nothing else, as a plain condition.
+
+        'exists (select * from inserted where c)' asks whether the row of the trigger is a row
+        the condition selects, which is the condition itself once the pseudo table is gone.
+
+        Without a condition the question is only whether the row exists at all, and that is the
+        Transact-SQL way of telling the events of a trigger written for several of them apart:
+        'if not exists (select 1 from deleted)' means 'if this is an INSERT'. Reading it as a
+        constant would turn that test into one which never fires, so the presence of the record
+        is asked about instead - and it is kept in front of the condition in the other case as
+        well, where it also guards the condition against a record the event does not provide.
+
+        Returns the tree, which is not always the one it was given: replace() of sqlglot puts a
+        node in the place its parent holds it in and does nothing at all to a node without a
+        parent, and the whole statement of an IF is exactly such a node.
+        """
+        for exists in list(parsed.find_all(sqlglot.exp.Exists)):
+            query = exists.this
+            if not isinstance(query, sqlglot.exp.Select):
+                continue
+            records = scope_records.get(id(query))
+            if not records:
+                continue
+            if query.args.get('from_') or query.args.get('from') or query.args.get('joins'):
+                continue
+            if query.args.get('group') or query.args.get('having'):
+                continue
+
+            conditions = [sqlglot.condition(self.PSEUDO_TABLE_PRESENCE[record])
+                          for record in dict.fromkeys(records)]
+            where = query.args.get('where')
+            if where is not None:
+                conditions.append(sqlglot.exp.Paren(this=where.this.copy()))
+
+            replacement = conditions[0]
+            for condition in conditions[1:]:
+                replacement = sqlglot.exp.And(this=replacement, expression=condition)
+            replacement = sqlglot.exp.Paren(this=replacement)
+
+            if exists is parsed:
+                parsed = replacement
+            else:
+                exists.replace(replacement)
+        return parsed
+
+    def fold_assignment_conditions(self, parsed):
+        """
+        The condition of an assignment SELECT folded into the value it assigns.
+
+        'select @old = created from deleted where id = @id' has no FROM clause left to carry the
+        condition and PL/pgSQL assigns an expression alone, so the condition becomes a CASE. A
+        row the condition does not select leaves the variable empty, which is what a SELECT of
+        Sybase ASE over no row does, and what makes the WHILE loop over the rows of a statement
+        end after the one row this trigger sees.
+        """
+        for select in list(parsed.find_all(sqlglot.exp.Select)):
+            where = select.args.get('where')
+            if where is None:
+                continue
+            if select.args.get('from_') or select.args.get('from') or select.args.get('joins'):
+                continue
+            assignments = [node for node in select.expressions if isinstance(node, sqlglot.exp.EQ)
+                           and self.is_masked_sybase_variable(
+                               node.this.name if isinstance(node.this, sqlglot.exp.Column) else '')]
+            if not assignments or len(assignments) != len(select.expressions):
+                continue
+            for assignment in assignments:
+                value = assignment.expression
+                ## a count of the rows the condition did not select is 0, not an empty value
+                otherwise = (sqlglot.exp.Literal.number(0)
+                             if isinstance(value, sqlglot.exp.Literal) and value.this == '1'
+                             and not value.args.get('is_string') else None)
+                case = sqlglot.exp.Case(
+                    ifs=[sqlglot.exp.If(this=where.this.copy(), true=value.copy())],
+                    default=otherwise)
+                assignment.set('expression', case)
+            select.set('where', None)
+
+    def convert_trigger_pseudo_tables_parsed(self, statement, trigger_name):
+        """
+        One statement of a trigger reading the pseudo tables, converted through the parser.
+
+        Returns the converted statement, or None when the statement could not be read or names
+        a pseudo table in a place which needs the whole set of rows the statement changed.
+        """
+        masked, variables = self.mask_sybase_variables(statement)
+        masked = self.normalise_tsql_dml(masked)
+
+        try:
+            parsed = sqlglot.parse_one(masked, read='postgres')
+        except Exception as e:
+            self.config_parser.print_log_message('DEBUG',
+                f"sybase_ase_connector: convert_trigger: Trigger {trigger_name}: the statement could not "
+                f"be parsed for the conversion of its pseudo tables ({e}): {' '.join(statement.split())}")
+            return None
+
+        ## sqlglot does not raise on syntax it does not know - it returns a plain Command node,
+        ## and every rewriting below would silently do nothing to it
+        if parsed is None or isinstance(parsed, sqlglot.exp.Command):
+            return None
+
+        scope_records = {}
+        changed = False
+        ## the innermost query first, so that a subquery is converted before the query which
+        ## reads it decides whether anything of the pseudo table is left in it
+        for scope in reversed(list(parsed.find_all(
+                sqlglot.exp.Select, sqlglot.exp.Delete, sqlglot.exp.Update))):
+            outcome = self.rewrite_scope_pseudo_tables(scope, trigger_name, scope_records)
+            if outcome is None:
+                return None
+            changed = changed or outcome
+
+        if not changed:
+            return None
+
+        parsed = self.collapse_one_row_existence_tests(parsed, scope_records)
+        self.fold_assignment_conditions(parsed)
+
+        try:
+            generated = parsed.sql(dialect='postgres')
+        except Exception as e:
+            self.config_parser.print_log_message('DEBUG',
+                f"sybase_ase_connector: convert_trigger: Trigger {trigger_name}: the converted statement "
+                f"could not be written ({e}): {' '.join(statement.split())}")
+            return None
+
+        generated = self.unmask_sybase_variables(generated, variables)
+        if self.reads_pseudo_table(generated):
+            return None
+        return generated
+
     def convert_trigger_pseudo_tables(self, statement, command_kind, trigger_name, refusals):
         """
         One statement of a trigger of Sybase ASE reading the pseudo tables 'inserted' and
@@ -2601,22 +3071,26 @@ class SybaseASEConnector(DatabaseConnector):
         as a condition over the record.
 
         A trigger of Sybase ASE fires once per statement and can read all of its rows at once,
-        while this is a trigger per row. A statement which needs the whole set - a join with the
-        pseudo table, a group over it - cannot be expressed this way: it is replaced by a
-        statement which does nothing, keeps the original in a comment for the reader and is
-        reported as a refusal naming the trigger.
+        while this is a trigger per row. A statement which needs the whole set - a group over the
+        pseudo table, an outer join whose missing side is the pseudo table - cannot be expressed
+        this way. It is kept as it was written, marked for the reader as needing to be completed
+        by hand, and reported as a refusal which makes the whole trigger fail.
+
+        This is the fallback of convert_trigger_pseudo_tables_parsed() and reads the statement by
+        the positions its clause keywords are written at. It handles the pseudo table listed as
+        the only entry of a FROM clause; every other shape is left to the parsed conversion.
         """
         if not self.reads_pseudo_table(statement):
             return statement
 
         original = statement
+        refused = []
 
         def refuse(reason):
-            refusals.append(f"{reason}: {' '.join(original.split())}")
-            self.config_parser.print_log_message('WARNING',
+            refused.append(reason)
+            self.config_parser.print_log_message('DEBUG',
                 f"sybase_ase_connector: convert_trigger: Trigger {trigger_name}: {reason} - "
-                f"a trigger per row of PostgreSQL cannot express it and it has to be completed "
-                f"by hand: {' '.join(original.split())}")
+                f"the statement is not converted by the textual conversion: {' '.join(original.split())}")
 
         ## A column addressed through the pseudo table itself is a field of the record wherever
         ## it stands, and renaming those first leaves only the entries of a FROM clause to deal
@@ -2703,12 +3177,21 @@ class SybaseASEConnector(DatabaseConnector):
                     f"{reference['name']} was dropped - the trigger reads one row: {' '.join(original.split())}")
                 trailing = ''
 
-            ## an EXISTS over the pseudo table asks whether the row of the trigger is the row it
-            ## looks for, which is the condition of its subquery alone
+            ## An EXISTS over the pseudo table asks whether the row of the trigger is the row it
+            ## looks for, which is the condition of its subquery alone.
+            ##
+            ## Without a condition it asks whether the row exists at all, and that is not a
+            ## constant: 'if not exists (select 1 from deleted)' is how Transact-SQL tells an
+            ## INSERT from an UPDATE inside a trigger written for both. Reading it as TRUE or
+            ## FALSE made the test decide the same way every time - the branch auditing an
+            ## INSERT never ran and every row was audited as an UPDATE - so the presence of the
+            ## record is asked about instead.
             exists = re.search(r'(?i)(\bNOT\s+)?\bEXISTS\s*$', statement[:max(span[0] - 1, 0)])
             if exists and sole_source and not trailing:
                 negation = 'NOT ' if exists.group(1) else ''
-                replacement = f"{negation}({condition})" if condition else ('FALSE' if negation else 'TRUE')
+                presence = self.PSEUDO_TABLE_PRESENCE[record]
+                replacement = (f"{negation}({presence} AND ({condition}))" if condition
+                               else f"{negation}({presence})")
                 statement = statement[:exists.start()] + replacement + statement[span[1] + 1:]
                 continue
 
@@ -2730,16 +3213,109 @@ class SybaseASEConnector(DatabaseConnector):
             refuse("the statement reads the pseudo tables of a trigger in too many places")
 
         if self.reads_pseudo_table(statement):
-            ## nothing readable came out of the rewriting - the statement must not reach the
-            ## target, where it would fail with 'relation "inserted" does not exist'
-            note = f"/* TODO: not converted - {' '.join(original.split())} */"
-            if command_kind in ('IF', 'WHILE'):
-                return f"FALSE {note}"
-            ## the comment stands in front of the statement which replaces it, so that the
-            ## statement is the last thing on the line and no semicolon is added behind it
-            return f"{note} NULL;"
+            return None
 
         return statement
+
+    ## The line which marks a statement the conversion could not express as a trigger per row.
+    ## The orchestrator looks for it to keep the trigger out of the target - see
+    ## trigger_needs_manual_adjustment().
+    MANUAL_ADJUSTMENT_MARKER = 'MANUAL ADJUSTMENT REQUIRED'
+
+    def validate_generated_body(self, body):
+        """
+        What is structurally wrong with a generated routine body, as a list of reasons.
+
+        The conversion runs over the statements of a routine one at a time and cannot see that
+        the statements it was given do not add up - a condition cut in half by the parser leaves
+        a body whose parentheses or blocks do not close, and PostgreSQL refuses the whole
+        routine with a syntax error which names a line and not a cause. Counting them here turns
+        that into a reason the migration report can carry, and keeps the object from being
+        created and counted as migrated.
+        """
+        ## Only the parentheses are counted. Counting BEGIN against END looks like the same
+        ## kind of check and is not one: the END of a CASE expression, of an IF and of a loop
+        ## close a statement rather than a block, the outermost BEGIN and END of the routine
+        ## belong to the template around this body, and a body full of CASE expressions - the
+        ## shape every converted assignment SELECT has - then reads as badly unbalanced while
+        ## being perfectly correct. PostgreSQL itself is the check for everything else: the
+        ## orchestrator creates the routine and reports what it says.
+        reasons = []
+        masked, _ = self.scan_sql_text(body)
+
+        depth = 0
+        for char in masked:
+            if char == '(':
+                depth += 1
+            elif char == ')':
+                depth -= 1
+        if depth != 0:
+            reasons.append("the parentheses of the converted body do not close - it has "
+                           f"{abs(depth)} {'unclosed opening' if depth > 0 else 'closing'} "
+                           "parenthesis(es) too many, which means a statement was cut in half "
+                           "before it was converted")
+
+        return reasons
+
+    def trigger_needs_manual_adjustment(self, converted_code):
+        """
+        Whether a converted trigger carries a statement which has to be completed by hand.
+
+        The marker is written into the code itself so that it travels with it - the protocol
+        table keeps the code, and a reader of the code alone sees the same thing the migration
+        report says.
+        """
+        return bool(converted_code) and self.MANUAL_ADJUSTMENT_MARKER in converted_code
+
+    def trigger_manual_adjustment_details(self, converted_code):
+        """ The reasons the conversion left in the head of the code, for the migration report. """
+        if not self.trigger_needs_manual_adjustment(converted_code):
+            return None
+        reasons = re.findall(r'^\s+- (.*)$', converted_code, re.MULTILINE)
+        return '; '.join(reason.strip() for reason in reasons) or 'see the code of the trigger'
+
+    def convert_trigger_pseudo_tables_statement(self, statement, command_kind, trigger_name, refusals):
+        """
+        One statement of a trigger reading the pseudo tables, converted or marked for the reader.
+
+        The parsed conversion is the one which handles the shapes a trigger really uses - the
+        pseudo table beside a real table, both of them in one statement, the FROM clause of a
+        DELETE or an UPDATE. The textual conversion is kept behind it for a statement no parser
+        reads. A statement neither of them converts is kept exactly as it was written: it is
+        never replaced by one which does nothing, because the trigger would then be created and
+        counted as migrated while silently doing less than the trigger of the source did.
+        """
+        if not self.reads_pseudo_table(statement):
+            return statement
+
+        converted = self.convert_trigger_pseudo_tables_parsed(statement, trigger_name)
+        if converted is not None:
+            self.config_parser.print_log_message('DEBUG',
+                f"sybase_ase_connector: convert_trigger: Trigger {trigger_name}: pseudo tables converted: "
+                f"{' '.join(statement.split())} -> {' '.join(converted.split())}")
+            return converted
+
+        converted = self.convert_trigger_pseudo_tables(statement, command_kind, trigger_name, refusals)
+        if converted is not None:
+            self.config_parser.print_log_message('DEBUG',
+                f"sybase_ase_connector: convert_trigger: Trigger {trigger_name}: pseudo tables converted "
+                f"by the textual conversion: {' '.join(statement.split())} -> {' '.join(converted.split())}")
+            return converted
+
+        single_line = ' '.join(statement.split())
+        refusals.append(single_line)
+        self.config_parser.print_log_message('WARNING',
+            f"sybase_ase_connector: convert_trigger: Trigger {trigger_name}: the statement reads "
+            f"'inserted' or 'deleted' in a way a trigger per row of PostgreSQL cannot express. It is "
+            f"kept in the converted code as it was written and has to be completed by hand - the "
+            f"trigger is reported as failed and is NOT created in the target: {single_line}")
+
+        ## The statement stays exactly as the source wrote it, behind a comment naming what has
+        ## to be done. It does not become a statement which does nothing: the reader of the code
+        ## has to find the place, and PostgreSQL has to refuse it if anybody tries to create it.
+        return (f"/* {self.MANUAL_ADJUSTMENT_MARKER} - the statement below reads 'inserted' or "
+                f"'deleted' as a set of rows, which a trigger FOR EACH ROW cannot do. "
+                f"Rewrite it by hand before creating this trigger. */\n{statement}")
 
     def convert_trigger(self, settings):
         """
@@ -2832,7 +3408,7 @@ class SybaseASEConnector(DatabaseConnector):
         
         fake_code = self._apply_types_mapping(fake_code, types_mapping)
             
-        pseudo_table_converter = lambda statement, command_kind: self.convert_trigger_pseudo_tables(
+        pseudo_table_converter = lambda statement, command_kind: self.convert_trigger_pseudo_tables_statement(
             statement, command_kind, trigger_name, pseudo_table_refusals)
 
         parser = TsqlParser(fake_code, self.config_parser, view_converter=self.convert_view_code, settings=settings, functions_mapping_converter=self.apply_sql_functions_mapping, pseudo_table_converter=pseudo_table_converter)
@@ -2925,18 +3501,29 @@ class SybaseASEConnector(DatabaseConnector):
                 f"{', '.join(surviving)} after the conversion - PostgreSQL has no such table and will "
                 "refuse the trigger function. The statement reading it has to be written by hand.")
 
-        ## A statement which needed the whole set of rows of a pseudo table was replaced by one
-        ## which does nothing, and the trigger is not the trigger of the source until those
-        ## statements are written by hand. The reader of the target code has to find that out
-        ## from the code itself, so the refusals are collected at its head as well.
+        ## A body which does not hold together is not a conversion of anything - it is the
+        ## result of a statement the parser could not keep in one piece. PostgreSQL would refuse
+        ## it, so the trigger is reported the same way a refused statement is.
+        for reason in self.validate_generated_body(final_body):
+            pseudo_table_refusals.append(reason)
+            self.config_parser.print_log_message('WARNING',
+                f"sybase_ase_connector: convert_trigger: Trigger {trigger_name}: {reason}. The trigger "
+                "is NOT created in the target and is reported as failed.")
+
+        ## A statement which needs the whole set of rows of a pseudo table was kept as the source
+        ## wrote it and has to be rewritten by hand. The trigger is not the trigger of the source
+        ## until that is done, so it is not created in the target and is reported as failed - see
+        ## the marker at its head, which the orchestrator reads.
         if pseudo_table_refusals:
             self.config_parser.print_log_message('WARNING',
-                f"sybase_ase_connector: convert_trigger: Trigger {trigger_name} was converted "
-                f"with {len(pseudo_table_refusals)} statement(s) left out - it does not do what "
-                "the trigger of Sybase ASE did until they are completed by hand.")
-            final_body = ("/* INCOMPLETE CONVERSION - the following statement(s) of this trigger read the\n"
-                          "   rows of 'inserted' or 'deleted' as a set, which a trigger per row of PostgreSQL\n"
-                          "   cannot express, and were replaced by a statement which does nothing:\n"
+                f"sybase_ase_connector: convert_trigger: Trigger {trigger_name} has "
+                f"{len(pseudo_table_refusals)} statement(s) which could not be converted. The trigger "
+                "is NOT created in the target and is reported as failed - the statements are kept in "
+                "the stored code as they were written, for the migration by hand.")
+            final_body = (f"/* {self.MANUAL_ADJUSTMENT_MARKER} - this trigger is NOT usable as it stands.\n"
+                          "   The following statement(s) read the rows of 'inserted' or 'deleted' as a set,\n"
+                          "   which a trigger FOR EACH ROW of PostgreSQL cannot do. They were left in the code\n"
+                          "   below exactly as Sybase ASE wrote them and have to be rewritten by hand:\n"
                           + "".join(f"     - {refusal}\n" for refusal in pseudo_table_refusals)
                           + "*/\n" + final_body)
 

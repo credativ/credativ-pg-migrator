@@ -1962,6 +1962,15 @@ class TsqlParser:
         Current line ends with ')', and NEXT line is Empty OR starts with BEGIN/SELECT/INSERT/UPDATE/RETURN.
         Removes lines from body.
         Stores in self.if_commands (appends THEN).
+
+        KNOWN LIMITATION: the condition of an IF written over several lines and containing a
+        query - `if exists (select * <newline> from inserted ...)` - is not assembled correctly.
+        Pass 6 takes the lines of that query out of the body before this pass runs, and the line
+        based rule below then ends the condition at the first line which begins with one of the
+        statement keywords. The result is a routine whose body does not compile, which
+        validate_generated_body() of the connector catches so that the object is reported as
+        failed instead of being created. Assembling a statement out of its lines before the
+        statements are taken apart is the fix, and it is a change to the order of the passes.
         """
         self.log("Running Pass 7: Parse IF Commands")
         new_body_lines = []

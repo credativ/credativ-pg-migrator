@@ -968,6 +968,21 @@ class DatabaseConnector(ABC):
         """ The trigger source is passed in settings['trigger_sql'] - see planner.stdwf_prepare_tables """
         pass
 
+    def trigger_needs_manual_adjustment(self, converted_code):
+        """
+        Whether a converted trigger carries something the conversion could not express and which
+        has to be written by hand before the trigger does what the trigger of the source did.
+
+        Such a trigger is not created in the target and is reported as failed - see
+        orchestrator.stdwf_migrate_triggers(). A connector which cannot tell says no, which is
+        the behaviour of every connector that does not override this.
+        """
+        return False
+
+    def trigger_manual_adjustment_details(self, converted_code):
+        """ What has to be done by hand, for the migration report. """
+        return None
+
     @abstractmethod
     def fetch_funcproc_names(self, schema: str):
         """

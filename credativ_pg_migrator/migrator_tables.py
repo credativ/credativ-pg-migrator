@@ -2042,12 +2042,12 @@ class MigratorTables:
             'source_table_rows_limited': row[8],
             'target_table_rows': row[9],
             'chunk_number': row[10],
-            'chunk_size': row[10],
-            'migration_limitation': row[11],
-            'chunk_start': row[12],
-            'chunk_end': row[13],
-            'order_by_clause': row[14],
-            'inserted_rows': row[15],
+            'chunk_size': row[11],
+            'migration_limitation': row[12],
+            'chunk_start': row[13],
+            'chunk_end': row[14],
+            'order_by_clause': row[15],
+            'inserted_rows': row[16],
             'batch_size': row[17],
             'total_batches': row[18],
             'task_started': row[19],
@@ -2755,6 +2755,10 @@ class MigratorTables:
     def create_table_for_triggers(self):
         table_name = self.config_parser.get_protocol_name_triggers()
         self.protocol_connection.execute_query(self.drop_table_sql.format(protocol_schema=self.protocol_schema, table_name=table_name))
+            # -- The conversion could not express part of the trigger and left it in
+            # -- trigger_target_sql as the source wrote it. Such a trigger is NOT created in the
+            # -- target and is reported as failed - the stored code is there to be completed by
+            # -- hand, not to be executed.
         self.protocol_connection.execute_query(f"""
             CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
             (id SERIAL PRIMARY KEY,
@@ -2778,7 +2782,9 @@ class MigratorTables:
             success BOOLEAN,
             message TEXT,
             final_valid BOOLEAN,
-            final_valid_message TEXT
+            final_valid_message TEXT,
+            requires_manual_adjustment BOOLEAN DEFAULT FALSE,
+            manual_adjustment_details TEXT
             )
         """)
         self.config_parser.print_log_message('DEBUG', f"migrator_tables: create_table_for_triggers: Created protocol table {table_name} for triggers.")
@@ -2921,7 +2927,16 @@ class MigratorTables:
             'trigger_row_statement': row[11],
             'trigger_source_sql': row[12],
             'trigger_target_sql': row[13],
-            'trigger_comment': row[14]
+            'trigger_comment': row[14],
+            'task_created': row[15],
+            'task_started': row[16],
+            'task_completed': row[17],
+            'success': row[18],
+            'message': row[19],
+            'final_valid': row[20],
+            'final_valid_message': row[21],
+            'requires_manual_adjustment': bool(row[22]) if len(row) > 22 else False,
+            'manual_adjustment_details': row[23] if len(row) > 23 else None,
         }
 
     def decode_view_row(self, row):
@@ -3515,11 +3530,11 @@ class MigratorTables:
         table_name = self.config_parser.get_protocol_name_triggers()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema_name, source_table_name, source_table_id, target_schema_name, target_table_name, trigger_id, trigger_name, trigger_event, trigger_new, trigger_old, trigger_source_sql, trigger_target_sql, trigger_comment)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (source_schema_name, source_table_name, source_table_id, target_schema_name, target_table_name, trigger_id, trigger_name, trigger_event, trigger_new, trigger_old, trigger_source_sql, trigger_target_sql, trigger_comment, requires_manual_adjustment, manual_adjustment_details)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_table_id'), settings.get('target_schema_name'), settings.get('target_table_name'), settings.get('trigger_id'), settings.get('trigger_name'), settings.get('trigger_event'), settings.get('trigger_new'), settings.get('trigger_old'), settings.get('trigger_source_sql'), settings.get('trigger_target_sql'), settings.get('trigger_comment'))
+        params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_table_id'), settings.get('target_schema_name'), settings.get('target_table_name'), settings.get('trigger_id'), settings.get('trigger_name'), settings.get('trigger_event'), settings.get('trigger_new'), settings.get('trigger_old'), settings.get('trigger_source_sql'), settings.get('trigger_target_sql'), settings.get('trigger_comment'), bool(settings.get('requires_manual_adjustment')), settings.get('manual_adjustment_details'))
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)

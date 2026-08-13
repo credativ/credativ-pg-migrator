@@ -1047,6 +1047,21 @@ class Planner:
                         self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Source trigger code: {trigger_details['sql']}")
                         self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Converted trigger code: {converted_code}")
 
+                        ## The conversion could not express part of this trigger and left it in
+                        ## the code as the source wrote it. The code is stored so that it can be
+                        ## completed by hand, and the trigger is kept out of the target - a
+                        ## trigger which does less than the trigger of the source did must not be
+                        ## created and counted as migrated.
+                        requires_manual_adjustment = self.source_connection.trigger_needs_manual_adjustment(converted_code)
+                        manual_adjustment_details = None
+                        if requires_manual_adjustment:
+                            manual_adjustment_details = self.source_connection.trigger_manual_adjustment_details(converted_code)
+                            self.config_parser.print_log_message('WARNING',
+                                f"planner: stdwf_prepare_tables: Trigger {trigger_name} of table "
+                                f"{table_info['table_name']} could not be converted completely and will NOT be "
+                                f"created in the target - it is reported as failed and its code is stored for "
+                                f"the migration by hand: {manual_adjustment_details}")
+
                         self.migrator_tables.insert_trigger({
                             'source_schema_name': self.source_schema_name,
                             'source_table_name': table_info['table_name'],
@@ -1060,7 +1075,9 @@ class Planner:
                             'trigger_old': trigger_details['old'],
                             'trigger_source_sql': trigger_details['sql'],
                             'trigger_target_sql': converted_code,
-                            'trigger_comment': trigger_details['comment']
+                            'trigger_comment': trigger_details['comment'],
+                            'requires_manual_adjustment': requires_manual_adjustment,
+                            'manual_adjustment_details': manual_adjustment_details,
                         })
                     self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_tables: Trigger {trigger_details['name']} for table {table_info['table_name']}")
                 else:

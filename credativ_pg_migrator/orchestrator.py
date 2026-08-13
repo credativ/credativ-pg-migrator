@@ -2205,6 +2205,23 @@ class Orchestrator:
 
                             converted_code = trigger_detail['trigger_target_sql']
 
+                            ## Part of this trigger could not be converted and was left in the
+                            ## code as Sybase ASE wrote it. Creating it would put a trigger into
+                            ## the target which does less than the trigger of the source did,
+                            ## and the migration would report it as migrated - so it is not
+                            ## created and is reported as failed. The code stays in the protocol
+                            ## table, where it is waiting to be completed by hand.
+                            if trigger_detail.get('requires_manual_adjustment'):
+                                details = trigger_detail.get('manual_adjustment_details') or 'see the stored code'
+                                self.config_parser.print_log_message('ERROR',
+                                    f"orchestrator: run_migrate_triggers: Trigger {trigger_detail['trigger_name']} "
+                                    f"was NOT created - it could not be converted completely and has to be "
+                                    f"migrated by hand: {details}")
+                                self.migrator_tables.update_trigger_status({
+                                    'row_id': trigger_detail['id'], 'success': False,
+                                    'message': f'ERROR: manual adjustment required: {details}'})
+                                continue
+
                             self.config_parser.print_log_message( 'DEBUG', "orchestrator: run_migrate_triggers: Checking for remote objects substitution in triggers...")
                             rows = self.migrator_tables.get_records_remote_objects_substitution()
                             if rows:
@@ -2283,9 +2300,16 @@ class Orchestrator:
                 ('funcproc', 'Functions/Procedures', self.migrator_tables.fetch_all_funcprocs, self.migrator_tables.decode_funcproc_row,
                  lambda d: {'id': d['id'], 'schema': d['target_schema_name'], 'name': d['target_funcproc_name'],
                             'table': None, 'ddl': d['target_funcproc_sql'], 'label': d['target_funcproc_name']}),
+                ## The DDL of a trigger which needs manual adjustment is stored for the reader
+                ## and must never be executed, so it is not offered to the retry: 'ddl' is left
+                ## empty, which also keeps the trigger out of the valid/invalid counts - it was
+                ## already reported as failed by the migration itself.
                 ('trigger', 'Triggers', self.migrator_tables.fetch_all_triggers, self.migrator_tables.decode_trigger_row,
                  lambda d: {'id': d['id'], 'schema': d['target_schema_name'], 'name': d['trigger_name'],
-                            'table': d['target_table_name'], 'ddl': d['trigger_target_sql'], 'label': d['trigger_name']}),
+                            'table': d['target_table_name'],
+                            'ddl': None if d.get('requires_manual_adjustment') else d['trigger_target_sql'],
+                            'manual': d.get('requires_manual_adjustment'),
+                            'label': d['trigger_name']}),
             ]
 
             for object_type, group_label, fetch_fn, decode_fn, to_obj in object_groups:
@@ -2374,6 +2398,11 @@ class Orchestrator:
             final_valid = False
             if not message:
                 message = 'not found in target'
+        elif obj.get('manual'):
+            ## converted only in part - reported as failed by the migration, and the stored code
+            ## is there to be completed by hand, never to be executed
+            final_valid = False
+            message = 'not created - manual adjustment required'
         else:
             # Nothing was ever created for this object (no converted DDL) - do not count it.
             final_valid = None

@@ -18,7 +18,7 @@ import yaml
 from credativ_pg_migrator.constants import MigratorConstants
 import re
 import csv
-from datetime import datetime
+from datetime import datetime, date, timedelta
 import os
 import time
 from collections import Counter
@@ -1379,6 +1379,437 @@ class ConfigParser:
             return value
         return converted
 
+    ## the data types whose value is a date, a time or a timestamp, and which of the three
+    ## it is. Only a column of such a type gets a value rewritten from one of the formats
+    ## described below - a text column which happens to hold something looking like a date
+    ## is migrated exactly as it was exported.
+    TEMPORAL_DATA_TYPES = {
+        'DATE': 'DATE',
+        'TIME': 'TIME',
+        'TIMESTAMP': 'TIMESTAMP',
+        'TIMESTMP': 'TIMESTAMP',
+        'TIMESTAMPTZ': 'TIMESTAMP',
+        'DATETIME': 'TIMESTAMP',
+        'SMALLDATETIME': 'TIMESTAMP',
+    }
+
+    ## the order in which the three parts of a date can be written
+    DATE_ORDERS = ('MDY', 'DMY', 'YMD')
+
+    DATE_ORDER_DESCRIPTIONS = {
+        'MDY': 'MDY (month/day/year, Db2 *MDY and *USA)',
+        'DMY': 'DMY (day/month/year, Db2 *DMY and *EUR)',
+        'YMD': 'YMD (year/month/day, Db2 *YMD, *ISO and *JIS)',
+    }
+
+    ## the names Db2 uses for its date formats and the order behind each of them - the
+    ## value of data_export.date_format may be written in either of the two ways, with or
+    ## without the leading '*' of the CL command
+    DATE_FORMAT_ALIASES = {
+        'MDY': 'MDY', 'USA': 'MDY',
+        'DMY': 'DMY', 'EUR': 'DMY',
+        'YMD': 'YMD', 'ISO': 'YMD', 'JIS': 'YMD',
+    }
+
+    ## a two digit year is expanded the way Db2 for i does it - 40 to 99 is 1940 to 1999,
+    ## 00 to 39 is 2000 to 2039
+    TWO_DIGIT_YEAR_PIVOT = 40
+
+    ## a date and the time behind it, as Db2 writes them: the parts of the date are held
+    ## together by one separator (DATSEP - '/', '.', ',' or '-') or written without any,
+    ## the date and the time are separated by the '-' of the Db2 timestamp (or by a space
+    ## or the 'T' of the ISO notation), and the parts of the time by TIMSEP
+    TIMESTAMP_VALUE_PATTERN = re.compile(
+        r'^(?P<date>\d{1,4}(?:[/.,-]\d{1,4}){1,2}|\d{8}|\d{6})'
+        r'(?:[-T ](?P<time>\d{1,2}[.:,]\d{2}(?:[.:,]\d{2})?(?:\.\d+)?(?:\s*[AaPp]\.?[Mm]\.?)?'
+        r'|\d{6}(?:\.\d+)?))?$')
+
+    ## the date alone, with its parts held together by one and the same separator
+    SEPARATED_DATE_PATTERN = re.compile(
+        r'^(?P<first>\d{1,4})(?P<separator>[/.,-])(?P<second>\d{1,3})'
+        r'(?:(?P=separator)(?P<third>\d{1,4}))?$')
+
+    ## the time alone. PostgreSQL reads the colon only, so '06.00.00' of the Db2 *ISO and
+    ## *EUR formats is refused with 'invalid input syntax for type time'
+    TIME_VALUE_PATTERN = re.compile(
+        r'^(?P<hour>\d{1,2})(?P<separator>[.:,])(?P<minute>\d{2})'
+        r'(?:(?P=separator)(?P<second>\d{2}))?(?:\.(?P<fraction>\d+))?'
+        r'(?:\s*(?P<meridiem>[AaPp])\.?[Mm]\.?)?$')
+
+    COMPACT_TIME_PATTERN = re.compile(
+        r'^(?P<hour>\d{2})(?P<minute>\d{2})(?P<second>\d{2})(?:\.(?P<fraction>\d+))?$')
+
+    ## the zone of a TIMESTAMP WITH TIME ZONE, which exists on Db2 for z/OS and is written
+    ## behind the value ('2022-01-11-12.00.00.000000 +01:00')
+    ZONE_SUFFIX_PATTERN = re.compile(r'^(?P<value>.+?)\s*(?P<zone>[+-]\d{2}:?\d{2})$')
+
+    ## the shape of the one value which is rewritten in a column whose type is not known -
+    ## tested first, so that the columns of a file are not taken apart field by field
+    TIMESTAMP_HINT_PATTERN = re.compile(r'^\d{4}-\d{2}-\d{2}[-T ]\d')
+
+    def temporal_column_kind(self, data_type):
+        """
+        'DATE', 'TIME' or 'TIMESTAMP' for a column holding such a value, None for every
+        other column. A type written with its length or with a suffix - 'TIMESTAMP(6)',
+        'TIMESTAMP(6) WITH TIME ZONE' of Db2 for z/OS - is recognized by its first word.
+        """
+        base_type = (data_type or '').upper().split('(')[0].strip()
+        kind = self.TEMPORAL_DATA_TYPES.get(base_type)
+        if kind is None and base_type:
+            ## a type written without its length but with a suffix, as Db2 for z/OS writes
+            ## 'TIMESTAMP WITH TIME ZONE'
+            kind = self.TEMPORAL_DATA_TYPES.get(base_type.split()[0])
+        return kind
+
+    def date_format_to_order(self, date_format):
+        """
+        The order of the parts of a date behind the value of data_export.date_format.
+        Returns None when nothing was configured, and raises when the value is not one of
+        the names Db2 uses - a name nobody recognizes must not be read as 'no format'.
+        """
+        if date_format is None or str(date_format).strip() == '':
+            return None
+        name = str(date_format).strip().upper().lstrip('*')
+        if name not in self.DATE_FORMAT_ALIASES:
+            raise ValueError(
+                f"data_export.date_format: '{date_format}' is not a known date format - "
+                f"use one of {', '.join(sorted(self.DATE_FORMAT_ALIASES.keys()))} "
+                f"(the Db2 names *MDY, *DMY, *YMD, *USA, *EUR, *ISO and *JIS are accepted as well).")
+        return self.DATE_FORMAT_ALIASES[name]
+
+    def _expand_year(self, year_text):
+        """A four digit year as it is, a two digit one through the window Db2 for i uses."""
+        if len(year_text) == 4:
+            return int(year_text)
+        if len(year_text) <= 2:
+            year = int(year_text)
+            return 1900 + year if year >= self.TWO_DIGIT_YEAR_PIVOT else 2000 + year
+        return None
+
+    def _date_value_shape(self, date_text):
+        """
+        How the date is written, without deciding yet what its parts mean:
+        ('parts', (first, second, third)) for a date written with a separator,
+        ('julian', (year, day_of_year)) for the *JUL format of Db2 for i (22/123),
+        ('compact', digits) for a date written without any separator.
+        None when the text is not a date at all.
+        """
+        match = self.SEPARATED_DATE_PATTERN.match(date_text)
+        if match:
+            third = match.group('third')
+            if third is None:
+                ## two parts only - a year and the day inside it, the *JUL format
+                if len(match.group('second')) == 3:
+                    return ('julian', (match.group('first'), match.group('second')))
+                return None
+            return ('parts', (match.group('first'), match.group('second'), third))
+        if re.fullmatch(r'\d{8}|\d{6}', date_text):
+            return ('compact', date_text)
+        return None
+
+    def _date_from_shape(self, shape, order):
+        """
+        The date the value stands for when its parts are read in the given order, as
+        'YYYY-MM-DD'. None when they cannot be read that way - '01/13/22' is not a date
+        with 13 as its month, which is what tells DMY and MDY apart.
+        """
+        shape_name, payload = shape
+        if shape_name == 'julian':
+            ## a Julian date carries the year first and the day of the year behind it -
+            ## the order of a three part date does not apply to it
+            year = self._expand_year(payload[0])
+            day_of_year = int(payload[1])
+            if year is None or day_of_year < 1 or day_of_year > 366:
+                return None
+            try:
+                converted = date(year, 1, 1) + timedelta(days=day_of_year - 1)
+            except ValueError:
+                return None
+            if converted.year != year:
+                return None
+            return f"{converted.year:04d}-{converted.month:02d}-{converted.day:02d}"
+
+        if shape_name == 'compact':
+            digits = payload
+            if order == 'YMD':
+                parts = (digits[:4], digits[4:6], digits[6:]) if len(digits) == 8 else (digits[:2], digits[2:4], digits[4:])
+            else:
+                parts = (digits[:2], digits[2:4], digits[4:])
+        else:
+            parts = payload
+
+        first, second, third = parts
+        if order == 'YMD':
+            year_text, month_text, day_text = first, second, third
+        elif order == 'MDY':
+            month_text, day_text, year_text = first, second, third
+        elif order == 'DMY':
+            day_text, month_text, year_text = first, second, third
+        else:
+            return None
+
+        if len(month_text) > 2 or len(day_text) > 2:
+            return None
+        year = self._expand_year(year_text)
+        if year is None:
+            return None
+        try:
+            converted = date(year, int(month_text), int(day_text))
+        except ValueError:
+            return None
+        return f"{converted.year:04d}-{converted.month:02d}-{converted.day:02d}"
+
+    def _parse_temporal_date(self, date_text, date_order=None):
+        """
+        Returns (date, status) with status 'ok', 'ambiguous' or 'unparsable'.
+
+        Without a known order every order is tried: a date which all of them write the same
+        way ('2022-01-04', a Julian date) needs no decision, one which they write
+        differently ('01/04/22' - the 4th of January, the 1st of April or the 22nd of
+        April) is reported as ambiguous, so that the caller works the order out from the
+        whole file instead of guessing here.
+        """
+        shape = self._date_value_shape(date_text)
+        if shape is None:
+            return None, 'unparsable'
+        if date_order is not None:
+            converted = self._date_from_shape(shape, date_order)
+            return (converted, 'ok') if converted is not None else (None, 'unparsable')
+
+        readings = {}
+        for order in self.DATE_ORDERS:
+            converted = self._date_from_shape(shape, order)
+            if converted is not None:
+                readings[order] = converted
+        if not readings:
+            return None, 'unparsable'
+        if len(set(readings.values())) == 1:
+            return next(iter(readings.values())), 'ok'
+        return None, 'ambiguous'
+
+    def _parse_temporal_time(self, time_text):
+        """'06.00.00', '060000' or '06:00 AM' as PostgreSQL reads them - '06:00:00'."""
+        match = self.TIME_VALUE_PATTERN.match(time_text) or self.COMPACT_TIME_PATTERN.match(time_text)
+        if not match:
+            return None
+        groups = match.groupdict()
+        hour = int(groups['hour'])
+        minute = int(groups['minute'])
+        second = int(groups['second']) if groups.get('second') else 0
+        meridiem = groups.get('meridiem')
+        if meridiem:
+            ## the *USA format of Db2 - 12 AM is midnight, 12 PM is noon
+            if hour < 1 or hour > 12:
+                return None
+            hour = hour % 12
+            if meridiem.upper() == 'P':
+                hour += 12
+        if hour > 24 or minute > 59 or second > 59:
+            return None
+        if hour == 24 and (minute or second):
+            return None
+        fraction = groups.get('fraction')
+        return f"{hour:02d}:{minute:02d}:{second:02d}" + (f".{fraction}" if fraction else '')
+
+    def _split_temporal_value(self, text):
+        """
+        Takes a value apart into its date, its time and its zone. Returns None when it is
+        not written as a date with an optional time behind it.
+        """
+        zone = None
+        remainder = text
+        zone_match = self.ZONE_SUFFIX_PATTERN.match(text)
+        if zone_match:
+            remainder = zone_match.group('value')
+            zone = zone_match.group('zone')
+
+        match = self.TIMESTAMP_VALUE_PATTERN.match(remainder)
+        if match is None and zone is not None:
+            ## what looked like a zone belongs to the value itself
+            zone = None
+            match = self.TIMESTAMP_VALUE_PATTERN.match(text)
+        if match is None:
+            return None
+        if zone is not None and len(zone) == 5:
+            zone = f"{zone[:3]}:{zone[3:]}"
+        return match.group('date'), match.group('time'), zone
+
+    def convert_temporal_value(self, value, kind=None, date_order=None):
+        """
+        Writes a date, a time or a timestamp of an export the way PostgreSQL reads it.
+
+        Db2 writes a timestamp as 'YYYY-MM-DD-HH.MM.SS.NNNNNN' and, on z/OS, a TIMESTAMP
+        WITH TIME ZONE with the offset behind it; a date and a time follow the format the
+        export was made with - DATFMT/DATSEP and TIMFMT/TIMSEP of CPYTOIMPF on Db2 for i -
+        so a date can arrive as '01/04/22' and a time as '06.00.00'. PostgreSQL refuses all
+        of them ('invalid input syntax for type timestamp: "01/04/22-06.00.00"').
+
+        'kind' is what the column holds ('DATE', 'TIME', 'TIMESTAMP'), or None when the
+        type of the column is not known - only a timestamp written with the ISO date Db2
+        always uses for a four digit year is rewritten then, because anything else could be
+        the text the column really holds.
+
+        Returns (value, status), status being 'converted', 'unchanged' (nothing to do),
+        'ambiguous' (the order of the parts of the date has to be decided first) or
+        'unparsable'. A value which cannot be read is returned as it was - the target
+        reports it, which is better than a value silently invented here.
+        """
+        if value is None:
+            return value, 'unchanged'
+        text = value.strip()
+        if not text:
+            return value, 'unchanged'
+
+        if kind is None and not self.TIMESTAMP_HINT_PATTERN.match(text):
+            ## the type of the column is not known and the value is not the timestamp Db2
+            ## writes with an ISO date - it stays what it is
+            return value, 'unchanged'
+
+        if kind == 'TIME':
+            converted = self._parse_temporal_time(text)
+            if converted is None:
+                return value, 'unparsable'
+            return (converted, 'unchanged' if converted == value else 'converted')
+
+        split_value = self._split_temporal_value(text)
+        if split_value is None:
+            return value, 'unchanged' if kind is None else 'unparsable'
+        date_text, time_text, zone = split_value
+
+        if kind is None:
+            ## the type of the column is not known - only the unmistakable Db2 timestamp
+            if not time_text or not re.fullmatch(r'\d{4}-\d{2}-\d{2}', date_text):
+                return value, 'unchanged'
+        if kind == 'DATE' and (time_text or zone):
+            return value, 'unparsable'
+        if zone and not time_text:
+            return value, 'unparsable'
+
+        converted_date, status = self._parse_temporal_date(date_text, date_order)
+        if status != 'ok':
+            return value, status
+
+        converted_time = None
+        if time_text:
+            converted_time = self._parse_temporal_time(time_text)
+            if converted_time is None:
+                return value, 'unparsable'
+
+        converted = converted_date
+        if converted_time:
+            converted += f" {converted_time}"
+        if zone:
+            converted += zone
+        return (converted, 'unchanged' if converted == value else 'converted')
+
+    def date_orders_of_value(self, value, kind):
+        """
+        The orders in which the date of this value can be read, for the detection below.
+        None when the value is not a date - such a value says nothing about the format and
+        is left to the target, which reports it.
+        """
+        if value is None:
+            return None
+        text = value.strip()
+        if not text:
+            return None
+        split_value = self._split_temporal_value(text)
+        if split_value is None:
+            return None
+        date_text, time_text, zone = split_value
+        if kind == 'DATE' and (time_text or zone):
+            return None
+        shape = self._date_value_shape(date_text)
+        if shape is None:
+            return None
+        orders = {order for order in self.DATE_ORDERS if self._date_from_shape(shape, order) is not None}
+        return orders or None
+
+    def detect_csv_date_orders(self, input_csv_data_file, character_set, csv_delimiter,
+                               reader_quoting, column_kinds, column_names,
+                               source_table_name, skip_header=False):
+        """
+        Works out in which order the parts of the dates of a CSV export are written.
+
+        '01/04/22' is the 4th of January in one export and the 1st of April in the next -
+        Db2 for i writes a date the way the DATFMT of the export said, and the file does
+        not record which one that was. The file is therefore read once and every order
+        which cannot write one of the values of a column is dropped: '01/13/22' can only be
+        MDY, '13/01/22' only DMY, '2022-01-04' only YMD. A column for which more than one
+        order survives is reported instead of guessed - a wrong guess does not fail, it
+        migrates a different date without a single error.
+
+        Returns {column index: order} for the columns whose dates need the decision.
+        """
+        candidates = {}
+        samples = {}
+        examined = {}
+        deciding = {}
+        rows_read = 0
+        processing_start_time = datetime.now()
+
+        with open(input_csv_data_file, 'r', encoding=character_set, errors='replace', newline='') as infile:
+            if reader_quoting is None:
+                reader = csv.reader(infile, delimiter=csv_delimiter)
+            else:
+                reader = csv.reader(infile, delimiter=csv_delimiter, quoting=reader_quoting)
+            for row in reader:
+                rows_read += 1
+                if skip_header and rows_read == 1:
+                    continue
+                ## a row of another width cannot be assigned to the columns of the table
+                if len(row) != len(column_kinds):
+                    continue
+                for column_index, kind in enumerate(column_kinds):
+                    if kind is None or kind == 'TIME':
+                        continue
+                    orders = self.date_orders_of_value(row[column_index], kind)
+                    if orders is None:
+                        continue
+                    field = row[column_index].strip()
+                    remaining = candidates.get(column_index, set(self.DATE_ORDERS))
+                    narrowed = remaining & orders
+                    examined[column_index] = examined.get(column_index, 0) + 1
+                    column_samples = samples.setdefault(column_index, [])
+                    if len(column_samples) < 3 and field not in column_samples:
+                        column_samples.append(field)
+                    if narrowed != remaining and len(narrowed) == 1:
+                        deciding[column_index] = field
+                    candidates[column_index] = narrowed
+
+        resolved = {}
+        for column_index, remaining in candidates.items():
+            column_name = column_names[column_index] if column_index < len(column_names) else f"#{column_index + 1}"
+            sample_values = ', '.join(samples.get(column_index, []))
+            if len(remaining) == 1:
+                order = next(iter(remaining))
+                resolved[column_index] = order
+                decided_by = f", e.g. {deciding[column_index]}" if column_index in deciding else ''
+                self.print_log_message('INFO',
+                    f"config_parser: detect_csv_date_orders: Table {source_table_name}: the dates of column {column_name} "
+                    f"are written as {self.DATE_ORDER_DESCRIPTIONS[order]} - decided by {examined.get(column_index, 0)} "
+                    f"value(s) of the file{decided_by}.")
+            elif not remaining:
+                raise ValueError(
+                    f"Table {source_table_name}: the dates of column {column_name} of file {input_csv_data_file} "
+                    f"are not all written in one and the same order - no order of the parts fits every value "
+                    f"(values seen: {sample_values}). State the format the export used with "
+                    f"data_export.date_format, or correct the file.")
+            else:
+                raise ValueError(
+                    f"Table {source_table_name}: the dates of column {column_name} of file {input_csv_data_file} "
+                    f"can be read as {' or '.join(self.DATE_ORDER_DESCRIPTIONS[order] for order in sorted(remaining))} "
+                    f"and every value of the column fits each of them (values seen: {sample_values}). The file does "
+                    f"not say which format the export used, and reading them the wrong way migrates different dates "
+                    f"without any error - state the format with data_export.date_format, globally for the source or "
+                    f"in table_settings for this table alone.")
+
+        self.print_log_message('DEBUG',
+            f"config_parser: detect_csv_date_orders: Table {source_table_name}: {rows_read} row(s) of "
+            f"{input_csv_data_file} read for the date format of {len(candidates)} column(s) - "
+            f"processing time: {datetime.now() - processing_start_time}")
+        return resolved
+
     def convert_csv_to_utf8(self, data_source_settings, source_columns=None, target_columns=None):
         part_name = 'convert_csv_to_utf8 start'
         self.print_log_message('DEBUG3', f"config_parser: convert_csv_to_utf8: ({part_name}): Starting conversion of CSV file '{data_source_settings.get('file_name')}' to UTF-8.")
@@ -1399,6 +1830,9 @@ class ConfigParser:
 
             character_set = data_source_settings.get('format_options', {}).get('character_set', 'UTF-8')
             csv_delimiter = data_source_settings.get('format_options', {}).get('delimiter', ',')
+            csv_header = data_source_settings.get('format_options', {}).get('header', False)
+            configured_date_order = self.date_format_to_order(
+                data_source_settings.get('format_options', {}).get('date_format', None))
             null_symbol = data_source_settings.get('null_symbol', '\\N')
 
             processing_start_time = datetime.now()
@@ -1430,27 +1864,41 @@ class ConfigParser:
                     except ValueError:
                         scale = None
 
-                    expected_types.append({'type': dtype, 'scale': scale})
+                    column_name = col.get('column_name') or col.get('source_column_name') or ''
+                    expected_types.append({'type': dtype, 'scale': scale, 'name': column_name})
             else:
                 expected_types = []
 
-            # DB2 timestamp format: YYYY-MM-DD-HH.MM.SS.mmmmmm
-            ts_pattern = re.compile(r'^(\d{4}-\d{2}-\d{2})-(\d{2})\.(\d{2})\.(\d{2})(?:\.(\d+))?$')
+            ## the columns holding a date, a time or a timestamp - only their values are
+            ## rewritten from the format of the export, plus the unmistakable Db2 timestamp
+            ## in every other column (see convert_temporal_value)
+            column_kinds = [self.temporal_column_kind(column['type']) for column in expected_types]
+            column_names = [column['name'] for column in expected_types]
+            ## the order of the parts of a date is worked out from the whole file, but only
+            ## when a value which really needs the decision shows up - a file written with
+            ## ISO dates does not pay for the extra pass
+            column_date_orders = {}
+            date_orders_detected = False
+            converted_temporal_values = 0
+            unreadable_temporal_values = {}
+            row_width_reported = False
+
+            ## An unquoted empty field of a CSV file is a NULL, a quoted empty one ("")
+            ## is an empty string. The default reader returns '' for both, so a NULL of
+            ## the source arrived in the target as an empty string and every column
+            ## which is not text refused it: 'invalid input syntax for type integer: ""'.
+            ## QUOTE_NOTNULL keeps the two apart - it returns None for the unquoted one.
+            reader_quoting = getattr(csv, 'QUOTE_NOTNULL', None)
+            if reader_quoting is None:
+                ## Python before 3.12 cannot tell them apart - an empty field is read as
+                ## an empty string and stays one
+                self.print_log_message('WARNING',
+                    "config_parser: convert_csv_to_utf8: This Python cannot distinguish an unquoted empty CSV field from a quoted one (csv.QUOTE_NOTNULL needs Python 3.12). An empty field is migrated as an empty string, which a column that is not text refuses - Python 3.12 or newer is needed for such a file.")
 
             with open(input_csv_data_file, 'r', encoding=character_set, errors='replace', newline='') as infile, \
                  open(output_csv_data_file, 'w', encoding='utf-8', newline='') as outfile:
 
-                ## An unquoted empty field of a CSV file is a NULL, a quoted empty one ("")
-                ## is an empty string. The default reader returns '' for both, so a NULL of
-                ## the source arrived in the target as an empty string and every column
-                ## which is not text refused it: 'invalid input syntax for type integer: ""'.
-                ## QUOTE_NOTNULL keeps the two apart - it returns None for the unquoted one.
-                reader_quoting = getattr(csv, 'QUOTE_NOTNULL', None)
                 if reader_quoting is None:
-                    ## Python before 3.12 cannot tell them apart - an empty field is read as
-                    ## an empty string and stays one
-                    self.print_log_message('WARNING',
-                        "config_parser: convert_csv_to_utf8: This Python cannot distinguish an unquoted empty CSV field from a quoted one (csv.QUOTE_NOTNULL needs Python 3.12). An empty field is migrated as an empty string, which a column that is not text refuses - Python 3.12 or newer is needed for such a file.")
                     reader = csv.reader(infile, delimiter=csv_delimiter)
                 else:
                     reader = csv.reader(infile, delimiter=csv_delimiter, quoting=reader_quoting)
@@ -1503,6 +1951,17 @@ class ConfigParser:
                         self.print_log_message('DEBUG3', f"config_parser: convert_csv_to_utf8: Table {source_table_name}: Expected types: {types_str}")
                         self.print_log_message('DEBUG3', f"config_parser: convert_csv_to_utf8: Table {source_table_name}: First row fields: {row}")
 
+                    ## the type of a column can only be assigned to a field when the row
+                    ## has exactly as many fields as the table has columns
+                    row_types_aligned = bool(expected_types) and len(row) == len(expected_types)
+                    if expected_types and not row_types_aligned and not row_width_reported:
+                        row_width_reported = True
+                        self.print_log_message('WARNING',
+                            f"config_parser: convert_csv_to_utf8: Table {source_table_name}: row {counter+1} of "
+                            f"{input_csv_data_file} has {len(row)} field(s) while the table has {len(expected_types)} "
+                            f"column(s) - the values of such a row are migrated without knowing the type of their "
+                            f"column, so a date or a time written in a format of the source is not recognized.")
+
                     for column_index, field in enumerate(row):
                         ## None is the unquoted empty field, which stands for NULL, and
                         ## '(null)' is what some exporters of the source write for it
@@ -1517,24 +1976,60 @@ class ConfigParser:
                                         self.print_log_message('DEBUG3', f"config_parser: convert_csv_to_utf8: Table {source_table_name}: Row {counter+1}, column {column_index+1}: number '{field}' written with a decimal comma converted to '{converted_number}'")
                                     processed_row.append(converted_number)
                                     continue
-                            match = ts_pattern.match(field)
-                            if match:
-                                date_part = match.group(1)
-                                hour = match.group(2)
-                                minute = match.group(3)
-                                second = match.group(4)
-                                frac = match.group(5)
-                                if frac:
-                                    processed_row.append(f"{date_part} {hour}:{minute}:{second}.{frac}")
-                                else:
-                                    processed_row.append(f"{date_part} {hour}:{minute}:{second}")
+                            column_kind = column_kinds[column_index] if row_types_aligned else None
+                            date_order = column_date_orders.get(column_index, configured_date_order)
+                            converted_value, status = self.convert_temporal_value(field, column_kind, date_order)
+
+                            if status == 'ambiguous' and not date_orders_detected:
+                                ## the value is a date whose parts can be read in more than
+                                ## one order - which one the export used is decided from all
+                                ## the values of the file, once, not from this one value
+                                self.print_log_message('INFO',
+                                    f"config_parser: convert_csv_to_utf8: Table {source_table_name}: value '{field.strip()}' "
+                                    f"of column {column_names[column_index] or column_index+1} is a date whose format the "
+                                    f"file does not state - reading {input_csv_data_file} once to work it out.")
+                                column_date_orders = self.detect_csv_date_orders(
+                                    input_csv_data_file, character_set, csv_delimiter, reader_quoting,
+                                    column_kinds, column_names, source_table_name, csv_header)
+                                date_orders_detected = True
+                                date_order = column_date_orders.get(column_index, configured_date_order)
+                                converted_value, status = self.convert_temporal_value(field, column_kind, date_order)
+
+                            if status == 'converted':
+                                if converted_temporal_values < 5:
+                                    self.print_log_message('DEBUG3', f"config_parser: convert_csv_to_utf8: Table {source_table_name}: Row {counter+1}, column {column_index+1}: {column_kind or 'timestamp'} value '{field}' converted to '{converted_value}'")
+                                converted_temporal_values += 1
+                                processed_row.append(converted_value)
                             else:
+                                ## a value which cannot be read is migrated as it was
+                                ## exported - the target reports it, and nothing is invented
+                                if status == 'unparsable' and field.strip():
+                                    unreadable = unreadable_temporal_values.setdefault(column_index, [0, field.strip()])
+                                    unreadable[0] += 1
                                 processed_row.append(field)
 
                     writer.writerow(processed_row)
                     counter += 1
 
             self.print_log_message('INFO', f"config_parser: convert_csv_to_utf8: Processed {counter} lines from {input_csv_data_file} and wrote to {output_csv_data_file} - source file size: {source_file_size} - processing time: {datetime.now() - processing_start_time}")
+            if converted_temporal_values:
+                self.print_log_message('INFO',
+                    f"config_parser: convert_csv_to_utf8: Table {source_table_name}: {converted_temporal_values} "
+                    f"date, time and timestamp value(s) of {input_csv_data_file} were rewritten into the notation "
+                    f"PostgreSQL reads.")
+            for column_index, (unreadable_count, unreadable_sample) in unreadable_temporal_values.items():
+                ## such a value is migrated as it stands and the target refuses it - said
+                ## here as well, because the reason is usually the date format: a column
+                ## whose values were read in the order stated by data_export.date_format,
+                ## while the export wrote them in another one
+                date_order = column_date_orders.get(column_index, configured_date_order)
+                read_as = f" The dates of the column are read as {self.DATE_ORDER_DESCRIPTIONS[date_order]}." if date_order else ''
+                self.print_log_message('WARNING',
+                    f"config_parser: convert_csv_to_utf8: Table {source_table_name}: {unreadable_count} value(s) of "
+                    f"column {column_names[column_index] or column_index+1}, which holds a "
+                    f"{column_kinds[column_index]}, are not written in a date or time format this migrator knows "
+                    f"(e.g. '{unreadable_sample}') - they are migrated as they were exported and PostgreSQL will "
+                    f"refuse them.{read_as}")
 
             data_source_settings['converted_file_name'] = output_csv_data_file
 

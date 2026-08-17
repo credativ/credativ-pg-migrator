@@ -177,6 +177,10 @@ IBM DB2 is supported via two fundamentally different connectors, heavily dependi
 - **Migrated**: tables and data (from CSV), primary keys, indexes (including expression-based ones), foreign keys with their `ON DELETE` / `ON UPDATE` rules, CHECK constraints, identity columns, sequences, aliases, views (including `WITH CHECK OPTION` views, recursive CTEs, `LISTAGG`, `TABLE (SELECT ...)` and materialized query tables), functions and procedures (SQL routines converted to PL/pgSQL), triggers and DB2 global variables (mapped to PostgreSQL session settings).
 - **Not migrated**: table and column comments — `COMMENT ON` / `LABEL ON` statements are parsed out of the DDL and stored in the protocol tables, but they are not yet returned as comments, so none reaches the target. Generated/computed columns are not handled. External routines (COBOL, Assembler) are reported and skipped, because their load module is not part of the DDL.
 - **Not available offline**: pre-migration analysis (there is no live source to measure) and the random-sample / LOB-size validation checks. Row counts and table checksums do work.
+- **Dates and timestamps in the CSV files**: DB2 writes a timestamp as `2022-01-11-12.00.00.000000` and a
+  `TIMESTAMP WITH TIME ZONE` — which exists on z/OS and nowhere else — with the offset behind it
+  (`2022-01-11-12.00.00.000000 +01:00`). PostgreSQL reads neither of them; both are rewritten during the
+  conversion of the file (section 4.2.4).
 
 #### 4.2.3 DB2 for i (IBM i / AS/400)
 - **Mode**: DDL Parsing and File-Based Integration (Offline Connectivity), like z/OS
@@ -185,6 +189,58 @@ IBM DB2 is supported via two fundamentally different connectors, heavily dependi
 - **Migrated**: tables and data, primary keys, indexes, foreign keys with their referential rules, CHECK constraints, identity columns, sequences, aliases, views, triggers and global variables.
 - **Not migrated**: functions and procedures (the routine code converter exists, but `fetch_funcproc_names` is a placeholder, so nothing is fetched), table/column comments (parsed but not surfaced — same as z/OS), and generated/computed columns.
 - **Not available offline**: pre-migration analysis and all validation checks.
+- **Dates and timestamps in the CSV files**: an unload written with `CPYTOIMPF` carries the dates and times
+  in the format of the job (`DATFMT`, `DATSEP`, `TIMFMT`, `TIMSEP`), so a date can arrive as `01/04/22` and a
+  time as `06.00.00` — see section 4.2.4, including `data_export.date_format` for the case in which the file
+  itself does not say what the order of the parts is.
+
+#### 4.2.4 Dates, times and timestamps of DB2 CSV exports
+
+Both offline DB2 connectors read their data from CSV files written on the source, and the values in them
+follow the notation of DB2, which PostgreSQL refuses (`invalid input syntax for type timestamp:
+"01/04/22-06.00.00"`). Every CSV file is therefore converted before it is loaded, and the date, time and
+timestamp columns of the table — the connector knows their types from the DDL — are rewritten:
+
+| written by DB2 | migrated as |
+| --- | --- |
+| `2022-01-11-12.00.00.000000` | `2022-01-11 12:00:00.000000` |
+| `2022-01-11-12.00.00.000000 +01:00` (z/OS `TIMESTAMP WITH TIME ZONE`) | `2022-01-11 12:00:00.000000+01:00` |
+| `01/04/22-06.00.00` (DB2 for i, `DATFMT(*MDY) DATSEP('/')`) | `2022-01-04 06:00:00` |
+| `01.04.2022`, `04/01/2022`, `20220104` | `2022-04-01`, `2022-04-01`, `2022-01-04` |
+| `22/123` (`DATFMT(*JUL)`) | `2022-05-03` |
+| `06.00.00`, `060000`, `06:00 PM` | `06:00:00`, `06:00:00`, `18:00:00` |
+
+A timestamp with more than six fractional digits — `TIMESTAMP(9)` and `TIMESTAMP(12)` exist on DB2 —
+is passed on as it was written; PostgreSQL stores microseconds and rounds the rest away.
+
+**The order of the parts of a date.** A file exported with `DATFMT(*MDY)`, `*DMY` or `*YMD` carries a
+two-digit year and no statement of which part is which: `01/04/22` is the 4th of January, the 1st of April
+or the 22nd of April, and reading it the wrong way migrates a different date *without any error*. The
+migrator therefore reads the file once and drops every order which cannot write one of the values of the
+column — `01/13/22` can only be `*MDY`, `13/01/22` only `*DMY` — and logs which order it decided on and
+which value decided it. This costs one extra pass over the file, and only for a file which really contains
+such a date; a file written with ISO dates never pays for it.
+
+If more than one order fits **every** value of a column, the migration of that table stops with a message
+naming the column and the values, instead of guessing. State the format of the export and run it again:
+
+```yaml
+source:
+  data_export:
+    # *MDY / *USA, *DMY / *EUR, *YMD / *ISO / *JIS - the DATFMT of the export.
+    # With or without the leading '*'. Applies to every date of every file.
+    date_format: "*MDY"
+
+table_settings:
+  - table_name: "INVENTORY_MOVEMENTS"
+    data_export:
+      date_format: "MDY"     # for this table alone
+```
+
+A two-digit year is expanded the way DB2 for i does it: `40`–`99` is 1940–1999, `00`–`39` is 2000–2039.
+A value which cannot be read as a date or a time at all is migrated exactly as it was exported, counted and
+reported as a warning — PostgreSQL then refuses it, which is the honest outcome; nothing is invented here.
+
 
 ### 4.3 Oracle
 - **Mode**: Native Connection

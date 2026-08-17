@@ -31,6 +31,7 @@ This document provides a simplified overview and hierarchy of the configuration 
 - `data_export`: Global settings for using external export files (CSV, UNL, SQL) instead of direct DB connection.
   - `on_missing_data_file`: Action on missing file (`error`, `skip`, `source_table_name`).
   - `format`, `file`, `delimiter`, `header`, `character_set`, `conversion_path`, `clean`: Format and processing settings.
+  - `date_format`: Order of the parts of a date in the files (`MDY`, `DMY`, `YMD`, also as `USA`, `EUR`, `ISO`, `JIS`, with or without the leading `*`). Only needed when the values of a column fit more than one order - it is otherwise worked out from the file itself.
   - `big_files_split`: Settings for parallel chunk processing of big files (`enabled`, `threshold`, `chunk_size`, `workers`).
 
 ### Target Database (`target`)
@@ -56,7 +57,7 @@ This document provides a simplified overview and hierarchy of the configuration 
 - Supported overrides include:
   - `table_name`, `table_schema`, `batch_size`, `chunk_size`
   - Operation flags (e.g. `migrate_data`, `migrate_indexes`).
-  - `data_export`: Table-specific export file properties (format, delimiter, `lob_columns`, conversion parameters).
+  - `data_export`: Table-specific export file properties (format, delimiter, `date_format`, `lob_columns`, conversion parameters).
     - `mapping_rules`: *Mapping Workflow Only.* Defines `target_schema`, `target_table`, and `column_mapping` linking specific source columns to target columns.
 
 ## 6. Inclusion / Exclusion Filters

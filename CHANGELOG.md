@@ -1,6 +1,19 @@
 # Changelog
 
-## 0.16.0 - 2026.08.12
+## 0.16.0 - 2026.08.17
+
+- 2026.08.17
+
+  - Fix - IBM Db2 for i and Db2 for z/OS Connectors: A date, a time or a timestamp of a CSV export reached the target in the notation of Db2, and the import of the whole table failed on the first row: `invalid input syntax for type timestamp: "01/04/22-06.00.00"` for `INVENTORY_MOVEMENTS` of the Db2 for i test migration. Only one shape was converted before - the timestamp `YYYY-MM-DD-HH.MM.SS.NNNNNN` - and that one was applied to every field of the file, whatever the column held. The conversion of a CSV file now knows which columns hold a date, a time or a timestamp (the connectors read the types out of the DDL) and rewrites their values into the notation PostgreSQL reads:
+    - the date and the time of the Db2 formats and their separators - `01/04/22` and `01.04.2022` of `DATFMT(*MDY)` / `*DMY` / `*YMD` / `*USA` / `*EUR` with any `DATSEP`, `22/123` of `*JUL`, `20220104` and `010422` written with `DATSEP(*NONE)`, `06.00.00`, `06:00:00`, `060000` and `06:00 PM` of `TIMFMT`/`TIMSEP`;
+    - the `TIMESTAMP WITH TIME ZONE` of Db2 for z/OS, which exists on z/OS and on neither of the other two Db2 - `2022-01-11-12.00.00.000000 +01:00` becomes `2022-01-11 12:00:00.000000+01:00`. `PAYMENTS` of the z/OS test migration is written that way and failed the same manner;
+    - a timestamp with more digits than PostgreSQL stores - `TIMESTAMP(9)` and `TIMESTAMP(12)` of the test migrations - is passed on as it was written and rounded to microseconds by the target, which is the only thing that can happen to it.
+    - A column whose type is not known - a file whose rows have another number of fields than the table has columns - keeps the old behaviour: the unmistakable Db2 timestamp with its ISO date is still converted, everything else is migrated as it was exported. The row width is reported once as a warning, because it is the reason a date of such a file cannot be recognized.
+
+  - Fix - Core Migrator: A date of an export written with a two digit year does not say which of its parts is the day and which the month - `01/04/22` is the 4th of January with `DATFMT(*MDY)` and the 1st of April with `*DMY`, and the file records neither. Reading it the wrong way does not fail, it migrates a different date, which is why the migrator does not guess: it reads the file once and drops every order which cannot write one of the values of the column (`01/13/22` can only be `*MDY`, `13/01/22` only `*DMY`, `2022-01-04` only `*YMD`), then logs the order it decided on and the value which decided it. The extra pass is made only when a value which really needs the decision shows up - a file written with ISO dates never pays for it.
+    - When more than one order fits every value of a column, the migration of that table stops with a message naming the column, the values seen and the setting to state the format with - `data_export.date_format` (`MDY`, `DMY`, `YMD`, also as the Db2 names `USA`, `EUR`, `ISO`, `JIS`, with or without the leading `*`), globally for the source or in `table_settings` for one table. A name which is not one of them stops the run at its start, while it can still be corrected, instead of at the first date of the first file.
+    - A two digit year is expanded the way Db2 for i does it: 40 to 99 is 1940 to 1999, 00 to 39 is 2000 to 2039.
+    - A value which cannot be read as a date or a time at all is migrated exactly as it was exported and counted; the count, the column and one of the values are reported as a warning at the end of the conversion, together with the order the dates of the column were read in. The target then refuses the value, which is the honest outcome - a date invented here would be migrated without anybody noticing.
 
 - 2026.08.13
 

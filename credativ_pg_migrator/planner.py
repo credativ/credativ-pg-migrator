@@ -2051,7 +2051,17 @@ class Planner:
                     if table_data_export and 'character_set' in table_data_export:
                         character_set = table_data_export['character_set']
 
-                    self.config_parser.print_log_message('DEBUG3',f"planner: stdwf_prepare_data_sources: Table {table_info['source_table_name']} - file_name: {table_file_name}, converted_file_name: {converted_file_name}, data_file_found: {data_file_found}, format: {format}, delimiter: {delimiter}, header: {header}, character_set: {character_set}")
+                    ## the order of the parts of a date in the file - the file itself does
+                    ## not state it, and a wrong reading of '01/04/22' migrates a different
+                    ## date. When nothing is configured it is worked out from the values.
+                    date_format = data_export.get('date_format', None)
+                    if table_data_export and 'date_format' in table_data_export:
+                        date_format = table_data_export['date_format']
+                    ## a name which is not one of the known formats stops the run here,
+                    ## while it can still be corrected, instead of at the first date
+                    self.config_parser.date_format_to_order(date_format)
+
+                    self.config_parser.print_log_message('DEBUG3',f"planner: stdwf_prepare_data_sources: Table {table_info['source_table_name']} - file_name: {table_file_name}, converted_file_name: {converted_file_name}, data_file_found: {data_file_found}, format: {format}, delimiter: {delimiter}, header: {header}, character_set: {character_set}, date_format: {date_format}")
                     data_source = {
                         'source_schema_name': table_info['source_schema_name'],
                         'source_table_name': table_info['source_table_name'],
@@ -2068,6 +2078,7 @@ class Planner:
                             'delimiter': delimiter,
                             'header': header,
                             'character_set': character_set,
+                            'date_format': date_format,
                         }
                     }
                     self.migrator_tables.insert_data_source(data_source)

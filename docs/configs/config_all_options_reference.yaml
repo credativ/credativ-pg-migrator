@@ -213,6 +213,19 @@ source:
     delimiter: ","
     header: true  # if CSV files contain header line with column names, default is false
     character_set: "ISO-8859-1"  # character set of the CSV files, default is UTF-8, value must match existing char set names
+
+    # order of the parts of a date in the data files - the DATFMT the export was made with
+    #   MDY / USA  - 01/04/22 is the 4th of January
+    #   DMY / EUR  - 01/04/22 is the 1st of April
+    #   YMD / ISO / JIS - 01/04/22 is the 22nd of April
+    # the leading "*" of the Db2 names may be written as well ("*MDY")
+    # if not specified, the order is worked out from the values of the file itself; a column
+    # whose values fit more than one order stops the migration of that table with a message
+    # naming the column - reading such a date the wrong way migrates a different date without
+    # any error, so it is never guessed
+    # a two digit year is expanded the way Db2 for i does it: 40-99 is 1940-1999, 00-39 is 2000-2039
+    date_format: "*MDY"
+
     conversion_path: "/path/to/data/files/conversion"  # directory where converted CSV files will be stored, if not specified, default is the same as for the data files
     # if char set is not utf-8 conversion_path is recommended, but not mandatory - if missing, converted file will be placed in the same directory as original CSV file
 
@@ -454,6 +467,8 @@ table_settings:
       # header is used only for reading from already supplied CSV files
       # CSV files converted from UNL files are always without header
       header: true  # if CSV files contain header line with column names, default is false
+      # order of the parts of a date in the file of this table - see source.data_export.date_format
+      date_format: "*MDY"
       # conversion_path is used only for UNL files, where converted CSV files will be stored
       conversion_path: "/path/to/data/files/conversion"  # directory where converted CSV files will be stored, if not specified, default is the same as for the data files
       # force specific columns to be treated as LOB columns during the data import

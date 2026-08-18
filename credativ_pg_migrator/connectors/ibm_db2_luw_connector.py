@@ -942,8 +942,10 @@ class IbmDb2LuwConnector(DatabaseConnector):
         when_clause = replace_aliases(when_clause)
         body = replace_aliases(body)
 
-        # Replace DB2 VARCHAR(expr) scalar function conversion
-        body = re.sub(r'(?i)\bVARCHAR\s*\(\s*(COUNT\s*\([^()]*\)|[a-zA-Z0-9_.]+\s*[+*/|-]\s*[^()]+|[a-zA-Z0-9_.]+\.[a-zA-Z0-9_.]+|[a-zA-Z_][a-zA-Z0-9_]*\([^()]*\))\s*\)', r'CAST(\1 AS VARCHAR)', body)
+        # DB2 casting scalar functions - VARCHAR(expr), INTEGER(expr), DECIMAL(expr, p, s) ...
+        # have no counterparts in PostgreSQL and must be rewritten into CAST expressions
+        body = self.convert_db2_cast_functions(body)
+        when_clause = self.convert_db2_cast_functions(when_clause)
 
         # Replace CURRENT DATE / TIMESTAMP
         body = re.sub(r'\bCURRENT\s+DATE\b', 'CURRENT_DATE', body, flags=re.IGNORECASE)

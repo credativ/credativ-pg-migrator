@@ -1,6 +1,15 @@
 # Changelog
 
-## 0.16.0 - 2026.08.17
+## 0.16.0 - 2026.08.18
+
+- 2026.08.18
+
+  - Fix - IBM Db2 LUW, Db2 for i and Db2 for z/OS Connectors: A trigger calling one of the casting scalar functions of Db2 was migrated as it was written and refused by the target - `VALUES ('ORDERS', 'INSERT', VARCHAR(n.order_id), ...)` of `TRG_ORDERS_AI` reached PostgreSQL as `VARCHAR(NEW."ORDER_ID")` and failed with `syntax error at or near "NEW"`, because `VARCHAR` names a data type there and not a function. The conversion of these calls was attempted with a regular expression listing the shapes of an argument it knew - a qualified name, a `COUNT(...)`, a function call, an arithmetic expression - and everything else, a plain column among them, was left standing; the LUW variant did not even accept the quoted identifiers the alias replacement had produced just above it, which is why the simplest trigger of the test migration failed. The whole family of casting functions is converted now, by reading the call with matching parentheses instead of matching a shape of its argument, so that any expression, nested call or string literal inside is handled:
+    - `VARCHAR(expr)`, `CHAR(expr)` and `CHARACTER(expr)` become `CAST(expr AS VARCHAR)`, with the length kept when it is given (`VARCHAR(expr, 30)`); `CHAR` becomes `VARCHAR` rather than the `CHAR` of PostgreSQL, which is `CHAR(1)` when written without a length and would cut the value to one character.
+    - `SMALLINT`, `INTEGER`, `INT`, `BIGINT`, `REAL`, `DOUBLE`, `FLOAT`, `DECIMAL`, `DEC`, `NUMERIC`, `DATE`, `TIME` and `TIMESTAMP` are converted the same way, including the precision and scale of `DECIMAL(expr, 12, 2)`.
+    - A type specification is not a call and stays untouched - `DECLARE v VARCHAR(30)`, `CAST(x AS DECIMAL(10,2))` and `TIMESTAMP(6)` are recognized by their arguments being integer literals only.
+    - A form which cannot be expressed as a plain `CAST` - `CHAR(hire_date, ISO)`, where the second argument names a date format - is deliberately left as it is and fails on the target, instead of being converted into something with another meaning.
+    - The conversion is applied to the `WHEN` condition of the trigger as well, which was not covered before, and lives in the common connector base class, so all three Db2 connectors use the same one.
 
 - 2026.08.17
 

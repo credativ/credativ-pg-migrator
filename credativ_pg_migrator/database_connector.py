@@ -323,6 +323,161 @@ class DatabaseConnector(ABC):
         sql_str = re.sub(r'(?i)\bCAST\s*\((.*?)\s+AS\s+CHAR(?:ACTER)?\s*\)', r'CAST(\1 AS VARCHAR)', sql_str)
         return sql_str
 
+    def convert_db2_cast_functions(self, sql_str: str) -> str:
+        """
+        DB2 provides casting scalar functions named after data types - VARCHAR(expr),
+        INTEGER(expr), DECIMAL(expr, p, s), TIMESTAMP(expr) etc.
+        PostgreSQL has no equivalents for most of them, so they are rewritten
+        into standard CAST expressions.
+
+        Type specifications like VARCHAR(30) or DECIMAL(10,2) - used in DECLARE
+        statements, CAST clauses or parameter lists - contain only integer literals
+        and are left untouched. Forms which cannot be expressed as a plain CAST
+        (for example CHAR(date_column, ISO)) are also left untouched, so that they
+        are reported as errors instead of being converted incorrectly.
+        """
+        if not sql_str:
+            return sql_str
+        import re
+
+        cast_functions = {
+            'VARCHAR': 'VARCHAR',
+            'CHARACTER': 'VARCHAR',
+            'CHAR': 'VARCHAR',
+            'SMALLINT': 'SMALLINT',
+            'INTEGER': 'INTEGER',
+            'INT': 'INTEGER',
+            'BIGINT': 'BIGINT',
+            'DECIMAL': 'NUMERIC',
+            'DEC': 'NUMERIC',
+            'NUMERIC': 'NUMERIC',
+            'DOUBLE': 'DOUBLE PRECISION',
+            'FLOAT': 'DOUBLE PRECISION',
+            'REAL': 'REAL',
+            'DATE': 'DATE',
+            'TIME': 'TIME',
+            'TIMESTAMP': 'TIMESTAMP',
+        }
+        length_types = ('VARCHAR',)
+        function_pattern = re.compile(
+            r'(' + '|'.join(sorted(cast_functions.keys(), key=len, reverse=True)) + r')\s*\(',
+            re.IGNORECASE)
+        integer_pattern = re.compile(r'^\d+$')
+
+        def find_closing_parenthesis(text: str, open_index: int):
+            depth = 0
+            in_single = False
+            in_double = False
+            index = open_index
+            while index < len(text):
+                char = text[index]
+                if char == "'" and not in_double:
+                    in_single = not in_single
+                elif char == '"' and not in_single:
+                    in_double = not in_double
+                elif not in_single and not in_double:
+                    if char == '(':
+                        depth += 1
+                    elif char == ')':
+                        depth -= 1
+                        if depth == 0:
+                            return index
+                index += 1
+            return None
+
+        def split_arguments(text: str):
+            arguments = []
+            current = []
+            depth = 0
+            in_single = False
+            in_double = False
+            for char in text:
+                if char == "'" and not in_double:
+                    in_single = not in_single
+                elif char == '"' and not in_single:
+                    in_double = not in_double
+                elif not in_single and not in_double:
+                    if char == '(':
+                        depth += 1
+                    elif char == ')':
+                        depth -= 1
+                    elif char == ',' and depth == 0:
+                        arguments.append(''.join(current).strip())
+                        current = []
+                        continue
+                current.append(char)
+            arguments.append(''.join(current).strip())
+            return arguments
+
+        result = []
+        position = 0
+        text_length = len(sql_str)
+        in_single = False
+        in_double = False
+        while position < text_length:
+            char = sql_str[position]
+            if char == "'" and not in_double:
+                in_single = not in_single
+                result.append(char)
+                position += 1
+                continue
+            if char == '"' and not in_single:
+                in_double = not in_double
+                result.append(char)
+                position += 1
+                continue
+            if in_single or in_double:
+                result.append(char)
+                position += 1
+                continue
+
+            match = function_pattern.match(sql_str, position)
+            if not match:
+                result.append(char)
+                position += 1
+                continue
+            # part of a longer identifier - not a function call
+            if position > 0 and (sql_str[position - 1].isalnum() or sql_str[position - 1] in '_."'):
+                result.append(char)
+                position += 1
+                continue
+            # data type in an existing CAST expression - CAST(x AS DECIMAL(10,2))
+            if re.search(r'(?i)\bAS\s+$', sql_str[:position]):
+                result.append(char)
+                position += 1
+                continue
+
+            open_index = match.end() - 1
+            close_index = find_closing_parenthesis(sql_str, open_index)
+            if close_index is None:
+                result.append(char)
+                position += 1
+                continue
+
+            source_type = match.group(1).upper()
+            target_type = cast_functions[source_type]
+            # nested casting functions have to be converted as well
+            arguments_text = self.convert_db2_cast_functions(sql_str[open_index + 1:close_index])
+            arguments = split_arguments(arguments_text)
+            replacement = None
+            if arguments and arguments[0] and not all(integer_pattern.match(argument) for argument in arguments):
+                if len(arguments) == 1:
+                    replacement = f'CAST({arguments[0]} AS {target_type})'
+                elif (target_type in length_types and len(arguments) == 2
+                      and integer_pattern.match(arguments[1])):
+                    replacement = f'CAST({arguments[0]} AS {target_type}({arguments[1]}))'
+                elif (target_type == 'NUMERIC' and len(arguments) in (2, 3)
+                      and all(integer_pattern.match(argument) for argument in arguments[1:])):
+                    replacement = f'CAST({arguments[0]} AS NUMERIC({", ".join(arguments[1:])}))'
+
+            if replacement is None:
+                # type specification or unsupported form - keep the original wording
+                replacement = sql_str[position:open_index + 1] + arguments_text + ')'
+            result.append(replacement)
+            position = close_index + 1
+
+        return ''.join(result)
+
     def convert_grouping_boolean_in_case(self, sql_str: str) -> str:
         if not sql_str:
             return sql_str

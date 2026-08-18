@@ -525,7 +525,7 @@ Two properties of SQLite shape this connector and explain most of its behavior:
 
 **1. There is no data dictionary.** SQLite exposes columns, indexes and foreign keys through `PRAGMA` statements, but a number of things exist *only* inside the original `CREATE` statements kept in `sqlite_master`: CHECK constraints, generated-column expressions, the `AUTOINCREMENT` marker, the expressions of a functional index, and the `WHERE` condition of a partial index. The connector therefore contains a small **DDL parser** that reads those statements back. The parser is quote- and parenthesis-aware, so commas inside string defaults (`DEFAULT 'a,b'`), nested function calls and all four identifier quoting styles SQLite accepts (`"name"`, `` `name` ``, `[name]`, bare) are handled correctly, and `--` / `/* */` comments are stripped first.
 
-**2. SQLite is dynamically typed.** A column has a *declared type* and a *type affinity*, but any row may store any storage class — a column declared `TEXT` can hold an integer, and a column declared `DATE` can hold an ISO string, a Unix timestamp or a Julian day number. The connector uses the **declared type to choose the PostgreSQL column type**, and then **coerces every value to what the target column actually expects** while the data is migrated (see 4.7.6). A column declared with no type at all is migrated as `TEXT`.
+**2. SQLite is dynamically typed.** A column has a *declared type* and a *type affinity*, but neither is enforced — any row may store any storage class. The affinity only decides how a value is converted when it *can* be converted without loss (a well-formed number written into an `INTEGER` column becomes an integer); everything else is stored exactly as it was given, so a column declared `INTEGER` really does hold the text `'N/A'`, and a column declared `DATE` can hold an ISO string, a Unix timestamp or a Julian day number. The connector therefore chooses the PostgreSQL column type from the **declared type together with the storage classes the column really contains** (see 4.7.5a), and then **coerces every value to what the target column actually expects** while the data is migrated (see 4.7.6). A column declared with no type at all is migrated as `TEXT`.
 
 #### 4.7.4 Current status (SQLite as source)
 
@@ -569,6 +569,26 @@ SQLite accepts *any* declared type, so the mapping deliberately covers the type 
 
 Any of these can be overridden per table/column with the usual `data_types_substitution` rules.
 
+#### 4.7.5a Type selection from the stored values
+
+Because the declared type is not a guarantee, choosing the target type from it alone produces a table the data does not fit into — `VALUES (4, 'unconvertible', 'N/A', …)` into a `BIGINT` column ends the **whole batch** with `invalid input syntax for type bigint: "N/A"`. Before the target table is created, the connector therefore reads the table **once** and checks, per column, whether the values really stored can be represented in the type the declaration was mapped to. A column that fails the check is **widened**, and the reason is reported as a `WARNING` naming the table, the column and what was found:
+
+| Declared type maps to | What is looked for | Migrated as |
+|---|---|---|
+| `SMALLINT` / `INTEGER` / `BIGINT` | text which is not an integer literal | `TEXT` |
+| `SMALLINT` / `INTEGER` / `BIGINT` | a value stored as `REAL` with a fractional part (PostgreSQL would silently *round* it into an integer column) | `NUMERIC` |
+| `SMALLINT` / `INTEGER` | an integer outside the range of the target type (a `TINYINT` column of SQLite holds 8-byte integers) | `BIGINT` |
+| `NUMERIC` / `REAL` / `DOUBLE PRECISION` | text which is not a number | `TEXT` |
+| `BOOLEAN` | text which is not one of the recognized boolean words | `TEXT` |
+| `DATE` / `TIME` / `TIMESTAMP` | text which SQLite's own `date()` / `time()` / `datetime()` cannot read as a point in time | `TEXT` |
+| any of the above | a value stored as `BLOB` | `TEXT` |
+
+The check is deliberately conservative: text which *is* a well-formed number stays in a numeric column, `0`/`1` and `true`/`yes`/`on`/… stay in a `BOOLEAN` column, and ISO dates stay in a `DATE` column, so a database whose data matches its declarations is migrated exactly as before. A `BLOB` column is never widened — every storage class can be stored in `BYTEA` without loss.
+
+Widening is the honest outcome, not a repair: the value is migrated as it stands instead of being rounded, truncated or invented. A date written in a format SQLite cannot read (`'05/01/2024'`, which is the 4th of January or the 1st of April depending on the convention) is migrated as text for exactly that reason — the migrator does not guess which one it is. Use `data_types_substitution` to force a different type for such a column, and convert the values on the target afterwards.
+
+The check costs one sequential scan of each table, evaluated as a single query with one aggregate expression per test. Columns whose target is `TEXT`, `VARCHAR`, `CHAR` or `BYTEA` need no test at all, identity columns (the SQLite rowid) are skipped, and empty tables are never widened.
+
 #### 4.7.6 Value conversion during data migration
 
 Because the declared type is not a guarantee, values are converted on the way out based on the **target** column type:
@@ -578,8 +598,8 @@ Because the declared type is not a guarantee, values are converted on the way ou
 | `BOOLEAN` | `0`/`1` and the usual text forms (`t`/`true`/`yes`/`on`, `f`/`false`/`no`/`off`) become a Python `bool`; `NULL` stays `NULL` |
 | `TIMESTAMP` / `DATE` / `TIME` | ISO text is passed through for PostgreSQL to parse; an `INTEGER` is interpreted as a **Unix timestamp** and a `REAL` as a **Julian day number**, both converted to a `datetime` |
 | `BYTEA` | `BLOB` values are passed through as bytes; text is encoded as UTF-8 |
-| `TEXT` / `VARCHAR` / `CHAR` / `JSONB` / `UUID` | non-string storage classes (e.g. an integer stored in a `TEXT` column) are stringified; a `BLOB` is decoded with replacement characters |
-| numeric types | passed through unchanged; a value stored as text is handed to PostgreSQL, which casts it |
+| `TEXT` / `VARCHAR` / `CHAR` / `JSONB` / `UUID` | non-string storage classes (e.g. an integer stored in a `TEXT` column) are stringified; a `BLOB` which is valid UTF-8 is decoded, one which is not is written as the SQLite blob literal `X'00FF…'` — decoding real binary content with replacement characters would destroy it silently |
+| numeric types | passed through unchanged; a value stored as text is handed to PostgreSQL, which casts it (a column holding text which is *not* a number is not migrated as a numeric type in the first place — see 4.7.5a) |
 
 When `migration.migrate_lob_values` is `false`, `BLOB`-backed columns are migrated as `NULL`.
 

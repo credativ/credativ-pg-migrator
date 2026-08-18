@@ -25,9 +25,10 @@ SQLite is a file based, dynamically typed database. Two properties shape this co
    generated column expressions and AUTOINCREMENT markers out of the stored DDL.
 
 2. Column types are only "declared types" with a type affinity - a column declared TEXT
-   may well contain integers. The declared type is used to choose the PostgreSQL type,
-   and the values themselves are coerced during the data migration to whatever the target
-   column actually expects.
+   may well contain integers, and one declared INTEGER may contain the text 'N/A'. The
+   PostgreSQL type is therefore chosen from the declared type together with the storage
+   classes the column really holds (see _widened_types_by_stored_values), and the values
+   themselves are coerced during the data migration to whatever the target column expects.
 
 SQLite has no schemas. The 'main' database is used as the schema; a name configured in
 the config file is honoured only when it matches an attached database.
@@ -77,6 +78,8 @@ class SQLiteConnector(DatabaseConnector):
         self.source_db_config = self.config_parser.get_source_config()
         # Cache of parsed CREATE TABLE statements, keyed by (schema, table)
         self._ddl_cache = {}
+        # Cache of the type conflicts found in the stored values, keyed by (schema, table)
+        self._stored_values_cache = {}
         # The connectivity has to be resolved here and not only in connect(): with
         # connectivity 'ddl' the planner skips the connection check and the pre-migration
         # analysis entirely and goes straight to parse_ddl_files(), so an unusable value
@@ -1087,6 +1090,25 @@ class SQLiteConnector(DatabaseConnector):
                     'is_hidden_column': 'YES' if hidden == 1 else 'NO',
                 }
 
+            # The declared type is only a hint in SQLite - the values really stored decide
+            # whether the type it was mapped to can hold them (see _widened_types_by_stored_values).
+            target_db_type = settings.get('target_db_type') or self.config_parser.get_target_db_type()
+            widened_types = self._widened_types_by_stored_values(table_schema, table_name, columns, target_db_type)
+            types_mapping = self.get_types_mapping({'target_db_type': target_db_type}) if widened_types else {}
+            for order_num, (widened_type, reasons) in widened_types.items():
+                column = columns[order_num]
+                declared_type = column['column_type'] or '(no type)'
+                category = self._target_type_category(types_mapping.get(str(column['data_type']).upper(), ''))
+                found = ', '.join(self._describe_stored_value_conflict(reason, category, declared_type) for reason in reasons)
+                self.config_parser.print_log_message('WARNING',
+                    f"sqlite_connector: fetch_table_columns: Column {table_schema}.{table_name}.{column['column_name']} is declared {declared_type}, "
+                    f"but holds {found} - it is migrated as {widened_type}, otherwise the data of the whole table would be rejected by the target. "
+                    f"Use 'data_types_substitution' to force another type.")
+                column['data_type'] = widened_type
+                column['character_maximum_length'] = None
+                column['numeric_precision'] = None
+                column['numeric_scale'] = None
+
             self.disconnect()
             return columns
         except Exception as e:
@@ -1198,6 +1220,178 @@ class SQLiteConnector(DatabaseConnector):
     def _is_lob_type(self, declared_type) -> bool:
         upper_type = str(declared_type or '').upper()
         return any(token in upper_type for token in ('BLOB', 'CLOB', 'BINARY', 'IMAGE'))
+
+    ## ---------------------------------------------------------------- type affinity
+
+    # A SQLite column has a declared type and a type affinity, but neither of them is
+    # enforced. The affinity only says how a value is converted when it CAN be converted
+    # without loss - a well formed number written into an INTEGER column becomes an
+    # integer - while everything else is stored exactly as it was given. A column declared
+    # INTEGER therefore really holds the text 'N/A', and handing that to a PostgreSQL
+    # BIGINT column ends the whole batch with
+    # 'invalid input syntax for type bigint: "N/A"'. The declared type alone cannot decide
+    # the target type; the storage classes the column really contains have to decide with it.
+
+    # The text forms _coerce_boolean() understands. A BOOLEAN column holding one of them
+    # stays BOOLEAN, any other text makes it TEXT.
+    _BOOLEAN_TEXT_VALUES = ('1', 't', 'true', 'y', 'yes', 'on', '0', 'f', 'false', 'n', 'no', 'off', '')
+
+    # Value range of the PostgreSQL integer types - a SQLite INTEGER is always 8 bytes,
+    # so a column declared TINYINT can hold a number the target SMALLINT rejects.
+    _INTEGER_RANGES = {
+        'SMALLINT': (-32768, 32767),
+        'INTEGER': (-2147483648, 2147483647),
+    }
+
+    # How many aggregate expressions are sent in one probe query - SQLITE_MAX_COLUMN
+    # defaults to 2000, and a very wide table would otherwise exceed it.
+    _PROBE_CHUNK_SIZE = 400
+
+    @staticmethod
+    def _target_type_category(target_type):
+        """ The kind of value the mapped PostgreSQL type accepts. """
+        upper = str(target_type or '').upper()
+        if upper in ('SMALLINT', 'INTEGER', 'BIGINT'):
+            return 'integer'
+        if upper.startswith('NUMERIC') or upper.startswith('DECIMAL'):
+            return 'numeric'
+        if upper in ('REAL', 'DOUBLE PRECISION', 'FLOAT'):
+            return 'real'
+        if upper in ('BOOLEAN', 'BOOL'):
+            return 'boolean'
+        if upper.startswith('TIMESTAMP'):
+            return 'timestamp'
+        if upper == 'DATE':
+            return 'date'
+        if upper.startswith('TIME'):
+            return 'time'
+        # TEXT, VARCHAR, BYTEA, JSONB, UUID, XML - every storage class can be migrated
+        # into these, the value conversion of the data migration takes care of it.
+        return 'other'
+
+    def _stored_value_checks(self, quoted_column, category, target_type):
+        """
+        The SQL expressions which report - per storage class - whether a column holds a
+        value the target type cannot accept. Each returns 1 when at least one such value
+        exists. They are all evaluated in a single pass over the table.
+        """
+        checks = []
+        # A BLOB never fits a numeric, boolean or date/time column
+        checks.append(('blob', f"typeof({quoted_column}) = 'blob'"))
+
+        if category == 'integer':
+            # Text left in a column with integer affinity is text SQLite could not read as
+            # a number - a well formed integer literal would have been converted on INSERT.
+            checks.append(('text', f"typeof({quoted_column}) = 'text' AND "
+                                   f"(trim({quoted_column}) GLOB '*[^0-9+-]*' OR NOT trim({quoted_column}) GLOB '*[0-9]*')"))
+            # 1.5 in a column declared INTEGER is stored as REAL and rejected by an integer target
+            checks.append(('real', f"typeof({quoted_column}) = 'real' AND {quoted_column} <> cast({quoted_column} AS INTEGER)"))
+            value_range = self._INTEGER_RANGES.get(str(target_type).upper())
+            if value_range:
+                checks.append(('range', f"typeof({quoted_column}) = 'integer' AND "
+                                        f"({quoted_column} < {value_range[0]} OR {quoted_column} > {value_range[1]})"))
+        elif category in ('numeric', 'real'):
+            checks.append(('text', f"typeof({quoted_column}) = 'text' AND "
+                                   f"(trim({quoted_column}) GLOB '*[^0-9eE+.-]*' OR NOT trim({quoted_column}) GLOB '*[0-9]*')"))
+        elif category == 'boolean':
+            values = ', '.join(f"'{value}'" for value in self._BOOLEAN_TEXT_VALUES)
+            checks.append(('text', f"typeof({quoted_column}) = 'text' AND lower(trim({quoted_column})) NOT IN ({values})"))
+        elif category in ('date', 'time', 'timestamp'):
+            # date() / time() / datetime() return NULL for anything they cannot read as a
+            # point in time - exactly the values PostgreSQL would refuse as well.
+            function = {'date': 'date', 'time': 'time', 'timestamp': 'datetime'}[category]
+            checks.append(('text', f"typeof({quoted_column}) = 'text' AND {function}({quoted_column}) IS NULL"))
+        return checks
+
+    def _widened_types_by_stored_values(self, table_schema, table_name, columns, target_db_type):
+        """
+        Find the columns whose values do not fit the type their declaration was mapped to
+        and return {order_num: (widened type, reasons)}. The whole table is read once, with
+        one aggregate expression per check, so this costs a single sequential scan.
+        """
+        cache_key = (str(table_schema).lower(), str(table_name).lower())
+        if cache_key in self._stored_values_cache:
+            return self._stored_values_cache[cache_key]
+
+        widened = {}
+        try:
+            types_mapping = self.get_types_mapping({'target_db_type': target_db_type})
+        except Exception:
+            # Only PostgreSQL is supported as a target, but the mapping must never be the
+            # reason the column list cannot be read.
+            self._stored_values_cache[cache_key] = widened
+            return widened
+
+        probes = []
+        categories = {}
+        for order_num, column in columns.items():
+            if column.get('is_hidden_column') == 'YES':
+                continue
+            # An INTEGER PRIMARY KEY / AUTOINCREMENT column is the rowid, SQLite itself
+            # guarantees it holds nothing but integers.
+            if column.get('is_identity') == 'YES':
+                continue
+            declared_type = str(column.get('data_type') or '').upper()
+            target_type = types_mapping.get(declared_type, '')
+            category = self._target_type_category(target_type)
+            if category == 'other':
+                continue
+            categories[order_num] = category
+            for reason, expression in self._stored_value_checks(self._quote_ident(column['column_name']), category, target_type):
+                probes.append((order_num, reason, expression))
+
+        if not probes:
+            self._stored_values_cache[cache_key] = widened
+            return widened
+
+        conflicts = {}
+        qualified_name = self._qualified_name(table_schema, table_name)
+        try:
+            cursor = self.connection.cursor()
+            for offset in range(0, len(probes), self._PROBE_CHUNK_SIZE):
+                chunk = probes[offset:offset + self._PROBE_CHUNK_SIZE]
+                expressions = ', '.join(f"max({expression})" for _, _, expression in chunk)
+                cursor.execute(f"SELECT {expressions} FROM {qualified_name}")
+                row = cursor.fetchone()
+                for (order_num, reason, _), found in zip(chunk, row or []):
+                    if found:
+                        conflicts.setdefault(order_num, []).append(reason)
+            cursor.close()
+        except sqlite3.Error as e:
+            # Without the probe the declared types are used as before - the migration is
+            # not stopped by it, but the reason a later INSERT may fail has to be visible.
+            self.config_parser.print_log_message('WARNING', f"sqlite_connector: fetch_table_columns: Could not check the stored values of {table_schema}.{table_name} against the declared column types ({e}) - the declared types are used unchanged.")
+            self._stored_values_cache[cache_key] = widened
+            return widened
+
+        for order_num, reasons in conflicts.items():
+            if 'blob' in reasons or 'text' in reasons:
+                # TEXT holds every storage class SQLite knows
+                new_type = 'TEXT'
+            elif 'real' in reasons:
+                # NUMERIC keeps both the integers and the fractional values exactly
+                new_type = 'NUMERIC'
+            elif 'range' in reasons:
+                new_type = 'BIGINT'
+            else:
+                continue
+            widened[order_num] = (new_type, reasons)
+
+        self._stored_values_cache[cache_key] = widened
+        return widened
+
+    def _describe_stored_value_conflict(self, reason, category, declared_type):
+        if reason == 'blob':
+            return 'values stored as BLOB'
+        if reason == 'real':
+            return 'values stored as REAL, which an integer column cannot hold'
+        if reason == 'range':
+            return f'integer values outside the range of the target type of {declared_type}'
+        if category == 'boolean':
+            return 'text values which are not a boolean'
+        if category in ('date', 'time', 'timestamp'):
+            return 'text values which are not a valid date or time'
+        return 'text values which are not a number'
 
     ## ---------------------------------------------------------------- indexes
 
@@ -1835,8 +2029,14 @@ class SQLiteConnector(DatabaseConnector):
             return self._coerce_datetime(value)
 
         if isinstance(value, bytes):
-            # A BLOB value in a non-binary target column - keep it readable
-            return value.decode('utf-8', errors='replace')
+            # A BLOB value in a non-binary target column. Text which was merely stored as a
+            # BLOB is decoded; real binary content is written as the SQLite blob literal
+            # X'..' instead, because decoding it with replacement characters destroys it
+            # without anybody noticing.
+            try:
+                return value.decode('utf-8')
+            except UnicodeDecodeError:
+                return f"X'{value.hex().upper()}'"
 
         if 'CHAR' in target_type or target_type in ('TEXT', 'JSONB', 'JSON', 'XML', 'UUID'):
             if not self.config_parser.should_migrate_lob_values() and self._is_lob_type(declared_type):

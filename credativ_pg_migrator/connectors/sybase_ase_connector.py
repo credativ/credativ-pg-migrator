@@ -347,6 +347,26 @@ class SybaseASEConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', e)
             raise
 
+    # A money literal of Sybase - $1000, $19.99, $-5 - is a number written with a currency
+    # sign in front of it. PostgreSQL has no such literal and reads '$1000' in a statement
+    # as the positional parameter number 1000: 'there is no parameter $1000'.
+    MONEY_LITERAL_PATTERN = re.compile(r"""(?<![A-Za-z0-9_$@#'"])\$\s*([-+]?)\s*(\d+(?:\.\d*)?|\.\d+)""")
+
+    @classmethod
+    def _convert_money_literals(cls, sql_text):
+        """
+        Rewrite the money literals of an expression into plain numbers. The MONEY of the
+        source is migrated as NUMERIC(19,4), so the number alone is the whole value. What
+        stands inside a string literal is data ('costs $5') and is left untouched.
+        """
+        if not sql_text or '$' not in str(sql_text):
+            return sql_text
+        parts = re.split(r"('(?:[^']|'')*')", str(sql_text))
+        for position in range(0, len(parts), 2):
+            parts[position] = cls.MONEY_LITERAL_PATTERN.sub(
+                lambda match: f"{match.group(1) if match.group(1) == '-' else ''}{match.group(2)}", parts[position])
+        return ''.join(parts)
+
     @staticmethod
     def _joined_text_pieces(pieces):
         """
@@ -686,8 +706,14 @@ class SybaseASEConnector(DatabaseConnector):
         for default_object_name, default_value in default_values.items():
             # The comments of the batch have to go before the text is joined into one line,
             # otherwise a '--' comment swallows the statement behind it.
-            default_value['extracted_default_value'] = self._extract_default_expression(
-                default_value['default_value_sql'], default_object_name)
+            # The value of a default object is put into the DDL of every column bound to it,
+            # so it has to be translated exactly like the default written in a CREATE TABLE -
+            # 'getdate()' becomes 'current_timestamp', the money literal '$1000' becomes 1000.
+            default_value['extracted_default_value'] = self.convert_default_value({
+                'extracted_default_value': self._extract_default_expression(
+                    default_value['default_value_sql'], default_object_name),
+                'column_type': '',
+            })
             default_value['default_value_sql'] = re.sub(r'\s+', ' ', default_value['default_value_sql']).strip()
         return default_values
 
@@ -1213,6 +1239,7 @@ class SybaseASEConnector(DatabaseConnector):
             check_name = check_constraint[0]
             check_expression = check_constraint[1].strip()
             check_expression = check_expression.replace('CONSTRAINT', '').replace(check_name, '').replace('CHECK','').strip()
+            check_expression = self._convert_money_literals(check_expression)
             table_constraints[order_num] = {
                 'constraint_name': check_name,
                 'constraint_type': 'CHECK',
@@ -4742,6 +4769,7 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
             domain_check_sql = re.sub(r'\s+', ' ', domain_check_sql).strip()
             # Ensure PostgreSQL standalone constraints rely on VALUE
             domain_check_sql = re.sub(r'(?i)(CHECK\s*\(\s*)([a-zA-Z_]\w*)(\s+|[<>=!])', r'\g<1>VALUE\g<3>', domain_check_sql)
+            domain_check_sql = self._convert_money_literals(domain_check_sql)
             domains[rule_name]['source_domain_check_sql'] = domain_check_sql.strip()
 
         cursor.close()
@@ -4916,6 +4944,7 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
     def convert_default_value(self, settings) -> dict:
         extracted_default_value = settings['extracted_default_value']
         extracted_default_value = self.apply_sql_functions_mapping(extracted_default_value, settings)
+        extracted_default_value = self._convert_money_literals(extracted_default_value)
         return extracted_default_value
 
     def get_table_checksum(self, schema_name: str, table_name: str, columns: list):

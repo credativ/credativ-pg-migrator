@@ -305,7 +305,8 @@ class SybaseASEConnector(DatabaseConnector):
         content_clean = content.replace('@', '')
         content_clean = self._apply_data_type_substitutions(content_clean)
         content_clean = self._apply_udt_to_base_type_substitutions(content_clean, settings)
-        content_clean = self._apply_types_mapping(content_clean, types_mapping)
+        ## the UDTs were just replaced by the types of the target - they must not be mapped again
+        content_clean = self._apply_types_mapping(content_clean, self._types_mapping_for_mapped_text(types_mapping))
 
         parts = self._split_respecting_parens(content_clean)
         for part in parts:
@@ -651,11 +652,18 @@ class SybaseASEConnector(DatabaseConnector):
                         elif self.is_numeric_type(source_data_type) and mapped_type.upper() in ('NUMERIC', 'DECIMAL'):
                              mapped_full_type += f"({source_length})"
 
-                    result[ordinal_position]['basic_data_type'] = mapped_type # Was source_data_type
+                    ## The basic type of a column is reported as the type of the SOURCE, exactly
+                    ## like its data_type and its column_type, because the planner maps it to the
+                    ## type of the target itself and a user substitution is written against the
+                    ## name of the source as well. Reported as the mapped type it was mapped a
+                    ## second time: a UDT over 'datetime' arrived as TIMESTAMP, and TIMESTAMP is
+                    ## the name of the row version type of Sybase, so the column of
+                    ## 'T_TypLastchange' was created as BYTEA.
+                    result[ordinal_position]['basic_data_type'] = source_data_type
                     result[ordinal_position]['basic_character_maximum_length'] = basic_character_maximum_length
                     result[ordinal_position]['basic_numeric_precision'] = data_type_precision if self.is_numeric_type(source_data_type) else None
                     result[ordinal_position]['basic_numeric_scale'] = data_type_scale if self.is_numeric_type(source_data_type) else None
-                    result[ordinal_position]['basic_column_type'] = mapped_full_type # Was source_data_type_length
+                    result[ordinal_position]['basic_column_type'] = source_data_type_length
 
             cursor.close()
             self.disconnect()
@@ -801,6 +809,19 @@ class SybaseASEConnector(DatabaseConnector):
             raise ValueError(f"Unsupported target database type: {target_db_type}")
 
         return types_mapping
+
+    def _types_mapping_for_mapped_text(self, types_mapping):
+        """
+        The type mapping without the entries which would map a name the mapping itself
+        produces. Applying it to a text which went through the mapping once already leaves
+        that text alone, which matters wherever the two dialects use the same word for
+        different things: 'datetime' of Sybase becomes TIMESTAMP, and TIMESTAMP is at the
+        same time the name of the row version type of Sybase, which becomes BYTEA - mapping
+        twice turned every datetime into a BYTEA.
+        """
+        produced_type_names = {str(value).upper() for value in types_mapping.values()}
+        return {name: value for name, value in types_mapping.items()
+                if name.upper() not in produced_type_names or name.upper() == str(value).upper()}
 
     def _apply_types_mapping(self, text, types_mapping):
         """
@@ -1028,10 +1049,11 @@ class SybaseASEConnector(DatabaseConnector):
             if udt_name.upper() in ignored_types:
                 continue
 
-            # Resolve final definition
-            final_def = base_def
-            for sybase_type, pg_type in types_mapping.items():
-                 final_def = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, final_def, flags=re.IGNORECASE)
+            ## _get_udt_codes_mapping already answers with the type of the TARGET
+            ## ('T_TypLastchange' -> 'TIMESTAMP'), so only a name which the mapping does not
+            ## produce itself may be mapped here - otherwise the TIMESTAMP of a datetime UDT
+            ## is read as the row version type of Sybase and becomes BYTEA.
+            final_def = self._apply_types_mapping(base_def, self._types_mapping_for_mapped_text(types_mapping))
 
             # Store in lookup (Upper case key for case-insensitive matching)
             udt_lookup[udt_name.upper()] = final_def
@@ -1751,9 +1773,7 @@ class SybaseASEConnector(DatabaseConnector):
             ## of the row version type of Sybase, which becomes BYTEA - the parameter reached
             ## the target as BYTEA. The names the mapping itself produces are therefore left
             ## alone in every later pass over that text.
-            produced_type_names = {value.upper() for value in types_mapping.values()}
-            header_types_mapping = {name: value for name, value in types_mapping.items()
-                                    if name.upper() not in produced_type_names or name.upper() == value.upper()}
+            header_types_mapping = self._types_mapping_for_mapped_text(types_mapping)
 
             ## A routine which declares an output parameter answers through that parameter, and
             ## PostgreSQL refuses a function which has both a RETURNS TABLE and one of them, so
@@ -1993,6 +2013,14 @@ class SybaseASEConnector(DatabaseConnector):
                            line_obj.content = re.sub(r'(?i)^(\s*)RETURN\s+QUERY\s+(SELECT\s+[^;]+);?', r'\1RETURN (\2);', content)
 
             parser.pass_12_add_if_levels(final_output)
+
+            ## The output of the parser is assembled a second time here, with the header this
+            ## connector builds - and that threw away the SQL functions mapping, which run()
+            ## applies to the output of its own pass 11. Every function of the source stood in
+            ## the generated routine as it was written ('getdate()', 'isnull(', 'len(') and
+            ## PostgreSQL does not have any of them.
+            for line_obj in final_output:
+                line_obj.content = self.apply_sql_functions_mapping(line_obj.content, {'target_db_type': target_db_type})
 
             # Build DDL with indentation (Logic ported from TsqlParser.print_with_indentation)
             ddl = ""

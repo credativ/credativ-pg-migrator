@@ -375,10 +375,20 @@ error the target reported, so these places can be found again after a run.
   the conversion gives it the output parameters (`INOUT`), so a `RETURN 0` / `RETURN -1` in the
   body returns the status *instead of* them. Decide which of the two the callers need: keep the
   status and read the value from a table, or drop the `RETURN` and keep the parameter.
-- **`RAISERROR`** becomes `RAISE EXCEPTION` and the `%1!` placeholders of Sybase become the `%` of
-  PostgreSQL, but the **error number is appended to the message text** as one more argument, since
-  PostgreSQL identifies an error by `SQLSTATE` and not by a number. Code which reacts to a
-  particular error number has to be given an `ERRCODE` and a matching handler.
+- **`RAISERROR`** becomes `RAISE EXCEPTION`. All of its forms are read: the number alone
+  (`raiserror 20002, @sku`), the number with a format string, a message held in a variable and the
+  parenthesized form of MS SQL (`RAISERROR('...', 16, 1, @v)`, whose severity and state have no
+  counterpart and are dropped). The `%1!` placeholders of Sybase and the `%s` / `%d` of MS SQL
+  become the `%` of PostgreSQL — numbered placeholders also **reorder the arguments** (`%2! %1!`
+  really does swap them) — and a literal percent sign is kept as `%%`.
+  A `RAISERROR` which only names a message **number** carries no text at all: the text lives in
+  `sysusermessages`, which the migrator reads and uses (`raiserror 20002, @sku` becomes
+  `RAISE EXCEPTION 'Product % does not exist (error 20002 of the source)', locvar_sku`). When the
+  message is not in the catalog, the exception reports the number and the arguments and the place
+  is logged as a `WARNING`.
+  The **error number is written into the message text**, since PostgreSQL identifies an error by
+  `SQLSTATE` and not by a number. Code which reacts to a particular error number has to be given an
+  `ERRCODE` and a matching handler.
 
 **Transactions**
 

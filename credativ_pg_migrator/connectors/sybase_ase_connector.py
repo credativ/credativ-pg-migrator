@@ -201,6 +201,8 @@ class SybaseASEConnector(DatabaseConnector):
         self.on_error_action = self.config_parser.get_on_error_action()
         self.logger = MigratorLogger(self.config_parser.get_log_file()).logger
         self._udt_cache = None
+        ## the messages of sysusermessages, read once when a RAISERROR needs one
+        self._user_messages = None
 
     def connect(self):
         if self.config_parser.get_connectivity(self.source_or_target) == 'odbc':
@@ -1508,6 +1510,40 @@ class SybaseASEConnector(DatabaseConnector):
         return procbody_str
 
 
+    def fetch_user_messages(self):
+        """
+        The messages of the source, keyed by their number as text. RAISERROR of Sybase
+        names a message by its number - 'raiserror 20002, @sku' - and its text lives in
+        sysusermessages, put there with sp_addmessage. Without it the converted routine
+        can only report the number, so the table is read once and kept.
+        """
+        if self._user_messages is not None:
+            return self._user_messages
+
+        messages = {}
+        opened_here = self.connection is None
+        try:
+            if opened_here:
+                self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute("SELECT error, description FROM sysusermessages ORDER BY error, langid")
+            for row in cursor.fetchall():
+                number = str(row[0]).strip()
+                text = row[1]
+                ## the first language of a message is the one it was created with
+                if text and number not in messages:
+                    messages[number] = str(text).strip()
+            cursor.close()
+            self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: fetch_user_messages: {len(messages)} messages of sysusermessages read.")
+        except Exception as e:
+            self.config_parser.print_log_message('WARNING', f"sybase_ase_connector: fetch_user_messages: The messages of the source could not be read ({e}) - a RAISERROR naming a message by its number reports the number instead of its text.")
+        finally:
+            if opened_here:
+                self.disconnect()
+
+        self._user_messages = messages
+        return messages
+
     def convert_funcproc_code(self, settings):
         try:
             funcproc_code_input = settings['funcproc_code']
@@ -1563,6 +1599,8 @@ class SybaseASEConnector(DatabaseConnector):
                     "parameter - its result is that parameter, so no result set is inferred for it.")
 
             is_implicit_return = bool(implicit_return_schema)
+            ## the text of a message a RAISERROR names by its number
+            settings['user_messages'] = self.fetch_user_messages()
             parser = TsqlParser(funcproc_code, self.config_parser, implicit_return=is_implicit_return, view_converter=self.convert_view_code, settings=settings, functions_mapping_converter=self.apply_sql_functions_mapping)
             self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: convert_funcproc_code: Running 12-pass parser for {settings.get('funcproc_name')}")
 
@@ -3712,6 +3750,8 @@ class SybaseASEConnector(DatabaseConnector):
         pseudo_table_converter = lambda statement, command_kind: self.convert_trigger_pseudo_tables_statement(
             statement, command_kind, trigger_name, pseudo_table_refusals)
 
+        ## the text of a message a RAISERROR names by its number
+        settings['user_messages'] = self.fetch_user_messages()
         parser = TsqlParser(fake_code, self.config_parser, view_converter=self.convert_view_code, settings=settings, functions_mapping_converter=self.apply_sql_functions_mapping, pseudo_table_converter=pseudo_table_converter)
         final_output = parser.run(pg_header_str=" ") # space prevents default header
 

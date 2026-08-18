@@ -1609,6 +1609,157 @@ class TsqlParser:
 
         self.body_lines = new_body_lines
 
+    def parse_raiserror_statement(self, statement):
+        """
+        Take the RAISERROR statement apart. Both dialects are written differently:
+
+          Sybase ASE:  RAISERROR <number> [<'format string'> | @variable] [, <argument>, ...]
+          MS SQL:      RAISERROR ( <'format string'> | <number>, <severity>, <state> [, <argument>, ...] )
+
+        and the number of Sybase names a message of sysusermessages, which is why a
+        RAISERROR very often carries no text at all - 'raiserror 20002, @sku_txt'.
+
+        Returns (error number, message, message is a literal, arguments).
+        """
+        text = re.sub(r'(?is)^RAISERROR\s*', '', statement.strip().rstrip(';').strip(), count=1)
+        ## the options of MS SQL say how the error is reported, not what it says
+        text = re.sub(r'(?is)\s+WITH\s+(?:LOG|NOWAIT|SETERROR)(?:\s*,\s*(?:LOG|NOWAIT|SETERROR))*$', '', text).strip()
+
+        parenthesized = False
+        if text.startswith('('):
+            masked, _ = self.mask_comments_and_literals(text, False)
+            depth = 0
+            closing = None
+            for position, char in enumerate(masked):
+                if char == '(':
+                    depth += 1
+                elif char == ')':
+                    depth -= 1
+                    if depth == 0:
+                        closing = position
+                        break
+            if closing is not None and not text[closing + 1:].strip():
+                text = text[1:closing]
+                parenthesized = True
+
+        parts = [part.strip() for part in self.split_outside_parens(text, ',')]
+        parts = [part for part in parts if part]
+        if not parts:
+            return None, None, False, []
+
+        error_number = None
+        head = parts[0]
+        if parenthesized:
+            ## message, severity, state, arguments - severity and state are not migrated,
+            ## PostgreSQL has no counterpart for them
+            message_part = head
+            arguments = parts[3:]
+        else:
+            number_match = re.match(r'(?s)^(\d+)\s*(.*)$', head)
+            if number_match:
+                error_number = number_match.group(1)
+                message_part = number_match.group(2).strip()
+            else:
+                message_part = head
+            arguments = parts[1:]
+
+        message = None
+        message_is_literal = False
+        if message_part:
+            literal = (re.fullmatch(r"(?s)'((?:[^']|'')*)'", message_part)
+                       or re.fullmatch(r'(?s)"((?:[^"]|"")*)"', message_part))
+            if literal:
+                message = literal.group(1)
+                message_is_literal = True
+            elif parenthesized and re.fullmatch(r'\d+', message_part):
+                error_number = message_part
+            else:
+                ## a variable or an expression holding the text
+                message = message_part
+
+        return error_number, message, message_is_literal, arguments
+
+    def convert_message_placeholders(self, message, arguments):
+        """
+        The placeholders of the message as the '%' of RAISE: the numbered ones of Sybase
+        ('%1!', '%2!'), which also say in which order the arguments belong - '%2! %1!'
+        really does swap them - and the printf ones of MS SQL ('%s', '%d', '%10.2f').
+        A doubled '%%' stands for a percent sign and stays doubled, which is how RAISE
+        writes one as well; a single '%' which is none of these is data and has to be
+        doubled, otherwise RAISE reads it as a placeholder of its own and refuses the
+        statement for the missing value.
+        """
+        positions = []
+        placeholders = [0]
+
+        def replace(match):
+            if match.group(0) == '%%':
+                return '%%'
+            if match.group(1) is not None:
+                positions.append(int(match.group(1)))
+                placeholders[0] += 1
+                return '%'
+            if match.group(0) != '%':
+                placeholders[0] += 1
+                return '%'
+            return '%%'
+
+        text = re.sub(r'%%|%(\d+)!|%[-+ #0]*\d*(?:\.\d+)?(?:l|h|I64)?[sdiouxXfeEgGc]|%', replace, message)
+        if (positions and len(positions) == len(arguments)
+                and sorted(positions) == list(range(1, len(arguments) + 1))):
+            arguments = [arguments[position - 1] for position in positions]
+        return text, arguments, placeholders[0]
+
+    def build_raise_exception(self, error_number, message, message_is_literal, arguments, statement):
+        """
+        The RAISE EXCEPTION of the RAISERROR. The message of a number without a text is
+        looked up in the messages of the source (sysusermessages, passed in the settings);
+        without it the number and the arguments are reported, which is everything the
+        routine itself says.
+        """
+        arguments = [argument for argument in arguments if argument]
+
+        if message is None and error_number is not None:
+            user_messages = (self.settings or {}).get('user_messages') or {}
+            looked_up = user_messages.get(str(error_number))
+            if looked_up:
+                message = looked_up
+                message_is_literal = True
+            else:
+                self.log(f"RAISERROR {error_number} carries no message text and the message is not in sysusermessages")
+                if self.config_parser:
+                    self.config_parser.print_log_message('WARNING',
+                        f"tsql_parser: build_raise_exception: '{statement.strip()}' names the message {error_number} of the message catalog of the source, "
+                        f"whose text is not available - the exception reports the number and the arguments. "
+                        f"Add the text of the message by hand if the application reads it.")
+
+        placeholders = 0
+        if message is None:
+            text = f"Error {error_number} of the source" if error_number else "Error of the source"
+        elif message_is_literal:
+            text, arguments, placeholders = self.convert_message_placeholders(message, arguments)
+        else:
+            ## the message is a variable or an expression - it is printed as the first value
+            arguments = [message] + arguments
+            text = '%'
+            placeholders = 1
+
+        ## the number of values has to match the number of placeholders, RAISE refuses both
+        ## 'too few' and 'too many parameters specified for RAISE'
+        if len(arguments) > placeholders:
+            text += ':' if (placeholders == 0 and arguments) else ''
+            text += ' %' * (len(arguments) - placeholders)
+        elif placeholders > len(arguments):
+            arguments = arguments + ['NULL'] * (placeholders - len(arguments))
+
+        if error_number and message is not None:
+            text += f" (error {error_number} of the source)"
+
+        text = text.replace("'", "''")
+        if arguments:
+            return f"RAISE EXCEPTION '{text}', {', '.join(arguments)}"
+        return f"RAISE EXCEPTION '{text}'"
+
     def pass_5e_parse_raiserror(self):
         """
         Pass 5e: Parses RAISERROR commands, handling preceding ROLLBACK.
@@ -1677,29 +1828,9 @@ class TsqlParser:
                 cleaned_lines = [l.strip() for l in raiserror_lines]
                 full_raiserror = " ".join(cleaned_lines)
 
-                # Now parse RAISERROR <number> <string>
-                match = re.match(r'^RAISERROR\s+(\d+)\s+((?:\'(?:[^\']|\'\')*\')|(?:"(?:[^"]|"")*"))(.*)$', full_raiserror, re.IGNORECASE)
-                if match:
-                    err_num = match.group(1)
-                    err_msg_raw = match.group(2)
-                    args = match.group(3).strip()
-
-                    if (err_msg_raw.startswith('"') and err_msg_raw.endswith('"')) or (err_msg_raw.startswith("'") and err_msg_raw.endswith("'")):
-                        err_msg = err_msg_raw[1:-1]
-                    else:
-                        err_msg = err_msg_raw
-
-                    err_msg = err_msg.replace("'", "''")
-                    err_msg = re.sub(r'%\d+!', '%', err_msg)
-                    
-                    if args:
-                        args = args.lstrip(',').strip()
-                        full_raiserror = f"RAISE EXCEPTION '{err_msg} %', {args}, {err_num}"
-                    else:
-                        full_raiserror = f"RAISE EXCEPTION '{err_msg} %', {err_num}"
-                else:
-                    # fallback
-                    full_raiserror = re.sub(r'^RAISERROR\b', 'RAISE EXCEPTION', full_raiserror, flags=re.IGNORECASE)
+                error_number, message, message_is_literal, arguments = self.parse_raiserror_statement(full_raiserror)
+                full_raiserror = self.build_raise_exception(
+                    error_number, message, message_is_literal, arguments, full_raiserror)
 
                 self.raiserror_commands.append({
                     "line": start_line,
@@ -2046,6 +2177,20 @@ class TsqlParser:
 
         self.body_lines = final_body_lines
 
+    def split_off_from_clause(self, text):
+        """
+        Split the text at the FROM which belongs to the statement itself - the one outside
+        every parenthesis, string literal and comment, so that the FROM of a subquery
+        (`@a = (select max(x) from t)`) does not end the assignment list.
+        Returns (text in front of FROM, FROM clause), the second one empty when there is none.
+        """
+        masked, _ = self.mask_comments_and_literals(text, False)
+        for match in re.finditer(r'(?i)\bFROM\b', masked):
+            prefix = masked[:match.start()]
+            if prefix.count('(') == prefix.count(')'):
+                return text[:match.start()].strip(), text[match.start():].strip()
+        return text.strip(), ''
+
     def pass_8_process_select_assignments(self):
         """
         Pass 8: Processes select assignments.
@@ -2088,6 +2233,28 @@ class TsqlParser:
                 # 1. Remove SELECT
                 # Case insensitive replace of first SELECT
                 cleaned = re.sub(r'^SELECT\s+', '', normalized, count=1, flags=re.IGNORECASE)
+
+                ## An assignment which reads from a table is a query, not an assignment of a
+                ## value: 'select @price = list_price from products where ...' became
+                ## 'locvar_price := list_price FROM products WHERE ...', which PostgreSQL
+                ## cannot read at all - the value of an assignment has no FROM clause. Such a
+                ## statement is the SELECT ... INTO of PL/pgSQL, which also sets the row count
+                ## the code behind it usually asks for.
+                assignments_text, from_clause = self.split_off_from_clause(cleaned)
+                if from_clause:
+                    assignment_pairs = []
+                    for part in self.split_outside_parens(assignments_text, ','):
+                        pair = re.match(r'(?s)^\s*(@[\w@]+|locvar_[\w]+)\s*=(?!=)\s*(\S.*?)\s*$', part)
+                        if not pair:
+                            assignment_pairs = []
+                            break
+                        assignment_pairs.append((pair.group(1), pair.group(2)))
+                    if assignment_pairs:
+                        targets = ', '.join(name for name, _ in assignment_pairs)
+                        values = ', '.join(value for _, value in assignment_pairs)
+                        cmd_obj['content'] = f"SELECT {values} INTO {targets} {from_clause};"
+                        continue
+                    self.log(f"SELECT assignment with a FROM clause which could not be read: {original_content}")
 
                 # 2. Replace , with ; outside of parens/quotes, but stop replacing when hitting a FROM clause
                 cleaned = self.replace_commas_outside_parens(cleaned, stop_word="from")
@@ -2248,7 +2415,8 @@ class TsqlParser:
             self.select_commands,
             self.exec_commands,
             self.if_commands,
-            self.comments
+            self.comments,
+            self.raiserror_commands
         ]
 
         for line_obj in self.header_lines:
@@ -2473,7 +2641,8 @@ class TsqlParser:
             self.comments,
             self.cursors,
             self.cursor_commands,
-            self.while_commands
+            self.while_commands,
+            self.raiserror_commands
         ]
 
         for array in targets:

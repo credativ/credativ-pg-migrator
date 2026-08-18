@@ -1458,10 +1458,12 @@ class PostgreSQLConnector(DatabaseConnector):
                 expression = self.convert_expression_identifiers(col, target_columns)
                 expression = expression.replace(r"\'", "'").replace(r'\"', '"')
                 if self.config_parser.get_source_db_type() != 'postgresql':
-                    # Remove charset introducers of MySQL / MariaDB (_utf8'text')
-                    # In PostgreSQL such a pattern is part of a quoted identifier
-                    # (e.g. "natural_numeric") and must be kept.
-                    expression = re.sub(r'(?i)_[a-zA-Z0-9_]+(\'|")', r'\1', expression)
+                    # Remove the charset introducer of MySQL / MariaDB (_utf8'text'). It
+                    # introduces a string literal, so only a single quote can follow it,
+                    # and it never follows an identifier character or a double quote:
+                    # the tail of a quoted name ("unit_price", "natural_numeric") is not
+                    # an introducer and used to be cut away with the rest of the name.
+                    expression = re.sub(r'(?i)(?<![A-Za-z0-9_"])_[a-zA-Z0-9]+(\')', r'\1', expression)
                 expression = re.sub(r'(?i)\b(?:CHARACTER\s+SET|CHARSET)\s+[a-zA-Z0-9_]+', '', expression)
                 if self.config_parser.get_source_db_type() == 'postgresql':
                     # PostgreSQL collations are migrated with the schema - keep them in the
@@ -1980,10 +1982,12 @@ class PostgreSQLConnector(DatabaseConnector):
                     f'ALTER TABLE "{target_schema_name}"."{target_table_name}" ADD CONSTRAINT "{constraint_name}_tab_{target_table_name}" '
                     f'FOREIGN KEY ({constraint_columns}) REFERENCES "{target_schema_name}"."{referenced_table_name}" ({referenced_columns})'
                 )
-                if delete_rule == 'CASCADE':
-                    create_constraint_query += " ON DELETE CASCADE"
-                if update_rule == 'CASCADE':
-                    create_constraint_query += " ON UPDATE CASCADE"
+                delete_action = self.normalize_referential_action(delete_rule)
+                if delete_action:
+                    create_constraint_query += f" ON DELETE {delete_action}"
+                update_action = self.normalize_referential_action(update_rule)
+                if update_action:
+                    create_constraint_query += f" ON UPDATE {update_action}"
                 # A comment of the constraint is not part of ALTER TABLE ... ADD CONSTRAINT in
                 # PostgreSQL, it is set by the comments migration with COMMENT ON CONSTRAINT.
             elif constraint_type == 'CHECK':
@@ -2000,6 +2004,17 @@ class PostgreSQLConnector(DatabaseConnector):
         else:
             create_constraint_query = f"""ALTER TABLE "{target_schema_name}"."{target_table_name}" ADD CONSTRAINT "{constraint_name}" {constraint_sql}"""
         return create_constraint_query
+
+    ## NO ACTION is the PostgreSQL default and is left out of the generated SQL.
+    ## Anything not recognized is ignored the same way, so a source connector
+    ## reporting a rule in its own notation cannot produce invalid SQL.
+    SUPPORTED_REFERENTIAL_ACTIONS = ('CASCADE', 'SET NULL', 'SET DEFAULT', 'RESTRICT')
+
+    def normalize_referential_action(self, rule):
+        if not rule:
+            return ''
+        action = ' '.join(str(rule).upper().replace('_', ' ').split())
+        return action if action in self.SUPPORTED_REFERENTIAL_ACTIONS else ''
 
     def get_aliases(self, settings):
         return {}

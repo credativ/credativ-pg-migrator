@@ -651,6 +651,16 @@ class SQLAnywhereConnector(DatabaseConnector):
     def get_create_index_sql(self, settings):
         return ""
 
+    ## SYS.SYSTRIGGER stores the referential integrity actions of a foreign key.
+    ## event: 'C' = ON UPDATE, 'D' = ON DELETE
+    ## referential_action: 'C' = CASCADE, 'N' = SET NULL, 'D' = SET DEFAULT, 'R' = RESTRICT
+    SA_REFERENTIAL_ACTIONS = {
+        'C': 'CASCADE',
+        'N': 'SET NULL',
+        'D': 'SET DEFAULT',
+        'R': 'RESTRICT',
+    }
+
     def fetch_constraints(self, settings):
         source_table_id = settings['source_table_id']
         source_table_schema = settings['source_table_schema']
@@ -658,6 +668,10 @@ class SQLAnywhereConnector(DatabaseConnector):
 
         order_num = 1
         table_constraints = {}
+        ## In SYS.SYSFOREIGNKEYS the "foreign" table is the child - the one carrying the
+        ## foreign key columns and therefore the one the constraint has to be created on.
+        ## The "primary" table is the parent being referenced. The constraints are fetched
+        ## per table, so we select the rows where the current table is the foreign one.
         query = f"""
             SELECT
                 "role" as fk_name,
@@ -667,52 +681,85 @@ class SQLAnywhereConnector(DatabaseConnector):
                 foreign_tname,
                 columns,
                 count(*) over (partition by "role") fk_name_uniqueness,
-                row_number() over (partition by "role" order by s.foreign_tname) as fk_name_ordinal_number
+                row_number() over (partition by "role" order by s.primary_tname) as fk_name_ordinal_number
             FROM SYS.SYSFOREIGNKEYS s
-            WHERE (primary_creator = '{source_table_schema}' or foreign_creator = '{source_table_schema}')
-            AND primary_tname = '{source_table_name}'
+            WHERE foreign_creator = '{source_table_schema}'
+            AND foreign_tname = '{source_table_name}'
             ORDER BY "role"
+        """
+        ## The role of a foreign key is the name of its index on the foreign table,
+        ## which is how the referential actions are matched to the constraint.
+        actions_query = f"""
+            SELECT i.index_name, t.event, t.referential_action
+            FROM SYS.SYSTRIGGER t
+            JOIN SYS.SYSTAB tb ON tb.table_id = t.foreign_table_id
+            JOIN SYS.SYSUSER u ON u.user_id = tb.creator
+            JOIN SYS.SYSIDX i ON i.table_id = t.foreign_table_id AND i.index_id = t.foreign_key_id
+            WHERE t.foreign_table_id IS NOT NULL
+            AND u.user_name = '{source_table_schema}'
+            AND tb.table_name = '{source_table_name}'
         """
         try:
             self.connect()
             cursor = self.connection.cursor()
+
+            referential_actions = {}
+            cursor.execute(actions_query)
+            for row in cursor.fetchall():
+                fk_index_name, event, referential_action = row[0], row[1], row[2]
+                action = self.SA_REFERENTIAL_ACTIONS.get(referential_action, '')
+                if not action:
+                    continue
+                rules = referential_actions.setdefault(fk_index_name, {})
+                if event == 'D':
+                    rules['delete_rule'] = action
+                elif event == 'C':
+                    rules['update_rule'] = action
+
             cursor.execute(query)
             for row in cursor.fetchall():
-                constraint_name = f"{row[0]}_fk"
+                fk_index_name = row[0]
+                constraint_name = f"{fk_index_name}_fk"
                 constraint_type = 'FOREIGN KEY'
+                primary_table_schema = row[1]
                 primary_table_name = row[2]
-                foreign_table_schema = row[3]
-                foreign_table_name = row[4]
                 sa_columns = row[5]
-                pk_columns, ref_columns = sa_columns.split(" IS ")
 
                 fk_name_uniqueness = row[6]
                 fk_name_ordinal_number = row[7]
                 if fk_name_uniqueness > 1:
                     constraint_name = f"{constraint_name}{fk_name_ordinal_number}"
 
-                columns = []
-                for col in ref_columns.split(","):
-                    col = col.strip().replace(" ASC", "").replace(" DESC", "")
-                    if col not in columns:
-                        columns.append('"'+col+'"')
-                ref_columns = ','.join(columns)
+                ## "columns" holds the column pairs as "foreign_column IS primary_column",
+                ## separated by commas for multi-column foreign keys. Both sides have to keep
+                ## their order, so the pairs must not be deduplicated or sorted.
+                fk_columns = []
+                pk_columns = []
+                for column_pair in sa_columns.split(","):
+                    if " IS " not in column_pair:
+                        continue
+                    foreign_column, primary_column = column_pair.split(" IS ", 1)
+                    for column, target_list in ((foreign_column, fk_columns), (primary_column, pk_columns)):
+                        column = column.strip().replace(" ASC", "").replace(" DESC", "")
+                        target_list.append('"'+column+'"')
 
-                columns = []
-                for col in pk_columns.split(","):
-                    col = col.strip().replace(" ASC", "").replace(" DESC", "")
-                    if col not in columns:
-                        columns.append('"'+col+'"')
-                pk_columns = ','.join(columns)
+                if not fk_columns:
+                    self.config_parser.print_log_message('WARNING',
+                        f"sql_anywhere_connector: fetch_constraints: Skipping foreign key {constraint_name} "
+                        f"on table {source_table_schema}.{source_table_name} - unexpected column list '{sa_columns}'.")
+                    continue
 
+                rules = referential_actions.get(fk_index_name, {})
                 table_constraints[order_num] = {
                     'constraint_name': constraint_name,
                     'constraint_type': constraint_type,
                     'constraint_owner': source_table_schema,
-                    'constraint_columns': ref_columns,
-                    'referenced_table_schema': foreign_table_schema,
-                    'referenced_table_name': foreign_table_name,
-                    'referenced_columns': pk_columns,
+                    'constraint_columns': ','.join(fk_columns),
+                    'referenced_table_schema': primary_table_schema,
+                    'referenced_table_name': primary_table_name,
+                    'referenced_columns': ','.join(pk_columns),
+                    'delete_rule': rules.get('delete_rule', 'NO ACTION'),
+                    'update_rule': rules.get('update_rule', 'NO ACTION'),
                     'constraint_sql': '',
                     'constraint_comment': '',
                 }

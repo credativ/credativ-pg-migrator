@@ -511,7 +511,8 @@ class SybaseASEConnector(DatabaseConnector):
                 is_generated_stored = row[19]
                 generation_expression = self._joined_text_pieces(computed_text_pieces.get(ordinal_position)) or None
                 is_hidden_column = row[21]
-                stripped_generation_expression = generation_expression.replace('AS ', '').replace('MATERIALIZED', '').strip() if generation_expression else ''
+                stripped_generation_expression = self._convert_computed_column_expression(
+                    generation_expression, f"computed column {table_schema}.{table_name}.{column_name}")
 
                 if data_type.lower() in ('univarchar', 'unichar'):
                     data_type_length = str(int(length / unichar_size))
@@ -1088,6 +1089,169 @@ class SybaseASEConnector(DatabaseConnector):
         numeric_types = ['BIGINT', 'INTEGER', 'INT', 'TINYINT', 'SMALLINT', 'FLOAT', 'DOUBLE PRECISION', 'DECIMAL', 'NUMERIC']
         return column_type.upper() in numeric_types
 
+    ## ---------------------------------------------------------------- computed columns
+
+    def _convert_convert_calls(self, sql_text, description=''):
+        """
+        CONVERT(<type>, <expression>) of Sybase is the CAST of PostgreSQL. The three
+        argument form CONVERT(<type>, <expression>, <style>) formats a date or a number
+        according to the style number; a CAST does not do that, so such a call is left as
+        it stands and reported - a value formatted differently is worse than a statement
+        which fails and says so.
+        """
+        if not sql_text or 'convert' not in str(sql_text).lower():
+            return sql_text
+
+        types_mapping = self.get_types_mapping({'target_db_type': 'postgresql'})
+        text = str(sql_text)
+        result = []
+        position = 0
+        pattern = re.compile(r'(?i)(?<![A-Za-z0-9_$@#])CONVERT\s*\(')
+        while True:
+            match = pattern.search(text, position)
+            if not match:
+                result.append(text[position:])
+                break
+            open_index = match.end() - 1
+            close_index = self._matching_parenthesis(text, open_index)
+            if close_index is None:
+                result.append(text[position:])
+                break
+
+            arguments = self._split_respecting_parens(text[open_index + 1:close_index])
+            replacement = None
+            if len(arguments) == 2:
+                target_type = self._map_convert_target_type(arguments[0], types_mapping)
+                if target_type:
+                    # the expression can hold a CONVERT of its own
+                    replacement = f"CAST({self._convert_convert_calls(arguments[1], description)} AS {target_type})"
+            if replacement is None:
+                self.config_parser.print_log_message('WARNING',
+                    f"sybase_ase_connector: _convert_convert_calls: CONVERT({', '.join(arguments)}) of {description or 'the expression'} is not migrated - "
+                    f"{'the style argument of the three argument form has no equivalent in a CAST' if len(arguments) > 2 else 'its target type is not known'}. "
+                    f"The statement using it has to be completed by hand.")
+                replacement = text[match.start():close_index + 1]
+
+            result.append(text[position:match.start()])
+            result.append(replacement)
+            position = close_index + 1
+        return ''.join(result)
+
+    @staticmethod
+    def _matching_parenthesis(text, open_index):
+        """ Index of the ')' closing the '(' at open_index, string literals excluded. """
+        depth = 0
+        in_literal = False
+        index = open_index
+        while index < len(text):
+            character = text[index]
+            if in_literal:
+                if character == "'":
+                    in_literal = False
+            elif character == "'":
+                in_literal = True
+            elif character == '(':
+                depth += 1
+            elif character == ')':
+                depth -= 1
+                if depth == 0:
+                    return index
+            index += 1
+        return None
+
+    def _map_convert_target_type(self, type_text, types_mapping):
+        """ The first argument of CONVERT written as a PostgreSQL type, or None. """
+        text = str(type_text).strip().strip('"').strip()
+        match = re.fullmatch(r'(?is)([A-Za-z][A-Za-z0-9_ ]*?)\s*(\(\s*[\dA-Za-z, ]*\s*\))?', text)
+        if not match:
+            return None
+        base_type = re.sub(r'\s+', ' ', match.group(1)).strip().upper()
+        length = (match.group(2) or '').strip()
+        mapped_type = types_mapping.get(base_type)
+        if not mapped_type:
+            return None
+        # MONEY becomes NUMERIC(19,4) - a length of the source must not be appended to it
+        if length and '(' not in mapped_type:
+            return f"{mapped_type}{length}"
+        return mapped_type
+
+    def _convert_computed_column_expression(self, generation_expression, description=''):
+        """
+        The definition of a computed column as syscomments keeps it - 'AS <expression>
+        MATERIALIZED' - reduced to the expression itself and translated to PostgreSQL.
+        The keywords have to be removed as whole words: 'AS' also stands inside the
+        expression (CAST(x AS int)) and MATERIALIZED is written in either case.
+        """
+        if not generation_expression:
+            return ''
+        text = self.strip_sql_comments(str(generation_expression))
+        text = re.sub(r'(?is)^\s*AS\s+', '', text)
+        text = re.sub(r'(?is)\s+(?:NOT\s+)?MATERIALIZED\s*$', '', text)
+        text = re.sub(r'\s+', ' ', text).strip()
+        if not text:
+            return ''
+        text = self._convert_convert_calls(text, description)
+        text = self.apply_sql_functions_mapping(text, {'target_db_type': 'postgresql'})
+        text = self._convert_money_literals(text)
+        return text.strip()
+
+    def _computed_column_expressions(self, cursor, source_table_id):
+        """
+        The computed columns of a table with their expression and whether they are hidden.
+        A hidden one is the key of a functional index (sybfi5_1): it is not a column of
+        the source table, only the value the index is built on, so it is not migrated as a
+        column - the index which uses it becomes an index over the expression instead.
+        """
+        computed_columns = {}
+        query = f"""
+            SELECT c.name, case when c.status3 & 1 = 1 then 1 else 0 end as is_hidden, co.colid, co.text
+            FROM syscolumns c
+            LEFT JOIN syscomments co ON c.computedcol = co.id
+            WHERE c.id = {source_table_id} AND c.computedcol IS NOT NULL AND c.computedcol > 0
+            ORDER BY c.colid, co.colid
+        """
+        try:
+            cursor.execute(query)
+            text_pieces = {}
+            for row in cursor.fetchall():
+                column_name = str(row[0]).strip()
+                computed_columns.setdefault(column_name.lower(), {
+                    'column_name': column_name,
+                    'is_hidden': row[1] == 1,
+                    'expression': '',
+                })
+                if row[3] is not None and row[2] is not None:
+                    text_pieces.setdefault(column_name.lower(), {})[row[2]] = row[3]
+            for name, pieces in text_pieces.items():
+                computed_columns[name]['expression'] = self._convert_computed_column_expression(
+                    self._joined_text_pieces(pieces), f"computed column {computed_columns[name]['column_name']}")
+        except Exception as e:
+            self.config_parser.print_log_message('WARNING', f"sybase_ase_connector: _computed_column_expressions: Could not read the computed columns of the table ({e}) - an index over one of them cannot be migrated.")
+        return computed_columns
+
+    def _index_columns_with_expressions(self, index_columns, computed_columns, index_name):
+        """
+        Replace every key of the index which is a hidden computed column with the
+        expression that column holds. Returns (column list, function based, name of a
+        hidden column whose expression is missing).
+        """
+        converted_keys = []
+        is_function_based = False
+        for key in self._split_respecting_parens(index_columns):
+            key = key.strip()
+            column = computed_columns.get(key.strip('"').strip().lower())
+            if column and column['is_hidden']:
+                if not column['expression']:
+                    return index_columns, False, column['column_name']
+                converted_keys.append(f"({column['expression']})")
+                is_function_based = True
+                self.config_parser.print_log_message('DEBUG',
+                    f"sybase_ase_connector: fetch_indexes: Index {index_name} is built on the hidden computed column {column['column_name']} "
+                    f"- migrated as an index over its expression {column['expression']}.")
+            else:
+                converted_keys.append(key)
+        return ', '.join(converted_keys), is_function_based, None
+
     def fetch_indexes(self, settings):
         source_table_id = settings['source_table_id']
         source_table_schema = settings['source_table_schema']
@@ -1129,6 +1293,12 @@ class SybaseASEConnector(DatabaseConnector):
 
             indexes = cursor.fetchall()
 
+            # A functional index of Sybase is an index over a hidden computed column
+            # (sybfi5_1) which holds the value of its expression. That column is not
+            # migrated - it is not a column of the table - so the index has to be created
+            # over the expression itself.
+            computed_columns = self._computed_column_expressions(cursor, source_table_id)
+
             for index in indexes:
                 self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: fetch_indexes: Processing index: {index}")
                 index_name = index[0].strip()
@@ -1137,12 +1307,21 @@ class SybaseASEConnector(DatabaseConnector):
                 index_primary_key = index[3]
                 index_owner = ''
 
+                index_columns, is_function_based, missing_expression = self._index_columns_with_expressions(
+                    index_columns, computed_columns, index_name)
+                if missing_expression:
+                    self.config_parser.print_log_message('WARNING',
+                        f"sybase_ase_connector: fetch_indexes: Index {index_name} of {source_table_schema}.{source_table_name} is built on the hidden computed column "
+                        f"{missing_expression}, whose expression could not be read - the index is not migrated and has to be recreated by hand.")
+                    continue
+
                 table_indexes[order_num] = {
                     'index_name': index_name,
                     'index_type': "PRIMARY KEY" if index_primary_key == 1 else "UNIQUE" if index_unique == 1 and index_primary_key == 0 else "INDEX",
                     'index_owner': index_owner,
                     'index_columns': index_columns,
-                    'index_comment': ''
+                    'index_comment': '',
+                    'is_function_based': 'YES' if is_function_based else 'NO',
                 }
                 order_num += 1
 
@@ -2019,7 +2198,26 @@ class SybaseASEConnector(DatabaseConnector):
                     select_columns_list = []
                     orderby_columns_list = []
                     insert_columns_list = []
-                    for order_num, col in source_columns.items():
+
+                    def is_generated_column(column):
+                        return column.get('is_generated_virtual') == 'YES' or column.get('is_generated_stored') == 'YES'
+
+                    # A computed column of the source is a generated column of the target,
+                    # which PostgreSQL computes itself and refuses a value for ('cannot
+                    # insert a non-DEFAULT value into column'). A hidden column - the key
+                    # of a functional index - does not exist in the target at all.
+                    migrated_source_columns = {
+                        order_num: column for order_num, column in source_columns.items()
+                        if not is_generated_column(column)
+                        and column.get('is_hidden_column') != 'YES'
+                        and not is_generated_column(target_columns.get(order_num, {}) if target_columns else {})
+                    }
+                    skipped_columns = [column['column_name'] for order_num, column in source_columns.items()
+                                       if order_num not in migrated_source_columns]
+                    if skipped_columns:
+                        self.config_parser.print_log_message('INFO', f"sybase_ase_connector: migrate_table: Worker {worker_id}: Table {source_schema_name}.{source_table_name}: Columns computed by the target or not migrated at all are left out of the data migration: {', '.join(skipped_columns)}.")
+
+                    for order_num, col in migrated_source_columns.items():
                         self.config_parser.print_log_message('DEBUG2',
                                                             f"Worker {worker_id}: Table {source_schema_name}.{source_table_name}: Processing column {col['column_name']} ({order_num}) with data type {col['data_type']}")
 
@@ -2097,11 +2295,11 @@ class SybaseASEConnector(DatabaseConnector):
                         # Convert records to a list of dictionaries
                         transforming_start_time = time.time()
                         records = [
-                            {column['column_name']: value for column, value in zip(source_columns.values(), record)}
+                            {column['column_name']: value for column, value in zip(migrated_source_columns.values(), record)}
                             for record in records
                         ]
                         for record in records:
-                            for order_num, column in source_columns.items():
+                            for order_num, column in migrated_source_columns.items():
                                 column_name = column['column_name']
                                 column_type = column['data_type']
                                 if column_type.lower() in ['binary', 'varbinary', 'image']:

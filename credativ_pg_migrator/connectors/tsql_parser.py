@@ -2725,12 +2725,28 @@ class TsqlParser:
         """
         self.log("Running Pass 9b: Process @@rowcount")
         used_rowcount = False
-        for cmd in self.if_commands + self.while_commands:
+        ## Every statement reading @@rowcount needs the row count taken in front of it, not
+        ## only a condition: 'select @deleted = @@rowcount' kept the variable of the source
+        ## and reached the target as 'locvar_deleted := @@rowcount', which PostgreSQL cannot
+        ## read at all.
+        reading_commands = (self.if_commands + self.while_commands + self.select_commands
+                            + self.set_commands + self.print_commands + self.exec_commands
+                            + self.inserts + self.update_commands + self.delete_commands)
+        for cmd in list(reading_commands):
             if re.search(r'@@rowcount', cmd['content'], re.IGNORECASE):
                 used_rowcount = True
                 cmd['content'] = re.sub(r'@@rowcount', 'locvar_rowcount', cmd['content'], flags=re.IGNORECASE)
                 self.exec_commands.append({
                     "line": cmd['line'] - 0.1,
+                    "content": "GET DIAGNOSTICS locvar_rowcount = ROW_COUNT;"
+                })
+
+        for line_obj in self.body_lines:
+            if re.search(r'@@rowcount', line_obj.content, re.IGNORECASE):
+                used_rowcount = True
+                line_obj.content = re.sub(r'@@rowcount', 'locvar_rowcount', line_obj.content, flags=re.IGNORECASE)
+                self.exec_commands.append({
+                    "line": line_obj.line_number - 0.1,
                     "content": "GET DIAGNOSTICS locvar_rowcount = ROW_COUNT;"
                 })
 

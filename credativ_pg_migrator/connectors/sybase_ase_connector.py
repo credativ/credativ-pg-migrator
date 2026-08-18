@@ -803,12 +803,36 @@ class SybaseASEConnector(DatabaseConnector):
         return types_mapping
 
     def _apply_types_mapping(self, text, types_mapping):
+        """
+        Replace the type names of the source with the ones of the target, in ONE pass over
+        the text. With one substitution per entry of the mapping, the text written by an
+        entry was read again by the next one: 'bigdatetime' became TIMESTAMP and TIMESTAMP
+        became BYTEA, because the TIMESTAMP of Sybase is the binary row version and is
+        mapped to BYTEA - a parameter declared 'bigdatetime' reached the target as BYTEA.
+        """
+        if not text or not types_mapping:
+            return text
+
         types_without_length = ('BYTEA', 'TEXT', 'BOOLEAN', 'INTEGER', 'BIGINT', 'SMALLINT', 'DATE', 'TIMESTAMP', 'TIME')
-        for sybase_type, pg_type in types_mapping.items():
-            if pg_type.upper() in types_without_length:
-                text = re.sub(rf'\b{re.escape(sybase_type)}\s*\(\s*\d+\s*(?:,\s*\d+\s*)?\)', pg_type, text, flags=re.IGNORECASE)
-            text = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, text, flags=re.IGNORECASE)
-        return text
+        ## the longest name first, so that 'UNSIGNED BIG INT' is not read as 'INT'
+        names = sorted((name for name in types_mapping if '(' not in name), key=len, reverse=True)
+        if not names:
+            return text
+        ## a name written with more than one space between its words is the same name
+        alternatives = '|'.join(re.escape(name).replace('\\ ', ' ').replace(' ', r'\s+') for name in names)
+        pattern = re.compile(rf'\b({alternatives})\b(\s*\(\s*\d+\s*(?:,\s*\d+\s*)?\))?', re.IGNORECASE)
+
+        def replace(match):
+            source_type = re.sub(r'\s+', ' ', match.group(1)).strip().upper()
+            pg_type = types_mapping.get(source_type)
+            if pg_type is None:
+                return match.group(0)
+            length = match.group(2)
+            if length and '(' not in pg_type and pg_type.upper() not in types_without_length:
+                return f"{pg_type}{length}"
+            return pg_type
+
+        return pattern.sub(replace, text)
 
     def _quote_udts_in_declaration(self, decl_content, settings):
         migrator_tables = settings.get('migrator_tables') if settings else None
@@ -1544,6 +1568,34 @@ class SybaseASEConnector(DatabaseConnector):
         self._user_messages = messages
         return messages
 
+    @staticmethod
+    def _split_off_routine_options(text):
+        """
+        The options of a routine stand between its parameters and the AS of its body -
+        'create procedure p @a int, @b int output with recompile as ...'. Split them off:
+        they are no parameters, and none of them has a counterpart in PostgreSQL.
+        Returns (parameters, options).
+        """
+        quote = None
+        depth = 0
+        index = 0
+        while index < len(text):
+            character = text[index]
+            if quote:
+                if character == quote:
+                    quote = None
+            elif character in ("'", '"'):
+                quote = character
+            elif character == '(':
+                depth += 1
+            elif character == ')':
+                depth -= 1
+            elif depth == 0 and character in ('w', 'W') and re.match(r'(?i)WITH\b', text[index:]):
+                if index == 0 or not (text[index - 1].isalnum() or text[index - 1] == '_'):
+                    return text[:index].strip(), text[index:].strip()
+            index += 1
+        return text.strip(), ''
+
     def convert_funcproc_code(self, settings):
         try:
             funcproc_code_input = settings['funcproc_code']
@@ -1576,6 +1628,17 @@ class SybaseASEConnector(DatabaseConnector):
             types_mapping = self.get_types_mapping(local_settings)
 
             funcproc_code = self._apply_types_mapping(funcproc_code, types_mapping)
+
+            ## The whole code - the header with it - was just mapped, so everything read out of
+            ## it afterwards carries the type names of the TARGET already. Mapping such a name a
+            ## second time changes it again when the two dialects use the same word for
+            ## different things: 'bigdatetime' became TIMESTAMP here, and TIMESTAMP is the name
+            ## of the row version type of Sybase, which becomes BYTEA - the parameter reached
+            ## the target as BYTEA. The names the mapping itself produces are therefore left
+            ## alone in every later pass over that text.
+            produced_type_names = {value.upper() for value in types_mapping.values()}
+            header_types_mapping = {name: value for name, value in types_mapping.items()
+                                    if name.upper() not in produced_type_names or name.upper() == value.upper()}
 
             ## A routine which declares an output parameter answers through that parameter, and
             ## PostgreSQL refuses a function which has both a RETURNS TABLE and one of them, so
@@ -1643,8 +1706,7 @@ class SybaseASEConnector(DatabaseConnector):
                      explicit_func_return = explicit_func_return_match.group(1).strip()
                      explicit_func_return = self._apply_data_type_substitutions(explicit_func_return)
                      explicit_func_return = self._apply_udt_to_base_type_substitutions(explicit_func_return, settings)
-                     for syb, pg_tgt in types_mapping.items():
-                          explicit_func_return = re.sub(rf'\b{re.escape(syb)}\b', pg_tgt, explicit_func_return, flags=re.IGNORECASE)
+                     explicit_func_return = self._apply_types_mapping(explicit_func_return, header_types_mapping)
                      
                      clean_params = clean_params[:explicit_func_return_match.start()] + clean_params[explicit_func_return_match.end():]
                      clean_params = clean_params.strip()
@@ -1652,6 +1714,21 @@ class SybaseASEConnector(DatabaseConnector):
                  while clean_params.startswith('(') and clean_params.endswith(')'):
                      clean_params = clean_params[1:-1].strip()
                      clean_params = re.sub(r'/\*.*?\*/', '', clean_params, flags=re.DOTALL).strip()
+
+                 ## 'with recompile' and the other options of the routine are written behind
+                 ## its parameters, and they were read as a part of the last one: the
+                 ## parameter list ended as 'locvar_deleted INTEGER output with recompile',
+                 ## where the OUTPUT was no longer at its end and stayed in the DDL, which
+                 ## PostgreSQL answered with 'syntax error at or near "output"'.
+                 clean_params, routine_options = self._split_off_routine_options(clean_params)
+                 if routine_options:
+                     if re.fullmatch(r'(?is)WITH\s+RECOMPILE\s*', routine_options):
+                         ## how a plan is cached is not part of the routine in PostgreSQL
+                         self.config_parser.print_log_message('DEBUG',
+                             f"sybase_ase_connector: convert_funcproc_code: {proc_name}: '{routine_options}' is not migrated - PostgreSQL decides by itself when it replans a statement.")
+                     else:
+                         self.config_parser.print_log_message('WARNING',
+                             f"sybase_ase_connector: convert_funcproc_code: {proc_name}: the options '{routine_options}' of the routine have no counterpart in PostgreSQL and are not migrated. Check whether the routine needs them - 'execute as' in particular decides with whose rights it runs (SECURITY DEFINER).")
 
                  clean_params = clean_params.replace('@', '')
                  clean_params = self._apply_data_type_substitutions(clean_params)
@@ -1678,7 +1755,7 @@ class SybaseASEConnector(DatabaseConnector):
                          p_clean = (p_clean[:mode_match.start()] + p_clean[mode_match.end():]).strip()
                          p_clean = "INOUT " + p_clean
 
-                     p_clean = self._apply_types_mapping(p_clean, types_mapping)
+                     p_clean = self._apply_types_mapping(p_clean, header_types_mapping)
 
                      ## The default of a bit parameter is written as 0 or 1 by Sybase, and the
                      ## type became boolean here - PostgreSQL answers 'argument of DEFAULT must
@@ -1751,8 +1828,7 @@ class SybaseASEConnector(DatabaseConnector):
                       c_type = col.get('system_type_name', 'text')
                       t_mapped = self._apply_data_type_substitutions(c_type)
                       t_mapped = self._apply_udt_to_base_type_substitutions(t_mapped, settings)
-                      for syb, pg_tgt in types_mapping.items():
-                           t_mapped = re.sub(rf'\b{re.escape(syb)}\b', pg_tgt, t_mapped, flags=re.IGNORECASE)
+                      t_mapped = self._apply_types_mapping(t_mapped, types_mapping)
                       returns_clause = f"RETURNS {t_mapped}"
                       convert_to_scalar_return = True
                  else:
@@ -1762,8 +1838,7 @@ class SybaseASEConnector(DatabaseConnector):
                            c_type = col.get('system_type_name', 'text')
                            t_mapped = self._apply_data_type_substitutions(c_type)
                            t_mapped = self._apply_udt_to_base_type_substitutions(t_mapped, settings)
-                           for syb, pg_tgt in types_mapping.items():
-                                t_mapped = re.sub(rf'\b{re.escape(syb)}\b', pg_tgt, t_mapped, flags=re.IGNORECASE)
+                           t_mapped = self._apply_types_mapping(t_mapped, types_mapping)
                            col_defs.append(f'"{c_name}" {t_mapped}')
                       if col_defs:
                            returns_clause = f"RETURNS TABLE ({', '.join(col_defs)})"

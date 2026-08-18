@@ -390,6 +390,18 @@ error the target reported, so these places can be found again after a run.
   `SQLSTATE` and not by a number. Code which reacts to a particular error number has to be given an
   `ERRCODE` and a matching handler.
 
+**Options and parameters of the routine**
+
+- **`WITH RECOMPILE` and the other options** written between the parameters and the body are
+  dropped. PostgreSQL decides by itself when it replans a statement, so `RECOMPILE` has no
+  counterpart at all; any other option (`EXECUTE AS`, `ENCRYPTION`) is reported as a `WARNING`,
+  because it can change with whose rights the routine runs (`SECURITY DEFINER`).
+- **`OUTPUT` / `OUT` parameters** are written as `INOUT` in front of the name, which is where
+  PostgreSQL expects the mode; a Sybase output parameter carries its incoming value into the
+  routine, which is what `INOUT` means. A routine which returns a status code *and* has output
+  parameters gets the additional output parameter `locvar_sybase_status` for the status, and
+  `RETURNS record`.
+
 **Transactions**
 
 - **`BEGIN TRANSACTION` and `SAVE TRANSACTION`** become comments, and **`COMMIT`/`ROLLBACK`

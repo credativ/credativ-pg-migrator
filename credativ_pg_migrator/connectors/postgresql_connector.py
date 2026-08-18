@@ -1117,13 +1117,19 @@ class PostgreSQLConnector(DatabaseConnector):
                     # must be used as it is - quoting it again would break embedded quotes
                     default_is_string_literal = re.fullmatch(r"'(?:[^']|'')*'", column_default) is not None
                     source_db_type = self.config_parser.get_source_db_type()
+                    # The default has to match the type the column is really created with:
+                    # a column altered above (NUMERIC(1,0) mapped to BOOLEAN by
+                    # migration.map_numeric_1_to_boolean, an identity widened to BIGINT)
+                    # would otherwise get the default of the type it no longer has -
+                    # 'column ... is of type boolean but default expression is of type integer'.
+                    effective_data_type = altered_data_type.upper() if altered_data_type else column_data_type
                     if default_is_expression or default_is_string_literal:
                         create_column_sql += f""" DEFAULT {column_default}"""
-                    elif 'CHAR' in column_data_type or column_data_type in ('TEXT'):
+                    elif 'CHAR' in effective_data_type or effective_data_type in ('TEXT'):
                         # here we must quote the default value
                         escaped_default = column_default.replace("'", "''")
                         create_column_sql += f""" DEFAULT '{escaped_default}'"""
-                    elif column_data_type in ('BOOLEAN', 'BOOL') or (source_db_type != 'postgresql' and column_data_type == 'BIT'):
+                    elif effective_data_type in ('BOOLEAN', 'BOOL') or (source_db_type != 'postgresql' and effective_data_type == 'BIT'):
                         clean_default = column_default.lower().strip()
                         if clean_default in ('0', '(0)', 'false', "b'0'"):
                             create_column_sql += """ DEFAULT FALSE"""
@@ -1134,7 +1140,7 @@ class PostgreSQLConnector(DatabaseConnector):
                                 create_column_sql += f""" DEFAULT {column_default}::BOOLEAN"""
                             else:
                                 create_column_sql += f""" DEFAULT {column_default}"""
-                    elif column_data_type in ('BYTEA'):
+                    elif effective_data_type in ('BYTEA'):
                         create_column_sql += f""" DEFAULT '{column_default}'::BYTEA"""
                     else:
                         create_column_sql += f" DEFAULT {column_default}"

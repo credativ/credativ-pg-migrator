@@ -134,7 +134,7 @@ for every source.
 | `names_case_handling` | oracle, ibm_db2_*, mssql, sybase_ase |
 | `varchar_to_text_length`, `char_to_text_length` | oracle and all engine examples |
 | `packages_as` | oracle |
-| `numeric_1_boolean_columns`, `map_numeric_1_to_boolean` | oracle, mysql |
+| `numeric_1_boolean_columns`, `map_numeric_1_to_boolean` | oracle, mysql, sqlite (also governs a column declared `BOOLEAN`) |
 | `zero_datetime_default`, `zero_datetime_data_value`, `relax_not_null_datetime` | mysql, mariadb |
 | `uuid_default_function`, `required_extensions` | postgresql, oracle, mssql |
 | `use_aliases_as_target_names` | ibm_db2_i (the key decision there), ibm_db2_zos |

@@ -348,6 +348,10 @@ migration:
   # or NUMERIC(1,0) from other engines) are ambiguous: the same type is used both for
   # 0/1 boolean flags and for small integer codes (e.g. channel_id, day-of-week 1-7).
   # By DEFAULT such columns are mapped to SMALLINT (always lossless).
+  # A SQLite column DECLARED as BOOLEAN / BOOL / BIT is the same case - SQLite has no
+  # boolean type and stores 0 and 1 there - so it is governed by these two settings as
+  # well. Exception: when such a column really holds 'true' / 'false' as text, it is
+  # migrated as BOOLEAN even without them, because SMALLINT cannot hold those values.
   #
   # numeric_1_boolean_columns: opt specific columns in to PostgreSQL BOOLEAN instead.
   # Matching is case-insensitive regex (full match), like table_settings patterns.

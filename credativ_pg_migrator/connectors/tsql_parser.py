@@ -3025,9 +3025,18 @@ class TsqlParser:
         body_parts = new_body_parts
 
         # Inject BEGIN and END if they are missing from the Sybase source
+        ## A comment is not a statement of the routine - a body which begins or ends with one
+        ## still begins with its BEGIN and ends with its END. Counting the comment as the
+        ## first or the last line added a second END behind it, which PostgreSQL answers with
+        ## 'syntax error at end of input'.
+        def is_comment_only(text):
+            stripped = text.strip()
+            return stripped.startswith('--') or (stripped.startswith('/*') and stripped.endswith('*/'))
+
         injected_begin = False
         if body_parts:
-            first_content = next((x[1].strip().upper() for x in body_parts if x[1].strip()), "")
+            first_content = next((x[1].strip().upper() for x in body_parts
+                                  if x[1].strip() and not is_comment_only(x[1])), "")
             if first_content != "BEGIN":
                 add_line("injected_begin", 0, "BEGIN")
                 injected_begin = True
@@ -3037,7 +3046,8 @@ class TsqlParser:
             add_line(item[2], item[0], item[1])
 
         if body_parts:
-            last_content = next((x[1].strip().upper() for x in reversed(body_parts) if x[1].strip()), "")
+            last_content = next((x[1].strip().upper() for x in reversed(body_parts)
+                                 if x[1].strip() and not is_comment_only(x[1])), "")
             if injected_begin or last_content not in ("END", "END;"):
                 add_line("injected_end", 0, "END;")
 

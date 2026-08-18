@@ -1568,6 +1568,95 @@ class SybaseASEConnector(DatabaseConnector):
         self._user_messages = messages
         return messages
 
+    ## ---------------------------------------------------------------- procedure groups
+
+    ## 'create procedure p_report;2' - the header of a member of a procedure group
+    PROCEDURE_HEADER_PATTERN = re.compile(
+        r'(?im)^[ \t]*CREATE\s+(?:OR\s+REPLACE\s+)?PROC(?:EDURE)?\s+'
+        r'((?:[A-Za-z0-9_#$]+|"[^"]+"|\[[^\]]+\])(?:\s*\.\s*(?:[A-Za-z0-9_#$]+|"[^"]+"|\[[^\]]+\]))*)'
+        r'[ \t]*(;[ \t]*(\d+))?')
+
+    @staticmethod
+    def _mask_comments(text):
+        """ The text with the content of its comments replaced by spaces - same length, so
+        that a position found in it is a position of the original. """
+        masked = list(text)
+        index = 0
+        length = len(text)
+        quote = None
+        while index < length:
+            character = text[index]
+            if quote:
+                if character == quote:
+                    quote = None
+                index += 1
+                continue
+            if character in ("'", '"'):
+                quote = character
+                index += 1
+                continue
+            if text.startswith('--', index):
+                while index < length and text[index] != '\n':
+                    masked[index] = ' '
+                    index += 1
+                continue
+            if text.startswith('/*', index):
+                end_of_comment = text.find('*/', index + 2)
+                end_of_comment = length if end_of_comment == -1 else end_of_comment + 2
+                while index < end_of_comment:
+                    if text[index] != '\n':
+                        masked[index] = ' '
+                    index += 1
+                continue
+            index += 1
+        return ''.join(masked)
+
+    def _split_procedure_group(self, funcproc_code, funcproc_name):
+        """
+        A procedure group of Sybase ASE is a set of procedures sharing one name, told apart
+        by a number - 'create procedure p_report;1', 'create procedure p_report;2'. The
+        catalog knows one object for the whole group and keeps the text of every member in
+        it, which is what the migrator reads: one routine whose code holds two CREATE
+        statements, and a name the header of PostgreSQL cannot carry ('p_report"(;2').
+
+        PostgreSQL has no such thing, so every member becomes a routine of its own: the
+        member 1, which 'exec p_report' calls, keeps the name of the group, every other one
+        gets the number appended ('p_report_2').
+
+        Returns the list of (name, code) of the members, or an empty list when the code is
+        not a group at all.
+        """
+        if not funcproc_code:
+            return []
+
+        masked_code = self._mask_comments(funcproc_code)
+        headers = list(self.PROCEDURE_HEADER_PATTERN.finditer(masked_code))
+        if not headers:
+            return []
+        if len(headers) == 1 and not headers[0].group(2):
+            return []
+
+        base_name = funcproc_name or headers[0].group(1)
+        base_name = base_name.split('.')[-1].strip().strip('"').strip('[]')
+
+        members = []
+        for position, header in enumerate(headers):
+            start = 0 if position == 0 else header.start()
+            end = headers[position + 1].start() if position + 1 < len(headers) else len(funcproc_code)
+            member_code = funcproc_code[start:end]
+            number = header.group(3)
+            member_name = base_name if number in (None, '1') else f"{base_name}_{number}"
+
+            ## the number belongs to the name of the source and cannot stand in the header of
+            ## the target - it is written into the name instead
+            if header.group(2):
+                member_code = (funcproc_code[start:header.start(1)]
+                               + member_name
+                               + funcproc_code[header.end(2):end])
+            members.append((member_name, member_code))
+
+        return members
+
     @staticmethod
     def _split_off_routine_options(text):
         """
@@ -1596,7 +1685,7 @@ class SybaseASEConnector(DatabaseConnector):
             index += 1
         return text.strip(), ''
 
-    def convert_funcproc_code(self, settings):
+    def convert_funcproc_code(self, settings, is_group_member=False):
         try:
             funcproc_code_input = settings['funcproc_code']
             
@@ -1606,6 +1695,32 @@ class SybaseASEConnector(DatabaseConnector):
             else:
                 funcproc_code = funcproc_code_input
                 implicit_return_schema = []
+
+            ## A procedure group of Sybase is one object of the catalog holding several
+            ## CREATE statements. Every member becomes a routine of its own - see
+            ## _split_procedure_group - and the statements are returned together, the way
+            ## the source keeps them together.
+            if not is_group_member:
+                group_members = self._split_procedure_group(funcproc_code, settings.get('funcproc_name'))
+                if group_members:
+                    self.config_parser.print_log_message('WARNING',
+                        f"sybase_ase_connector: convert_funcproc_code: {settings.get('funcproc_name')} is a procedure group of "
+                        f"{len(group_members)} members, which PostgreSQL does not have - every member is migrated as a routine of "
+                        f"its own: {', '.join(name for name, _ in group_members)}. A caller writing 'exec {settings.get('funcproc_name')};<n>' "
+                        f"has to name the routine of that member.")
+                    converted_members = []
+                    for member_name, member_code in group_members:
+                        member_settings = dict(settings)
+                        member_settings['funcproc_code'] = member_code
+                        member_settings['funcproc_name'] = member_name
+                        converted_member = self.convert_funcproc_code(member_settings, is_group_member=True)
+                        if converted_member and converted_member.strip():
+                            converted_members.append(converted_member.strip())
+                        else:
+                            self.config_parser.print_log_message('WARNING',
+                                f"sybase_ase_connector: convert_funcproc_code: The member {member_name} of the procedure group "
+                                f"{settings.get('funcproc_name')} could not be converted - it is missing in the target.")
+                    return "\n\n".join(converted_members) + "\n" if converted_members else ''
 
             # Convert double-quoted string literals to single-quoted strings
             # Sybase often allows "string" where PostgreSQL expects 'string' (which would otherwise parse as an identifier)

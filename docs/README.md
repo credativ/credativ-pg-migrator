@@ -390,6 +390,14 @@ error the target reported, so these places can be found again after a run.
   The **error number is written into the message text**, since PostgreSQL identifies an error by
   `SQLSTATE` and not by a number. Code which reacts to a particular error number has to be given an
   `ERRCODE` and a matching handler.
+- **`ROLLBACK TRIGGER [WITH RAISERROR <n> "<message>"]`** — the way a trigger of Sybase refuses the
+  statement which fired it — becomes a `RAISE EXCEPTION` carrying that message, which is exactly
+  what it does in PostgreSQL: the exception of a trigger function undoes the statement. The message
+  is read whether it stands on the same line or on the next one. A `ROLLBACK TRIGGER` **without** a
+  message becomes a `RAISE EXCEPTION` naming the construct and is reported as a `WARNING`:
+  PostgreSQL cannot undo only the work of the trigger and let the statement stand. Note the
+  difference in scope — `ROLLBACK TRIGGER` of Sybase rolls the whole transaction back, while the
+  exception aborts the statement and leaves the transaction to its caller.
 
 **Options and parameters of the routine**
 

@@ -4,6 +4,11 @@
 
 - 2026.08.18
 
+  - Fix - T-SQL Parser / Sybase ASE Connector: The trigger `trg_oi_ri_check` could not be created: `rollback trigger with raiserror 30003 "order_items: order_id does not exist in orders"` was read as a plain ROLLBACK and became `ROLLBACK;` - a statement PL/pgSQL refuses inside a function - while the message, which the source writes on the next line, stayed behind as a line of its own and reached the target as `"order_items: ..."`, an identifier PostgreSQL does not know (`syntax error at or near`). `ROLLBACK TRIGGER` is how a trigger of Sybase refuses the statement which fired it, and it is what `RAISE EXCEPTION` does in PostgreSQL - the exception of a trigger function undoes that statement - so it is migrated as one, with the message it carries:
+    - The message is read whether it stands on the same line or on the next one, in single or in double quotes, and it goes through the same conversion as a RAISERROR: the number of a message of `sysusermessages` is looked up in the catalog, the `%1!` placeholders become the `%` of RAISE and name the argument which belongs to them.
+    - A `rollback trigger` without a message becomes a `RAISE EXCEPTION` naming the construct and is reported as a warning: PostgreSQL has no way to undo only the work of the trigger and let the statement stand. The difference in scope is written down in the user guide - `rollback trigger` rolls the whole transaction back, while the exception aborts the statement and leaves the transaction to its caller.
+    - A plain `rollback transaction` is not touched by this and stays what it was.
+
   - Fix - T-SQL Parser: The declaration of a cursor was cut off in front of its own query when the query stands on the next line - the usual way of writing it:
     ```
     declare c_top cursor for

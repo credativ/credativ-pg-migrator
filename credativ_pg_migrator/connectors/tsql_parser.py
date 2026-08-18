@@ -902,6 +902,23 @@ class TsqlParser:
         self.body_lines = new_body_lines
 
 
+    def cursor_query_is_incomplete(self, cursor_lines):
+        """
+        Whether the declaration of a cursor read so far still waits for (a part of) its
+        query: the FOR is not there yet, nothing follows it, or the query ends with a word
+        which cannot be the end of it (UNION, a comma, an open parenthesis).
+        """
+        collected = " ".join(line.strip() for line in cursor_lines).strip()
+        if not collected:
+            return True
+        masked, _ = self.mask_comments_and_literals(collected, False)
+        for_positions = [match.end() for match in re.finditer(r'(?i)\bFOR\b', masked)]
+        if not for_positions:
+            return True
+        if not collected[for_positions[0]:].strip():
+            return True
+        return bool(re.search(r'(?i)(\b(UNION(\s+ALL)?|INTERSECT|EXCEPT|AND|OR|FROM|WHERE|BY)|,|\()\s*$', collected))
+
     def pass_3c_parse_cursors(self):
         self.log("Running Pass 3c: Parse Cursors")
         new_body_lines = []
@@ -920,6 +937,16 @@ class TsqlParser:
                         
                         if len(cursor_lines) > 0:
                             is_terminator = re.match(r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR|BREAK|CONTINUE|OPEN|FETCH|CLOSE|DEALLOCATE|GOTO)\b', current_content, re.IGNORECASE)
+                            ## The query of the cursor stands behind its FOR, and it is
+                            ## written on the next line as often as not:
+                            ##     declare c_top cursor for
+                            ##         select ... from #ltv order by ltv desc
+                            ## SELECT ends a statement everywhere else, so the declaration
+                            ## was cut off in front of its own query - 'c_top cursor for;',
+                            ## which PostgreSQL answers with 'missing SQL statement' - and
+                            ## the query stayed in the body as a statement of its own.
+                            if is_terminator and self.cursor_query_is_incomplete(cursor_lines):
+                                is_terminator = None
                             if is_terminator:
                                 break
                         cursor_lines.append(current_line.content)
@@ -1772,6 +1799,43 @@ class TsqlParser:
             line = self.body_lines[i]
             content = line.content.strip()
 
+            ## 'rollback trigger with raiserror <number> "<message>"' of Sybase undoes the
+            ## work of the trigger and reports the error, and the message is written on the
+            ## next line as often as not. It is what RAISE EXCEPTION does in PostgreSQL: the
+            ## exception of a trigger function undoes the statement which fired it. Without
+            ## this the line was read as a plain ROLLBACK - a statement PL/pgSQL refuses
+            ## inside a function - and the message stayed behind as a line of its own.
+            if re.match(r'(?i)^ROLLBACK\s+TRIGGER\b', content):
+                start_line = line.line_number
+                rollback_lines = []
+                while i < len(self.body_lines):
+                    current_line = self.body_lines[i]
+                    current_content = current_line.content.strip()
+                    if len(rollback_lines) > 0:
+                        if current_content == "" or re.match(
+                                r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR|BREAK|CONTINUE|OPEN|FETCH|CLOSE|DEALLOCATE|GOTO)\b',
+                                current_content, re.IGNORECASE):
+                            break
+                    rollback_lines.append(current_line.content)
+                    i += 1
+
+                statement = " ".join(part.strip() for part in rollback_lines).strip()
+                error_part = re.match(r'(?is)^ROLLBACK\s+TRIGGER\s*(?:WITH\s+(RAISERROR\b.*))?$', statement)
+                if error_part and error_part.group(1):
+                    error_number, message, message_is_literal, arguments = self.parse_raiserror_statement(error_part.group(1))
+                    converted = self.build_raise_exception(error_number, message, message_is_literal, arguments, statement)
+                else:
+                    ## without a message there is nothing to report but the fact itself
+                    converted = "RAISE EXCEPTION 'The statement was rolled back by the trigger of the source (rollback trigger)'"
+                    if self.config_parser:
+                        self.config_parser.print_log_message('WARNING',
+                            f"tsql_parser: pass_5e_parse_raiserror: '{statement}' carries no message - it becomes a RAISE EXCEPTION, "
+                            f"which undoes the statement the trigger was fired by. PostgreSQL has no way to undo only the work of the "
+                            f"trigger and let the statement stand.")
+
+                self.raiserror_commands.append({"line": start_line, "content": converted})
+                continue
+
             if re.match(r'^ROLLBACK\b', content, re.IGNORECASE):
                 # Check if next statement is RAISERROR
                 next_idx = i + 1
@@ -2525,6 +2589,22 @@ class TsqlParser:
 
         self.log("Running Pass 8d: Convert statements with the statement converter")
 
+        ## The query of a cursor is a statement of the routine as well - without the
+        ## conversion it kept the names, the functions and the temporary tables of the
+        ## source ('select ... from #ltv') in the DECLARE section of the target.
+        for cursor in self.cursors:
+            declaration = re.match(r'(?is)^(.*?\bCURSOR\b\s*(?:\([^)]*\)\s*)?(?:IS|FOR)\s+)(SELECT\b.*?)(;?)\s*$', cursor['content'])
+            if not declaration:
+                continue
+            temp_settings = self.settings.copy()
+            temp_settings['view_code'] = declaration.group(2)
+            try:
+                converted_query = self.view_converter(temp_settings)
+                if converted_query and converted_query.strip():
+                    cursor['content'] = f"{declaration.group(1)}{converted_query.strip().rstrip(';')};"
+            except Exception as e:
+                self.log(f"Failed to convert the query of a cursor: {e}")
+
         for command_kind, commands in (('SELECT', self.select_commands),
                                        ('INSERT', self.inserts),
                                        ('UPDATE', self.update_commands),
@@ -2881,7 +2961,13 @@ class TsqlParser:
 
             # 4b. Cursors
             for c in self.cursors:
-                add_line("cursor_declaration", c['line'], c['content'])
+                content = c['content']
+                ## the name of a temporary table has no '#' in the target
+                content = re.sub(r"(?<!')#([a-zA-Z0-9_]+)\b", r'\1', content)
+                ## PostgreSQL has no such clause - its cursors are read only, and an update
+                ## through one is written as 'WHERE CURRENT OF' without declaring it here
+                content = re.sub(r'(?is)\s+FOR\s+(?:READ\s+ONLY|UPDATE(?:\s+OF\s+[^;]+)?)\s*;?\s*$', ';', content)
+                add_line("cursor_declaration", c['line'], content)
 
         # 5. Body Output Array
         # Collect all parts, sort by original line number, then append.
@@ -3003,11 +3089,15 @@ class TsqlParser:
         new_body_parts = []
         for line_num, content, source_name in body_parts:
             # Detect SET ROWCOUNT N
-            m = re.match(r'^\s*SET\s+ROWCOUNT\s+(\d+)', content, re.IGNORECASE)
+            ## The number of rows may be held in a variable - 'set rowcount @top_n' - which
+            ## is a LIMIT of PostgreSQL just as well. Only the written number was read, so
+            ## such a line stayed in the code as it was written for the source.
+            m = re.match(r'^\s*SET\s+ROWCOUNT\s+(\d+|locvar_[a-zA-Z0-9_]+|@[a-zA-Z0-9_]+)', content, re.IGNORECASE)
             if m:
                 limit_val = m.group(1)
                 active_rowcount_limit = None if limit_val == '0' else limit_val
-                content = re.sub(r'(?i)^\s*SET\s+ROWCOUNT\s+\d+', f'/* SET ROWCOUNT {limit_val} converted to LIMIT */', content)
+                content = re.sub(r'(?i)^\s*SET\s+ROWCOUNT\s+(?:\d+|locvar_[a-zA-Z0-9_]+|@[a-zA-Z0-9_]+)',
+                                 f'/* SET ROWCOUNT {limit_val} converted to LIMIT */', content)
 
             # Apply LIMIT to SELECT commands
             elif source_name == "select_commands" and active_rowcount_limit:

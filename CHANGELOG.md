@@ -4,6 +4,17 @@
 
 - 2026.08.18
 
+  - Fix - T-SQL Parser: The declaration of a cursor was cut off in front of its own query when the query stands on the next line - the usual way of writing it:
+    ```
+    declare c_top cursor for
+        select customer_id, cust_name, ltv from #ltv order by ltv desc
+    ```
+    reached the target as `c_top cursor for;`, which PostgreSQL answers with `missing SQL statement at or near ";"`, while the query stayed in the body as a statement of its own and was returned to the caller as a result set it never asked for. The declaration is read as a whole now: a line beginning with SELECT does not end it while the query behind the FOR is still missing, and a query written over several lines is followed to its end (a `UNION` of two SELECTs included).
+    - The query of a cursor is converted with the statement converter like every other statement of the routine - it kept the names, the functions and the `#temp` tables of the source before, in the DECLARE section of the target.
+    - A trailing `FOR READ ONLY` / `FOR UPDATE OF ...` is dropped. PostgreSQL has no such clause: its cursors are read only, and an update through one is written as `WHERE CURRENT OF` without declaring it.
+
+  - Fix - T-SQL Parser: `SET ROWCOUNT` was only read with the number written out. `set rowcount @top_n` - the number held in a variable, which is how a routine with a parameter for it is written - stayed in the code as it stood and PostgreSQL refused it. Both forms become the `LIMIT` of the statements behind them now (`LIMIT locvar_top_n`), and `SET ROWCOUNT 0` ends it as before.
+
   - New - Sybase ASE Connector: Procedure groups are migrated. A procedure group of Sybase ASE is a set of procedures sharing one name and told apart by a number - `create procedure p_report;1`, `create procedure p_report;2` - which the catalog keeps as one object holding the text of every member, and which are dropped together as one unit. The migrator read that object as one routine and built one function out of two CREATE statements: the number of the first member ended up where the parameters belong (`CREATE FUNCTION "migtest"."p_report"(;2`, answered with `syntax error at or near ";"`) and the second member stood in the body as text nobody could read. The members are separated now and every one of them becomes a routine of its own, created together in one statement, the way the source keeps them together:
     - The member `;1`, the one `exec p_report` calls, keeps the name of the group; every other member gets its number appended (`p_report_2`). A caller writing `exec p_report;2` has to name that routine instead, which is why the whole group is reported as a warning naming its members.
     - The comments of the source stay with the member they were written for, and the separation reads the CREATE statements out of the text with its comments masked, so a `create procedure` written inside a comment does not separate anything.

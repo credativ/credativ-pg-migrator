@@ -403,6 +403,17 @@ error the target reported, so these places can be found again after a run.
   parameters gets the additional output parameter `locvar_sybase_status` for the status, and
   `RETURNS record`.
 
+**Cursors**
+
+- The **query of a cursor** is read as a whole, however it is written — `declare c cursor for` with
+  the `select` on the next line, a query over several lines, a `UNION` of two of them. It is
+  converted like every other statement of the routine (names quoted, `#temp` tables, functions of
+  the source), so the `DECLARE` section of the target carries the finished query.
+- A trailing **`FOR READ ONLY` / `FOR UPDATE [OF …]`** is dropped: a cursor of PostgreSQL is read
+  only, and an update through one is written as `WHERE CURRENT OF` without declaring anything here.
+- **`SET ROWCOUNT n`** becomes a `LIMIT` on the statements behind it, whether the number is written
+  out or held in a variable (`set rowcount @top_n` → `LIMIT locvar_top_n`); `SET ROWCOUNT 0` ends it.
+
 **Transactions**
 
 - **`BEGIN TRANSACTION` and `SAVE TRANSACTION`** become comments, and **`COMMIT`/`ROLLBACK`

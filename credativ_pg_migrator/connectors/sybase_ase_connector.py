@@ -347,6 +347,55 @@ class SybaseASEConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', e)
             raise
 
+    @staticmethod
+    def _joined_text_pieces(pieces):
+        """
+        syscomments stores the text of an object in pieces of 255 bytes, numbered by colid.
+        They are a byte stream and must be joined in that order and without a separator -
+        a piece can end in the middle of a word.
+        """
+        if not pieces:
+            return ''
+        return ''.join(text for _, text in sorted(pieces.items()) if text is not None)
+
+    def _extract_default_expression(self, default_text, default_object_name=None):
+        """
+        The expression of a column default, taken out of the text syscomments keeps for it.
+        Two shapes arrive here:
+          - the default written in the CREATE TABLE, which Sybase stores as
+            "DEFAULT  getdate()";
+          - a default object bound to the column with sp_bindefault, whose text is the
+            complete batch which created it - "create default d_zero as 0", including
+            every comment written in that batch. The comments have to be removed while
+            the line breaks are still there, otherwise a '--' comment swallows the whole
+            statement behind it and the "default" of the column becomes a comment.
+        """
+        if not default_text:
+            return ''
+        text = self.strip_sql_comments(str(default_text))
+        text = re.sub(r'\s+', ' ', text).strip()
+        if not text:
+            return ''
+
+        create_default = re.search(
+            r'(?is)\bCREATE\s+DEFAULT\s+(?:(?:[A-Za-z0-9_$#]+|"[^"]+"|\[[^\]]+\])\s*\.\s*)*'
+            r'(?:[A-Za-z0-9_$#]+|"[^"]+"|\[[^\]]+\])\s+AS\s*(.*)$', text)
+        if create_default:
+            text = create_default.group(1).strip()
+        else:
+            text = re.sub(r'(?i)^DEFAULT\s+', '', text).strip()
+
+        text = text.rstrip(';').strip()
+        # The batch separator is not part of the value
+        text = re.sub(r'(?is)\s*\bGO\s*$', '', text).strip()
+        # A name Sybase wrote in double quotes is not a string literal - the quotes would
+        # reach the target as part of the value.
+        if len(text) > 1 and text.startswith('"') and text.endswith('"'):
+            text = text[1:-1].strip()
+        if not text and default_object_name:
+            self.config_parser.print_log_message('WARNING', f"sybase_ase_connector: _extract_default_expression: The default object {default_object_name} carries no value which could be migrated - its text is: {str(default_text).strip()}")
+        return text
+
     def fetch_table_columns(self, settings) -> dict:
         table_schema = settings['table_schema']
         table_name = settings['table_name']
@@ -374,7 +423,7 @@ class SybaseASEConnector(DatabaseConnector):
                     '' as full_data_type_length,
                     object_name(c.domain) as column_domain,
                     object_name(c.cdefault) as column_default_name,
-                    ltrim(rtrim(str_replace(co.text, char(10),''))) as column_default_value,
+                    co.text as column_default_value,
                     c.status,
                     t.variable as variable_length,
                     c.prec as data_type_precision,
@@ -385,7 +434,9 @@ class SybaseASEConnector(DatabaseConnector):
                     case when c.status2 & 16 = 16 then 1 else 0 end is_generated_virtual,
                     case when c.status2 & 32 = 32 then 1 else 0 end is_genreated_stored,
                     com.text as computed_column_expression,
-                    case when c.status3 & 1 = 1 then 1 else 0 end as is_hidden_column
+                    case when c.status3 & 1 = 1 then 1 else 0 end as is_hidden_column,
+                    co.colid as default_text_piece,
+                    com.colid as computed_text_piece
                 FROM syscolumns c
                 JOIN sysobjects tab ON c.id = tab.id
                 JOIN systypes t ON c.usertype = t.usertype
@@ -394,12 +445,30 @@ class SybaseASEConnector(DatabaseConnector):
                 WHERE user_name(tab.uid) = '{table_schema}'
                     AND tab.name = '{table_name}'
                     AND tab.type = 'U'
-                ORDER BY c.colid
+                ORDER BY c.colid, co.colid, com.colid
             """
             cursor.execute(query)
-            for row in cursor.fetchall():
-                self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: fetch_table_columns: Processing column: {row}")
+            rows = cursor.fetchall()
+
+            # syscomments keeps the text of a default or of a computed column in pieces of
+            # 255 bytes - a long one arrives as several rows, and the two joins multiply
+            # them. The pieces are collected per column first, so that every column is
+            # built once and from its complete text.
+            default_text_pieces = {}
+            computed_text_pieces = {}
+            for row in rows:
+                if row[10] is not None and row[22] is not None:
+                    default_text_pieces.setdefault(row[0], {})[row[22]] = row[10]
+                if row[20] is not None and row[23] is not None:
+                    computed_text_pieces.setdefault(row[0], {})[row[23]] = row[20]
+
+            processed_positions = set()
+            for row in rows:
                 ordinal_position = row[0]
+                if ordinal_position in processed_positions:
+                    continue
+                processed_positions.add(ordinal_position)
+                self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: fetch_table_columns: Processing column: {row}")
                 column_name = row[1].strip()
                 data_type = row[2].strip()
                 # data_type_length = row[3].strip()
@@ -409,7 +478,8 @@ class SybaseASEConnector(DatabaseConnector):
                 # full_data_type_length = row[7].strip()
                 column_domain = row[8]
                 column_default_name = row[9]
-                column_default_value = row[10].replace('DEFAULT ', '').strip().strip('"') if row[10] and row[10].replace('DEFAULT ', '').strip().startswith('"') and row[10].replace('DEFAULT ', '').strip().endswith('"') else (row[10].replace('DEFAULT ', '').strip() if row[10] else '')
+                column_default_value = self._extract_default_expression(
+                    self._joined_text_pieces(default_text_pieces.get(ordinal_position)), column_default_name)
                 status = row[11]
                 variable_length = row[12]
                 data_type_precision = row[13]
@@ -419,7 +489,7 @@ class SybaseASEConnector(DatabaseConnector):
                 domain_name = row[17]
                 is_generated_virtual = row[18]
                 is_generated_stored = row[19]
-                generation_expression = row[20]
+                generation_expression = self._joined_text_pieces(computed_text_pieces.get(ordinal_position)) or None
                 is_hidden_column = row[21]
                 stripped_generation_expression = generation_expression.replace('AS ', '').replace('MATERIALIZED', '').strip() if generation_expression else ''
 
@@ -597,7 +667,7 @@ class SybaseASEConnector(DatabaseConnector):
             default_owner = row[0]
             default_object_name = row[1]
             definition_line_number = row[2]
-            default_definition_part = row[3].strip()
+            default_definition_part = row[3] or ''
             if default_object_name not in default_values:
                 default_values[default_object_name] = {
                     'default_value_schema': default_owner,
@@ -607,21 +677,18 @@ class SybaseASEConnector(DatabaseConnector):
                     'default_value_comment': '',
                 }
             else:
-                default_values[default_object_name]['default_value_sql'] += f" {default_definition_part}"
+                # The pieces of syscomments are a byte stream - joining them with a space
+                # inserted would break a word which was split between two of them.
+                default_values[default_object_name]['default_value_sql'] += default_definition_part
         cursor.close()
         self.disconnect()
 
         for default_object_name, default_value in default_values.items():
+            # The comments of the batch have to go before the text is joined into one line,
+            # otherwise a '--' comment swallows the statement behind it.
+            default_value['extracted_default_value'] = self._extract_default_expression(
+                default_value['default_value_sql'], default_object_name)
             default_value['default_value_sql'] = re.sub(r'\s+', ' ', default_value['default_value_sql']).strip()
-            default_value['default_value_sql'] = re.sub(r'\n', '', default_value['default_value_sql'])
-            # default_value['default_value_sql'] = re.sub(r'\"', '', default_value['default_value_sql'])
-            # default_value['default_value_sql'] = re.sub(r'`', '', default_value['default_value_sql'])
-            extracted_default_value = default_value['default_value_sql']
-            extracted_default_value = re.sub(rf'create\s+default\s+{re.escape(default_value["default_value_name"])}\s+as', '', extracted_default_value, flags=re.IGNORECASE).strip()
-            extracted_default_value = re.sub(rf'default\s+', '', extracted_default_value, flags=re.IGNORECASE).strip()
-            extracted_default_value = extracted_default_value.replace('"', '')
-            extracted_default_value = extracted_default_value.replace("'", '')
-            default_value['extracted_default_value'] = extracted_default_value.strip()
         return default_values
 
 

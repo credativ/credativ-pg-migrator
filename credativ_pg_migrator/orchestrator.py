@@ -676,9 +676,13 @@ class Orchestrator:
                             self.config_parser.print_log_message('INFO', msg)
                             self.migrator_tables.update_user_defined_type_status({'row_id': type_data['id'], 'success': True, 'message': 'skipped (exists)'})
                         else:
+                            # Not an error of the migration: the domain of the target was
+                            # created by an earlier run or by hand, and it is the existing
+                            # one which the columns are created with. Reported so that the
+                            # difference is visible, but nothing is overwritten.
                             msg = f"Domain {type_data['target_type_name']} already exists but with different underlying type: {existing_type} (expected: {target_basic_type}). Normalized: {norm_existing} vs {norm_target}. Skipping creation."
-                            self.config_parser.print_log_message('ERROR', msg)
-                            self.migrator_tables.update_user_defined_type_status({'row_id': type_data['id'], 'success': False, 'message': f'ERROR: {msg}'})
+                            self.config_parser.print_log_message('WARNING', msg)
+                            self.migrator_tables.update_user_defined_type_status({'row_id': type_data['id'], 'success': False, 'message': f'WARNING: {msg}'})
                     else:
                         self.target_connection.execute_query(type_data['target_type_sql'])
                         self.migrator_tables.update_user_defined_type_status({'row_id': type_data['id'], 'success': True, 'message': 'migrated OK'})

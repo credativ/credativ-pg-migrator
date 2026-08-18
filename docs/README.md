@@ -347,6 +347,8 @@ Other ODBC parameters such as DSN or connection string are configured alongside 
 
 Functions, procedures and triggers are converted (T-SQL → PL/pgSQL, via the shared T-SQL parser), as are views.
 
+**Data types worth knowing about (Sybase ASE):** the `TIMESTAMP` of Sybase is **not** a point in time — it is the row version of the row, a `VARBINARY(8)` the server writes on every change (the `ROWVERSION` of MS SQL), and it is migrated as `BYTEA`. PostgreSQL does not maintain such a column; the values of the source are copied, they are not updated afterwards. `MONEY` / `SMALLMONEY` become `NUMERIC(19,4)` / `NUMERIC(10,4)`, `BIGTIME` becomes `TIME` (it holds a time of the day, not a point in time) and `BIGDATETIME` becomes `TIMESTAMP`.
+
 **Known limitations (Sybase ASE):** foreign-key `ON DELETE` actions, table/column comments and standalone sequences have no Sybase counterpart or are not migrated. Note that older ASE versions do not support `LIMIT ... OFFSET`, so the migrator always drops and reloads unfinished tables when resuming after a crash for this source (it cannot skip already-loaded rows reliably).
 
 #### 4.6.1 Cases which need manual adjustment (Sybase ASE)

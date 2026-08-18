@@ -731,11 +731,18 @@ class SybaseASEConnector(DatabaseConnector):
                 'BIGDATETIME': 'TIMESTAMP',
                 'DATE': 'DATE',
                 'DATETIME': 'TIMESTAMP',
-                'BIGTIME': 'TIMESTAMP',
+                # BIGTIME holds a time of the day with microseconds, not a point in time -
+                # migrated as TIMESTAMP it received the date of the migration run.
+                'BIGTIME': 'TIME',
                 'SMALLDATETIME(4)': 'TIMESTAMP',
                 'SMALLDATETIME': 'TIMESTAMP',
                 'TIME': 'TIME',
-                'TIMESTAMP': 'TIMESTAMP',
+                # The TIMESTAMP of Sybase ASE is not a point in time at all: it is the row
+                # version of the table, a VARBINARY(8) the server writes on every change
+                # (the ROWVERSION of MS SQL). Its value is binary - migrating it as a
+                # PostgreSQL TIMESTAMP ended as
+                # 'invalid input syntax for type timestamp: "b'\x00\x00...<\x8e'"'.
+                'TIMESTAMP': 'BYTEA',
                 'BIGINT': 'BIGINT',
                 'UNSIGNED BIGINT': 'BIGINT',
                 'INTEGER': 'INTEGER',
@@ -2302,9 +2309,11 @@ class SybaseASEConnector(DatabaseConnector):
                             for order_num, column in migrated_source_columns.items():
                                 column_name = column['column_name']
                                 column_type = column['data_type']
-                                if column_type.lower() in ['binary', 'varbinary', 'image']:
+                                # The TIMESTAMP of Sybase is the binary row version of the
+                                # row, not a point in time (see get_types_mapping)
+                                if column_type.lower() in ['binary', 'varbinary', 'image', 'timestamp']:
                                     record[column_name] = bytes(record[column_name]) if record[column_name] is not None else None
-                                elif column_type.lower() in ['datetime', 'smalldatetime', 'date', 'time', 'timestamp']:
+                                elif column_type.lower() in ['datetime', 'smalldatetime', 'date', 'time']:
                                     record[column_name] = str(record[column_name]) if record[column_name] is not None else None
 
                         # Insert batch into target table

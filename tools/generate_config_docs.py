@@ -51,6 +51,8 @@ def type_name(node, root):
     """A short human name for what a property accepts."""
     node = resolve(node, root)
 
+    if 'x-standard-values' in node:
+        return 'string'
     if 'oneOf' in node:
         return ' \\| '.join(type_name(option, root) for option in node['oneOf'])
 
@@ -94,6 +96,10 @@ def type_name(node, root):
 
 def allowed_values(node, root):
     node = resolve(node, root)
+    # A setting with standard values and aliases shows only the standard ones here; the
+    # aliases are listed separately in the notes, so the two are never confused.
+    if 'x-standard-values' in node:
+        return ', '.join(f'`{v}`' for v in node['x-standard-values'])
     if 'oneOf' in node:
         parts = [allowed_values(option, root) for option in node['oneOf']]
         return ' \\| '.join(p for p in parts if p)
@@ -145,6 +151,16 @@ def notes(node, root, name, required):
     for extra_key in ('x-arity-note', 'x-required-reason'):
         if node.get(extra_key):
             tail.append(f'({node[extra_key]})')
+    aliases = node.get('x-aliases')
+    if aliases:
+        grouped = {}
+        for alias, standard in aliases.items():
+            grouped.setdefault(standard, []).append(alias)
+        spelled = '; '.join(
+            f"{', '.join(f'`{a}`' for a in sorted(names))} = `{standard}`"
+            for standard, names in sorted(grouped.items()))
+        tail.append(f'Accepted aliases: {spelled}.')
+
     rendered = ' '.join(tail)
     if prefix and rendered:
         rendered = f'{prefix}. {rendered}'

@@ -46,6 +46,13 @@ class CommandLine:
             help="Drop and recreate unfinished tables when resuming after a crash. Works only together with --resume parameter (default: False = continue with partially migrated tables without dropping them)")
 
         self.parser.add_argument(
+            '--ignore-config-schema-errors',
+            action='store_true',
+            help="Continue even when the configuration does not match the configuration schema. "
+                 "The mismatches are reported as warnings instead of stopping the run - for the "
+                 "case where the schema is wrong and the configuration is right (default: False)")
+
+        self.parser.add_argument(
             '--validate',
             action='store_true',
             help="Run post-migration data validation module utilizing the current config file")
@@ -84,6 +91,7 @@ class CommandLine:
             logger.info("resume (after crash)   = {}".format(self.args.resume))
             logger.info("drop_unfinished_tables = {}".format(self.args.drop_unfinished_tables))
             logger.info("validate               = {}".format(self.args.validate))
+            logger.info("ignore_config_schema_errors = {}".format(self.args.ignore_config_schema_errors))
             # logger.info("migrator_dir = {}".format(self.args.migrator_dir))
 
     def get_parameter_value(self, param_name):

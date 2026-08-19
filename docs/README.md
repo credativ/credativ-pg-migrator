@@ -709,7 +709,7 @@ carries numbered notes for the engine-specific caveats.
 ### 5.1 General characteristics
 
 - The config file is a YAML document.
-- Every existing configuration setting is documented in `docs/config_reference.md`, with its type, allowed values, default and the source engines it applies to. That file is generated from `credativ_pg_migrator/config.schema.json` and cannot drift from it. The schema is also what the migrator validates your configuration against when it starts, so a typo or a wrong value is reported before anything is migrated.
+- Every existing configuration setting is documented in `docs/config_reference.md`, with its type, allowed values, default and the source engines it applies to. That file is generated from `credativ_pg_migrator/config.schema.json` and cannot drift from it. The schema is also what the migrator validates your configuration against when it starts: a wrong value **stops the run there**, before anything is migrated, and an unknown key is reported as a warning. `--ignore-config-schema-errors` runs anyway.
 
 - Ready-to-use examples for every supported source database and workflow are in [configs/](configs/) - see [configs/README.md](configs/README.md). Taking the example for your engine is the fastest way to start: every line that must be changed is marked `>>> ADJUST`.
 
@@ -806,6 +806,15 @@ Parameters:
     `--log-level=INFO` showed INFO alone and warnings stayed hidden unless the run was
     started with `--log-level=WARNING`. Warnings are now shown by default, and
     `--log-level=WARNING` is now *quieter* than INFO rather than noisier.
+- --ignore-config-schema-errors
+  - Continue even when the configuration does not match the configuration schema
+    (`credativ_pg_migrator/config.schema.json`). By default a setting the migrator cannot
+    carry out - a wrong type, a value outside the allowed set, a list of the wrong length,
+    a missing required block - is reported and **stops the run before anything is
+    migrated**. An *unknown* key never stops the run; it is reported as a warning, so a
+    configuration written for a later version stays usable, while a misspelling is still
+    named. Use this flag for the case where the schema is wrong and the configuration is
+    right, and please report it.
     - --dry-run
       - Run the tool in dry-run mode (no changes to target).
     - --resume

@@ -14,6 +14,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import copy
 import fnmatch
 import json
 import yaml
@@ -50,19 +51,70 @@ class ConfigParser:
         self.check_config_against_schema(config, config_file)
         return config
 
+    ## Settings whose value the code lower-cases before it interprets it. The schema is
+    ## checked against the value the code will really see, so that a spelling which works
+    ## is not refused on its capitalisation alone.
+    CASE_INSENSITIVE_SETTINGS = (
+        ('pattern_syntax',),
+        ('migration', 'names_case_handling'),
+        ('migration', 'packages_as'),
+        ('migration', 'validate_objects'),
+    )
+
+    @classmethod
+    def config_as_the_code_reads_it(cls, config):
+        """A copy of the configuration with the case-insensitive settings lower-cased."""
+        if not isinstance(config, dict):
+            return config
+        normalized = copy.deepcopy(config)
+        for path in cls.CASE_INSENSITIVE_SETTINGS:
+            holder = normalized
+            for step in path[:-1]:
+                holder = holder.get(step) if isinstance(holder, dict) else None
+                if not isinstance(holder, dict):
+                    break
+            else:
+                key = path[-1]
+                if isinstance(holder, dict) and isinstance(holder.get(key), str):
+                    holder[key] = holder[key].strip().lower()
+        return normalized
+
+    @staticmethod
+    def describe_schema_error(error):
+        """
+        The message of one validation error, in the words of the reference.
+
+        A setting with standard values and aliases fails as "is not valid under any of
+        the given schemas", which says nothing about what to write instead - so for those
+        the standard values are named, and the aliases mentioned as what they are.
+        """
+        standard = (error.schema or {}).get('x-standard-values') if isinstance(error.schema, dict) else None
+        if not standard:
+            return error.message
+        aliases = (error.schema or {}).get('x-aliases') or {}
+        text = f"{error.instance!r} is not one of {', '.join(repr(v) for v in standard)}"
+        if aliases:
+            text += f" (nor one of their aliases: {', '.join(sorted(aliases))})"
+        return text
+
     def check_config_against_schema(self, config, config_file):
         """
         Compare the configuration with credativ_pg_migrator/config.schema.json and report
         every difference as a WARNING.
 
-        This reports, it does not stop: a configuration which works today has to keep
-        working, and the schema is young enough that a false positive is more likely than
-        a real one. What it buys is that a misspelt key, a value outside the allowed set
-        or a list of the wrong length is named here, at the start, instead of failing
-        somewhere in the middle of a long migration - or not failing at all and quietly
-        migrating less than was asked for.
+        A setting the migrator cannot carry out stops the run, here, at the start -
+        rather than failing somewhere in the middle of a long migration, or not failing
+        at all and quietly migrating less than was asked for. A wrong type, a value
+        outside the allowed set, a list of the wrong length and a missing required block
+        are all of that kind.
 
-        The findings are printed at WARNING, which the default log level shows.
+        An UNKNOWN key is reported but does not stop the run. A configuration written for
+        a later version of the migrator has to stay usable with an earlier one, so an
+        unrecognised key is a warning - which still catches the misspelling that would
+        otherwise have done nothing at all, silently.
+
+        --ignore-config-schema-errors turns the blocking errors into warnings as well, for
+        the case where the schema is wrong and the configuration is right.
         """
         try:
             from jsonschema import Draft202012Validator
@@ -78,7 +130,8 @@ class ConfigParser:
             return
 
         try:
-            errors = sorted(Draft202012Validator(schema).iter_errors(config),
+            errors = sorted(Draft202012Validator(schema).iter_errors(
+                                self.config_as_the_code_reads_it(config)),
                             key=lambda error: list(error.path))
         except Exception as e:
             self.print_log_message('DEBUG', f"config_parser: check_config_against_schema: the schema could not be applied ({e}) - the configuration is not checked.")
@@ -88,13 +141,41 @@ class ConfigParser:
             self.print_log_message('INFO', "config_parser: check_config_against_schema: the configuration matches the schema.")
             return
 
-        self.print_log_message('WARNING',
-            f"config_parser: check_config_against_schema: {len(errors)} setting(s) of {config_file} do "
-            f"not match the configuration schema. The migration continues - see docs/config_reference.md for "
-            f"what each option accepts.")
-        for error in errors:
+        ## An unrecognised key is reported, never fatal - see the docstring.
+        unknown_key_errors = [error for error in errors if error.validator == 'additionalProperties']
+        blocking_errors = [error for error in errors if error.validator != 'additionalProperties']
+
+        for error in unknown_key_errors:
             location = '.'.join(str(part) for part in error.path) or '(top level)'
-            self.print_log_message('WARNING', f"config_parser: check_config_against_schema: {location}: {error.message}")
+            self.print_log_message('WARNING',
+                f"config_parser: check_config_against_schema: {location}: {error.message} "
+                f"The migrator does not read it - check the spelling against docs/config_reference.md.")
+
+        if not blocking_errors:
+            return
+
+        override = getattr(self.args, 'ignore_config_schema_errors', False)
+        level = 'WARNING' if override else 'ERROR'
+        for error in blocking_errors:
+            location = '.'.join(str(part) for part in error.path) or '(top level)'
+            self.print_log_message(level, f"config_parser: check_config_against_schema: {location}: {self.describe_schema_error(error)}")
+
+        if override:
+            self.print_log_message('WARNING',
+                f"config_parser: check_config_against_schema: {len(blocking_errors)} setting(s) of {config_file} do "
+                f"not match the configuration schema; the migration continues because "
+                f"--ignore-config-schema-errors was given.")
+            return
+
+        named = ', '.join(
+            '.'.join(str(part) for part in error.path) or '(top level)'
+            for error in blocking_errors[:5])
+        if len(blocking_errors) > 5:
+            named += ', ...'
+        raise ValueError(
+            f"{len(blocking_errors)} setting(s) of {config_file} do not match the configuration "
+            f"schema ({named}) - see the messages above and docs/config_reference.md for what each "
+            f"option accepts. Start with --ignore-config-schema-errors to run anyway.")
 
     def validate_config(self):
 
@@ -106,10 +187,11 @@ class ConfigParser:
 
         pattern_syntax = self.get_pattern_syntax()
         configured_syntax = self.config.get('pattern_syntax', None)
-        if configured_syntax is not None and str(configured_syntax).strip().lower() not in self.PATTERN_SYNTAX_ALIASES:
+        if configured_syntax is not None and self.resolve_standard_value(
+                configured_syntax, self.PATTERN_SYNTAX_STANDARD, self.PATTERN_SYNTAX_ALIASES) is None:
             raise ValueError(
                 f"Invalid pattern_syntax in the config file: {configured_syntax}. "
-                f"Must be one of 'glob', 'regex' or 'like'.")
+                f"Must be one of {', '.join(self.PATTERN_SYNTAX_STANDARD)}.")
 
         for include_option, exclude_option in self.OBJECT_FILTER_KEYS.values():
             for option_name in (include_option, exclude_option):
@@ -794,11 +876,12 @@ class ConfigParser:
         #   'schemas'            : a schema named after the package, holding one function
         #                          per package routine under its own name
         val = (self.config.get('migration') or {}).get('packages_as', 'functions')
-        normalized = str(val).strip().lower() if val is not None else 'functions'
-        if normalized in ('schemas', 'schema', 'package_schema', 'package_schemas'):
-            return 'schemas'
-        if normalized in ('functions', 'function', 'prefixed_functions', 'prefix'):
+        if val is None:
             return 'functions'
+        resolved = self.resolve_standard_value(val, self.PACKAGES_AS_STANDARD,
+                                               self.PACKAGES_AS_ALIASES)
+        if resolved:
+            return resolved
         self.print_log_message('WARNING', f"config_parser: get_packages_migration_style: Unknown value '{val}' for migration.packages_as - using 'functions'.")
         return 'functions'
 
@@ -815,14 +898,9 @@ class ConfigParser:
             return 'retry'
         if val is False or val is None:
             return 'off'
-        normalized = str(val).strip().lower()
-        if normalized in ('retry', 'true', 'yes', 'on'):
-            return 'retry'
-        if normalized in ('check', 'verify', 'check_only'):
-            return 'check'
-        if normalized in ('off', 'false', 'no', 'none', 'skip'):
-            return 'off'
-        return 'retry'
+        resolved = self.resolve_standard_value(val, self.VALIDATE_OBJECTS_STANDARD,
+                                               self.VALIDATE_OBJECTS_ALIASES)
+        return resolved or 'retry'
 
     def should_map_numeric_1_to_boolean(self, schema_name=None, table_name=None, column_name=None):
         # Decides whether a narrow numeric source column (precision 1, scale 0 -
@@ -1019,11 +1097,43 @@ class ConfigParser:
     ## nothing, which is what a glob '.*' used to do.
     MATCH_EVERYTHING_PATTERNS = ('all', '*', '.*', '%', '.+')
 
+    ## The value to write is one of PATTERN_SYNTAX_STANDARD. The entries of
+    ## PATTERN_SYNTAX_ALIASES are synonyms accepted for compatibility, each read as the
+    ## standard value it points at - they are not alternatives of equal standing, and the
+    ## reference documents them as aliases. Declared here once: the schema mirrors these
+    ## tables and a test compares the two, so they cannot disagree.
+    PATTERN_SYNTAX_STANDARD = ('glob', 'regex', 'like')
     PATTERN_SYNTAX_ALIASES = {
-        'glob': 'glob', 'wildcard': 'glob', 'wildcards': 'glob', 'fnmatch': 'glob', 'shell': 'glob',
-        'regex': 'regex', 'regexp': 'regex', 're': 'regex', 'regular_expression': 'regex',
-        'like': 'like', 'sql': 'like', 'sql_like': 'like',
+        'wildcard': 'glob', 'wildcards': 'glob', 'fnmatch': 'glob', 'shell': 'glob',
+        'regexp': 'regex', 're': 'regex', 'regular_expression': 'regex',
+        'sql': 'like', 'sql_like': 'like',
     }
+
+    VALIDATE_OBJECTS_STANDARD = ('retry', 'check', 'off')
+    VALIDATE_OBJECTS_ALIASES = {
+        'true': 'retry', 'yes': 'retry', 'on': 'retry',
+        'verify': 'check', 'check_only': 'check',
+        'false': 'off', 'no': 'off', 'none': 'off', 'skip': 'off',
+    }
+
+    PACKAGES_AS_STANDARD = ('functions', 'schemas')
+    PACKAGES_AS_ALIASES = {
+        'function': 'functions', 'prefixed_functions': 'functions', 'prefix': 'functions',
+        'schema': 'schemas', 'package_schema': 'schemas', 'package_schemas': 'schemas',
+    }
+
+    @staticmethod
+    def resolve_standard_value(value, standard_values, aliases):
+        """
+        The standard value a written value stands for, or None when it is neither a
+        standard value nor one of the aliases. Reading is case-insensitive.
+        """
+        if value is None:
+            return None
+        text = str(value).strip().lower()
+        if text in standard_values:
+            return text
+        return aliases.get(text)
 
     OBJECT_FILTER_KEYS = {
         'table':    ('include_tables', 'exclude_tables'),
@@ -1042,12 +1152,13 @@ class ConfigParser:
         value = self.config.get('pattern_syntax', None)
         if value is None:
             return 'glob'
-        normalized = str(value).strip().lower()
-        if normalized in self.PATTERN_SYNTAX_ALIASES:
-            return self.PATTERN_SYNTAX_ALIASES[normalized]
+        resolved = self.resolve_standard_value(value, self.PATTERN_SYNTAX_STANDARD,
+                                               self.PATTERN_SYNTAX_ALIASES)
+        if resolved:
+            return resolved
         self.print_log_message('WARNING',
             f"config_parser: get_pattern_syntax: unknown pattern_syntax '{value}' - "
-            f"using 'glob'. Valid values are 'glob', 'regex' and 'like'.")
+            f"using 'glob'. The values are {', '.join(self.PATTERN_SYNTAX_STANDARD)}.")
         return 'glob'
 
     def get_object_filter_patterns(self, option_name):

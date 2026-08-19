@@ -4,7 +4,7 @@
   "title": "credativ-pg-migrator configuration",
   "description": "The complete configuration language of credativ-pg-migrator. This schema is the single source of truth: docs/config_reference.md is generated from it, tests/test_config_docs.py checks the sample configs against it, and config_parser validates the user configuration with it at startup.",
   "type": "object",
-  "additionalProperties": true,
+  "additionalProperties": false,
   "required": [
     "source",
     "target",
@@ -22,14 +22,50 @@
       "description": "Which workflow the run executes. 'standard' reads the source objects, converts and creates them on the target and copies the data. 'mapping' maps existing target objects onto existing source objects and copies only data. 'anonymization' is a standalone data-masking copy."
     },
     "pattern_syntax": {
-      "type": "string",
-      "enum": [
+      "default": "glob",
+      "description": "The syntax the patterns of include_tables / exclude_tables and the same pairs for views and functions/procedures are written in. It applies to all six alike.\n  glob  (default) - shell wildcards: * is any sequence, ? is one character, [abc] a set. This is what the migrator has always applied, so a configuration written before this setting existed keeps its meaning.\n  regex - Python regular expressions, e.g. 'BIN\\\\$.*'.\n  like  - SQL LIKE: % is any sequence, _ is one character, a backslash escapes either.\nIn every syntax a pattern must match the WHOLE object name and matching ignores case. A pattern which looks as if it were written in one of the other syntaxes is reported at startup, because such a pattern is valid in its own right and simply matches nothing. The value is read case-insensitively.",
+      "anyOf": [
+        {
+          "title": "standard values",
+          "description": "The values to use. 'glob', 'regex', 'like'.",
+          "enum": [
+            "glob",
+            "regex",
+            "like"
+          ]
+        },
+        {
+          "title": "accepted aliases",
+          "description": "Synonyms accepted for compatibility, each read as the standard value it stands for. Prefer the standard value.",
+          "enum": [
+            "fnmatch",
+            "re",
+            "regexp",
+            "regular_expression",
+            "shell",
+            "sql",
+            "sql_like",
+            "wildcard",
+            "wildcards"
+          ]
+        }
+      ],
+      "x-standard-values": [
         "glob",
         "regex",
         "like"
       ],
-      "default": "glob",
-      "description": "The syntax the patterns of include_tables / exclude_tables and the same pairs for views and functions/procedures are written in. It applies to all six alike.\n  glob  (default) - shell wildcards: * is any sequence, ? is one character, [abc] a set. This is what the migrator has always applied, so a configuration written before this setting existed keeps its meaning.\n  regex - Python regular expressions, e.g. 'BIN\\\\$.*'.\n  like  - SQL LIKE: % is any sequence, _ is one character, a backslash escapes either.\nIn every syntax a pattern must match the WHOLE object name and matching ignores case. A pattern which looks as if it were written in one of the other syntaxes is reported at startup, because such a pattern is valid in its own right and simply matches nothing."
+      "x-aliases": {
+        "fnmatch": "glob",
+        "shell": "glob",
+        "wildcard": "glob",
+        "wildcards": "glob",
+        "sql": "like",
+        "sql_like": "like",
+        "re": "regex",
+        "regexp": "regex",
+        "regular_expression": "regex"
+      }
     },
     "pre_migration_analysis": {
       "type": "object",
@@ -445,7 +481,7 @@
     "migration": {
       "type": "object",
       "description": "What the migration does and how it does it.",
-      "additionalProperties": true,
+      "additionalProperties": false,
       "properties": {
         "drop_schema": {
           "type": "boolean",
@@ -508,14 +544,53 @@
           "description": "Copy the contents of BLOB and CLOB columns. false migrates them as NULL, which is much faster for a structural trial run."
         },
         "validate_objects": {
-          "type": "string",
-          "enum": [
+          "default": "retry",
+          "description": "Final validity pass over views, functions/procedures and triggers, run at the very end of a standard migration. An object whose creation failed because a dependency did not exist yet can become creatable once the whole schema is present. 'retry' re-runs the stored DDL of objects that are still missing, then verifies and records validity; 'check' only verifies; 'off' skips the pass. true is accepted as 'retry', false and null as 'off'. Read case-insensitively.",
+          "anyOf": [
+            {
+              "title": "standard values",
+              "description": "The values to use. 'retry', 'check', 'off'.",
+              "enum": [
+                "retry",
+                "check",
+                "off"
+              ]
+            },
+            {
+              "title": "accepted aliases",
+              "description": "Synonyms accepted for compatibility, each read as the standard value it stands for. Prefer the standard value. true is read as 'retry', false and null as 'off'.",
+              "enum": [
+                "check_only",
+                "false",
+                "no",
+                "none",
+                "on",
+                "skip",
+                "true",
+                "verify",
+                "yes",
+                true,
+                false,
+                null
+              ]
+            }
+          ],
+          "x-standard-values": [
             "retry",
             "check",
             "off"
           ],
-          "default": "retry",
-          "description": "Final validity pass over views, functions/procedures and triggers, run at the very end of a standard migration. An object whose creation failed because a dependency did not exist yet can become creatable once the whole schema is present. 'retry' re-runs the stored DDL of objects that are still missing, then verifies and records validity; 'check' only verifies; 'off' skips the pass. true is accepted as 'retry', false and null as 'off'."
+          "x-aliases": {
+            "check_only": "check",
+            "verify": "check",
+            "false": "off",
+            "no": "off",
+            "none": "off",
+            "skip": "off",
+            "on": "retry",
+            "true": "retry",
+            "yes": "retry"
+          }
         },
         "on_error": {
           "type": "string",
@@ -551,7 +626,7 @@
             "keep"
           ],
           "default": "keep",
-          "description": "Whether object names are lower-cased, upper-cased or kept as the source spells them. Validated at startup - any other value stops the run."
+          "description": "Whether object names are lower-cased, upper-cased or kept as the source spells them. Validated at startup - any other value stops the run. Read case-insensitively."
         },
         "use_aliases_as_target_names": {
           "type": "boolean",
@@ -618,16 +693,45 @@
           }
         },
         "packages_as": {
-          "type": "string",
-          "enum": [
+          "default": "functions",
+          "description": "How Oracle packages are represented on a target that has none. 'functions' creates one function per routine in the target schema, named <package>_<routine>. 'schemas' creates one schema per package holding the routines under their own names. Calls are rewritten to match in every migrated routine and trigger. Package state - package level variables, constants and cursors - has no equivalent and is not migrated in either mode. Read case-insensitively.",
+          "x-applies-to-engines": [
+            "oracle"
+          ],
+          "anyOf": [
+            {
+              "title": "standard values",
+              "description": "The values to use. 'functions', 'schemas'.",
+              "enum": [
+                "functions",
+                "schemas"
+              ]
+            },
+            {
+              "title": "accepted aliases",
+              "description": "Synonyms accepted for compatibility, each read as the standard value it stands for. Prefer the standard value.",
+              "enum": [
+                "function",
+                "package_schema",
+                "package_schemas",
+                "prefix",
+                "prefixed_functions",
+                "schema"
+              ]
+            }
+          ],
+          "x-standard-values": [
             "functions",
             "schemas"
           ],
-          "default": "functions",
-          "description": "How Oracle packages are represented on a target that has none. 'functions' creates one function per routine in the target schema, named <package>_<routine>. 'schemas' creates one schema per package holding the routines under their own names. Calls are rewritten to match in every migrated routine and trigger. Package state - package level variables, constants and cursors - has no equivalent and is not migrated in either mode.",
-          "x-applies-to-engines": [
-            "oracle"
-          ]
+          "x-aliases": {
+            "function": "functions",
+            "prefix": "functions",
+            "prefixed_functions": "functions",
+            "package_schema": "schemas",
+            "package_schemas": "schemas",
+            "schema": "schemas"
+          }
         },
         "map_numeric_1_to_boolean": {
           "type": "boolean",

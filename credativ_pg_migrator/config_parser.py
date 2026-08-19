@@ -513,7 +513,10 @@ class ConfigParser:
         return (self.config.get('anonymization') or {})
 
     def get_migration_settings(self):
-        return self.config['migration']
+        ## .get(), not indexing: the 'migration' block is optional - a configuration which
+        ## leaves it out takes the default of every one of its settings, and must not die
+        ## with a KeyError on the first accessor that looks inside it.
+        return self.config.get('migration') or {}
 
     def get_workflow(self):
         return self.config.get('workflow', 'standard')

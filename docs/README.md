@@ -309,7 +309,7 @@ See more on the “Connection to Informix” wiki page:
     - libraries: a colon‑separated classpath with your JAR files, e.g.:
 	/usr/share/java/jdbc-4.50.10.1.jar:/usr/share/java/bson-3.8.0.jar
 
-Host, port, database name, and credentials are specified in other fields of the same source‑DB section (see `docs/configs/config_all_options_reference.yaml` for the exact parameter names). Informix also supports ODBC connectivity via `pyodbc`.
+Host, port, database name, and credentials are specified in other fields of the same source‑DB section (see `docs/config_reference.md` for the exact parameter names). Informix also supports ODBC connectivity via `pyodbc`.
 
 **File-based Import (UNL):** For environments where direct connectivity is limited, the Informix connector supports offline file-based ingest using native `.unl` export files via the `data_export` configuration.
 
@@ -337,7 +337,7 @@ See more at the “Connection to Sybase ASE” wiki page:
   - Under an odbc block:
     - driver: "FreeTDS"
 
-Other ODBC parameters such as DSN or connection string are configured alongside the driver (see `docs/configs/config_all_options_reference.yaml` for the exact parameter names). Sybase ASE also supports JDBC connectivity via `jaydebeapi`.
+Other ODBC parameters such as DSN or connection string are configured alongside the driver (see `docs/config_reference.md` for the exact parameter names). Sybase ASE also supports JDBC connectivity via `jaydebeapi`.
 
 **Current status (Sybase ASE as source):** the richest connector after PostgreSQL for schema objects. Besides tables, data, primary keys, indexes, foreign keys and CHECK constraints it is the **only** connector implementing:
 - **Named default objects** (`CREATE DEFAULT ... AS ...`, bound to several columns by name, note [4] in `FEATURE_MATRIX.md`). PostgreSQL has no such object, so the underlying default expression is attached directly to each target column.
@@ -709,12 +709,12 @@ carries numbered notes for the engine-specific caveats.
 ### 5.1 General characteristics
 
 - The config file is a YAML document.
-- Every existing configuration setting is documented by example in `docs/configs/config_all_options_reference.yaml`. That file is a **reference, not a template**: it lists all options at once, including ones that exclude each other — all three connectivity sub-blocks (`jdbc`, `odbc`, `ddl`) although `connectivity` selects one, options belonging to different source engines side by side, the `mapping` block while `workflow` is `standard` — so it cannot be used as a configuration file as it is.
+- Every existing configuration setting is documented in `docs/config_reference.md`, with its type, allowed values, default and the source engines it applies to. That file is generated from `credativ_pg_migrator/config.schema.json` and cannot drift from it. The schema is also what the migrator validates your configuration against when it starts, so a typo or a wrong value is reported before anything is migrated.
 
 - Ready-to-use examples for every supported source database and workflow are in [configs/](configs/) - see [configs/README.md](configs/README.md). Taking the example for your engine is the fastest way to start: every line that must be changed is marked `>>> ADJUST`.
 
 The usual workflow is:
-- Copy the example matching your source from `docs/configs/` to a new file, e.g. my_migration.yaml (or start from scratch and copy the sections you need out of `docs/configs/config_all_options_reference.yaml`).
+- Copy the example matching your source from `docs/configs/` to a new file, e.g. my_migration.yaml. Every file there is a complete, valid configuration; look individual options up in `docs/config_reference.md`.
 - Edit what you need:
   - connection details
   - schemas / objects to include or exclude
@@ -753,7 +753,7 @@ The usual workflow is:
 - Default value mappings
   - Rules replacing vendor‑specific default expressions with PostgreSQL equivalents (e.g. legacy date functions).
 
-Use `docs/configs/config_all_options_reference.yaml` as the authoritative reference for the exact field names and their meanings – it is maintained along with the code and kept up to date. It documents every option that exists and is therefore not usable as a configuration file on its own.
+Use `docs/config_reference.md` as the authoritative reference for the exact field names and their meanings – it is generated from `credativ_pg_migrator/config.schema.json`, the same schema the migrator validates against, so it cannot fall behind the code.
 
 ### 5.3 Advanced Configuration
 
@@ -823,7 +823,7 @@ Start with DEBUG, should be sufficient for most use cases. Deeper levels are onl
   - Test connectivity independently (e.g. using isql for ODBC or a DB client).
 
 - Prepare the YAML configuration
-  - Start from `docs/configs/config_all_options_reference.yaml` and copy the sections you need.
+  - Start from the example for your source database in `docs/configs/` and look options up in `docs/config_reference.md`.
   - Fill in connection details for source, target, and migration DBs.
   - Define schemas/tables to migrate.
   - Configure any necessary type/default mappings and data filters.

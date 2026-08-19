@@ -85,12 +85,12 @@ migration:
   validate_objects: retry
 
 include_tables: all
-exclude_tables:               # >>> ADJUST
+exclude_tables: []            # >>> ADJUST
 include_views: all
 exclude_views:
   - "sys*"
 include_funcprocs: all
-exclude_funcprocs:
+exclude_funcprocs: []
 
 # ["table regex", "column regex", "source type", "target type", "length"]
 # Sybase user-defined types appear here under their own name.

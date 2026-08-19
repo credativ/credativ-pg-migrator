@@ -173,11 +173,11 @@ anonymization:
     #     func_name: "anon.fake_password"
 
 include_tables: all
-exclude_tables:               # >>> ADJUST - e.g. - "audit_log" (do not copy at all)
+exclude_tables: []            # >>> ADJUST - e.g. - "audit_log" (do not copy at all)
 include_views: all
-exclude_views:
+exclude_views: []
 include_funcprocs: all
-exclude_funcprocs:
+exclude_funcprocs: []
 
 summary:
   top_migrated_tables: 10

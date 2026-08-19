@@ -96,12 +96,12 @@ migration:
   validate_objects: retry
 
 include_tables: all
-exclude_tables:               # >>> ADJUST
+exclude_tables: []            # >>> ADJUST
 include_views: all
 exclude_views:
   - "sys*"                    # never migrate the system views
 include_funcprocs: all
-exclude_funcprocs:
+exclude_funcprocs: []
 
 # T-SQL defaults are wrapped in parentheses and use their own functions.
 default_values_substitution:

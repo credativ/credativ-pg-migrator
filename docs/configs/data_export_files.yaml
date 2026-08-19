@@ -1,0 +1,168 @@
+# ============================================================================
+# credativ-pg-migrator - reading the DATA from export files
+# ============================================================================
+# A complete, runnable Informix configuration whose table data comes from
+# export files instead of from the source connection. Informix is used because
+# it is the engine with the most complete support for this; the data_export
+# block itself is the same everywhere it is supported.
+#
+# WHAT THIS FILE IS FOR
+#   The three export formats - CSV, UNL and SQL - are ALTERNATIVES. Exactly one
+#   "format" may be live at a time, together with the "file" pattern and the
+#   options belonging to it. They are shown here as one live block (CSV) and
+#   two commented alternatives; swap the comment markers to switch.
+#   Writing two of them at once produces a file with duplicate keys, which
+#   PyYAML resolves silently by keeping the last of each key - mixing options
+#   from formats that were never meant to be combined - and which ruamel-based
+#   tools refuse to load at all.
+#
+#   The source connection is STILL REQUIRED. The data model is always read from
+#   the database; only the ROWS come from the files.
+#
+# MUST ADJUST
+#   - migrator / source / target connection details
+#   - source.server, source.owner, source.db_locale (see
+#     informix_to_postgresql.yaml for what these mean)
+#   - every path under source.data_export
+#
+# See docs/config_reference.md, section "source.data_export", for the full
+# meaning of each option.
+# ============================================================================
+
+workflow: "standard"
+
+migrator:
+  type: "postgresql"
+  host: "localhost"           # >>> ADJUST
+  port: 5432
+  username: "postgres"        # >>> ADJUST
+  password: "postgres"        # >>> ADJUST
+  database: "target_db"       # >>> ADJUST
+  schema: "migration"
+
+source:
+  type: "informix"
+  host: "localhost"           # >>> ADJUST
+  port: 9088                  # >>> ADJUST
+  username: "informix"        # >>> ADJUST
+  password: "in4mix"          # >>> ADJUST
+  database: "source_db"       # >>> ADJUST
+  server: "informix"          # >>> ADJUST - INFORMIXSERVER name
+  owner: "informix"           # >>> ADJUST - Informix calls the schema an OWNER
+  connectivity: "jdbc"
+  db_locale: "en_US.819"      # >>> ADJUST - must match the database
+  jdbc:
+    driver: "com.informix.jdbc.IfxDriver"
+    libraries: "../lib/jdbc/jdbc-4.50.10.1.jar:../lib/jdbc/bson-3.8.0.jar"   # >>> ADJUST
+
+  # --------------------------------------------------------------------------
+  # THE DATA COMES FROM FILES
+  # Delete this whole block to read the rows over the connection instead.
+  # --------------------------------------------------------------------------
+  data_export:
+
+    # What to do when the file for a table is not there.
+    #   error              stop the migration
+    #   skip               leave the table out
+    #   source_table_name  read that one table from the database instead (default)
+    on_missing_data_file: source_table_name
+
+    # ---- ALTERNATIVE 1 of 3: CSV (live) -------------------------------------
+    # Fed straight into the PostgreSQL COPY command, so this is the fastest path.
+    # Only {{source_schema_name}} and {{source_table_name}} are substituted -
+    # they are the only placeholders that exist.
+    format: "CSV"
+    file: "/path/to/export/{{source_schema_name}}.{{source_table_name}}.csv"   # >>> ADJUST
+    delimiter: ","
+    header: true                 # the files carry a header line with the column names
+    character_set: "ISO-8859-1"  # >>> ADJUST - omit when the files are UTF-8
+    # Where converted files are written. Recommended whenever character_set is
+    # not UTF-8; without it the converted file lands beside the original.
+    conversion_path: "/path/to/export/converted"                               # >>> ADJUST
+    # The order of the parts of a date, when the values alone cannot decide it.
+    # *MDY reads 01/04/22 as 4 January, *DMY as 1 April, *YMD as 22 April.
+    # Leave it out to have the order worked out from the file - a column whose
+    # values fit more than one order then stops that table by name, rather than
+    # migrating a different date without any error.
+    date_format: "*MDY"
+
+    # ---- ALTERNATIVE 2 of 3: UNL (commented) --------------------------------
+    # The Informix unload format. Converted to CSV first, so conversion_path
+    # matters; the converted files never have a header.
+    # format: "UNL"
+    # file: "/path/to/export/{{source_schema_name}}.{{source_table_name}}.unl" # >>> ADJUST
+    # delimiter: "|"
+    # conversion_path: "/path/to/export/converted"                            # >>> ADJUST
+    # clean: false                 # delete the converted CSV files afterwards
+
+    # ---- ALTERNATIVE 3 of 3: SQL (commented) --------------------------------
+    # A schema dump carrying the DDL. Where the DATA sits depends on the engine:
+    # for Informix, UNL files in the same directory. One file for the whole
+    # database, so no placeholders. The data model is NOT read from the dump -
+    # the source connection is still required.
+    # format: "SQL"
+    # file: "/path/to/export/mydb.sql"                                        # >>> ADJUST
+    # delimiter: "|"               # for the UNL files belonging to the dump
+    # conversion_path: "/path/to/export/converted"                            # >>> ADJUST
+    # clean: false
+
+    # Columns whose declared type does not reveal that they hold a LOB - the
+    # value in the file is a reference to another file, not the data.
+    # lob_columns:
+    #   - [ "documents", "body" ]
+    #   - [ "images", "content" ]
+
+    # Split an export file larger than the threshold and process the chunks in
+    # parallel. Worth it for UNL and SQL; importing a large CSV is fast enough
+    # that splitting does not pay.
+    # big_files_split:
+    #   enabled: true
+    #   threshold: "5GB"
+    #   chunk_size: "2GB"
+    #   workers: 4
+
+target:
+  type: "postgresql"
+  host: "localhost"           # >>> ADJUST
+  port: 5432
+  username: "postgres"        # >>> ADJUST
+  password: "postgres"        # >>> ADJUST
+  database: "target_db"       # >>> ADJUST
+  schema: "informix_data"     # >>> ADJUST
+  settings:
+    work_mem: "32MB"
+    maintenance_work_mem: "512MB"
+
+migration:
+  drop_schema: true
+  create_tables: true
+  migrate_data: true
+  migrate_indexes: true
+  migrate_constraints: true
+  migrate_funcprocs: true
+  migrate_triggers: true
+  migrate_views: true
+  set_sequences: true
+  validate_objects: retry
+  on_error: continue
+  parallel_workers: 4
+  batch_size: 100000
+  names_case_handling: lower
+
+# Per-table overrides of the export settings above - a table whose file has a
+# different name, delimiter or date order. Only CSV and UNL are supported here.
+table_settings:
+  - table_name: "orders"
+    data_export:
+      file: "/path/to/export/orders_extract.csv"    # >>> ADJUST
+      format: "CSV"
+      delimiter: ";"
+      header: false
+      date_format: "*DMY"
+
+include_tables: all
+exclude_tables: []
+include_views: all
+exclude_views: []
+include_funcprocs: all
+exclude_funcprocs: []

@@ -113,11 +113,11 @@ migration:
   validate_objects: retry
 
 include_tables: all
-exclude_tables:               # >>> ADJUST
+exclude_tables: []            # >>> ADJUST
 include_views: all
-exclude_views:
+exclude_views: []
 include_funcprocs: all
-exclude_funcprocs:
+exclude_funcprocs: []
 
 # Per-table exceptions to the data_export settings above - one table delivered
 # with a header row, another one in a different code page.

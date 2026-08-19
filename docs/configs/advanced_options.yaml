@@ -180,11 +180,11 @@ migration:
 #   - ["OTHERSRV.otherdb.dbo.", "public."]
 
 include_tables: all
-exclude_tables:
+exclude_tables: []
 include_views: all
-exclude_views:
+exclude_views: []
 include_funcprocs: all
-exclude_funcprocs:
+exclude_funcprocs: []
 
 # Per-table overrides. Anything you set globally in "migration" can be
 # overridden here for the tables matching table_name (a name or a regex).

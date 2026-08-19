@@ -99,9 +99,9 @@ exclude_tables:
   # - "warehouse_bbox_.*"
 
 include_funcprocs: all
-exclude_funcprocs:
+exclude_funcprocs: []
 include_views: all
-exclude_views:
+exclude_views: []
 
 # ---------------------------------------------------------------------------
 # WHAT TO WATCH OUT FOR - SQLite is dynamically typed

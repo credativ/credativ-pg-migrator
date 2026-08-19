@@ -14,6 +14,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import json
 import yaml
 from credativ_pg_migrator.constants import MigratorConstants
 import re
@@ -32,12 +33,68 @@ class ConfigParser:
         self.print_log_message('DEBUG3', f"config_parser: __init__: Configuration loaded: {self.config}")
         self.validate_config()
 
+    ## The configuration language, as a JSON Schema. It is the single source of truth:
+    ## docs/config_reference.md is generated from it and tests/test_config_docs.py checks
+    ## the sample configurations and the code against it.
+    CONFIG_SCHEMA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.schema.json')
+
     def load_config(self, config_file):
-        """Load the configuration file."""
+        """Load the configuration file and report what the schema says about it."""
         self.print_log_message('INFO', f"config_parser: load_config: Working directory: {os.path.dirname(os.path.abspath(self.args.config))}")
         self.print_log_message('INFO', f"config_parser: load_config: Loading configuration from {config_file}")
         with open(config_file, 'r') as file:
-            return yaml.safe_load(file)
+            config = yaml.safe_load(file)
+        self.check_config_against_schema(config, config_file)
+        return config
+
+    def check_config_against_schema(self, config, config_file):
+        """
+        Compare the configuration with credativ_pg_migrator/config.schema.json and report
+        every difference as a WARNING.
+
+        This reports, it does not stop: a configuration which works today has to keep
+        working, and the schema is young enough that a false positive is more likely than
+        a real one. What it buys is that a misspelt key, a value outside the allowed set
+        or a list of the wrong length is named here, at the start, instead of failing
+        somewhere in the middle of a long migration - or not failing at all and quietly
+        migrating less than was asked for.
+
+        The findings are printed at INFO, not at WARNING. The message levels of this
+        migrator are an inclusion order, not a severity order - '--log-level=INFO', the
+        default, shows INFO alone - so a WARNING here would be invisible to exactly the
+        run that needs to see it.
+        """
+        try:
+            from jsonschema import Draft202012Validator
+        except ImportError:
+            self.print_log_message('DEBUG', "config_parser: check_config_against_schema: jsonschema is not installed - the configuration is not checked against the schema.")
+            return
+
+        try:
+            with open(self.CONFIG_SCHEMA_FILE, 'r', encoding='utf-8') as schema_file:
+                schema = json.load(schema_file)
+        except (OSError, ValueError) as e:
+            self.print_log_message('DEBUG', f"config_parser: check_config_against_schema: the schema {self.CONFIG_SCHEMA_FILE} could not be read ({e}) - the configuration is not checked.")
+            return
+
+        try:
+            errors = sorted(Draft202012Validator(schema).iter_errors(config),
+                            key=lambda error: list(error.path))
+        except Exception as e:
+            self.print_log_message('DEBUG', f"config_parser: check_config_against_schema: the schema could not be applied ({e}) - the configuration is not checked.")
+            return
+
+        if not errors:
+            self.print_log_message('INFO', "config_parser: check_config_against_schema: the configuration matches the schema.")
+            return
+
+        self.print_log_message('INFO',
+            f"config_parser: check_config_against_schema: WARNING: {len(errors)} setting(s) of {config_file} do "
+            f"not match the configuration schema. The migration continues - see docs/config_reference.md for "
+            f"what each option accepts.")
+        for error in errors:
+            location = '.'.join(str(part) for part in error.path) or '(top level)'
+            self.print_log_message('INFO', f"config_parser: check_config_against_schema: WARNING: {location}: {error.message}")
 
     def validate_config(self):
 

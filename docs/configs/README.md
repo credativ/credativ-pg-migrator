@@ -67,7 +67,16 @@ DDL text dumps plus unloaded data files. There is no `host`, `port`,
 | File | Purpose |
 |---|---|
 | [advanced_options.yaml](advanced_options.yaml) | the options for large, long-running or partial migrations: pre/post SQL scripts, partial data migration, target partitioning, creating the target partitioned, splitting huge data files, scheduled pause/stop, remote-object rewriting. Runnable as it is (everything advanced is commented out) — but meant as a source of **blocks to paste** into the example for your engine. They work with any source. |
-| [config_all_options_reference.yaml](config_all_options_reference.yaml) | **not runnable.** Every option that exists, with all mutually exclusive alternatives next to each other. Look options up here; do not use it as a template. |
+| [data_export_files.yaml](data_export_files.yaml) | reading the table DATA from export files instead of over the connection. Shows the three export formats — CSV, UNL and SQL — as what they are: alternatives, one live and two commented. Complete and runnable. |
+
+> Looking for the exhaustive list of options? It is no longer a `.yaml` file.
+> **[../config_reference.md](../config_reference.md)** documents every option with its
+> type, allowed values, default and the engines it applies to. It is generated from
+> `credativ_pg_migrator/config.schema.json`, which the migrator also validates
+> your configuration against at startup — so it cannot fall behind the code.
+> A single YAML file could never say "these keys are alternatives", "this one is
+> required" or "this one is only for Oracle", which is why the old
+> `config_all_options_reference.yaml` had to hold contradictory settings side by side.
 
 ---
 
@@ -157,19 +166,22 @@ for every source.
 
 ## Known gaps in the option set
 
-Checked against the code, not against the reference file:
+Options that exist in the configuration language but do nothing yet. They are
+marked **not implemented** in [../config_reference.md](../config_reference.md)
+as well, so the two lists cannot disagree.
 
 - **`target_lob_storage`** (storing LOB values as files instead of in the
-  database) is documented in `config_all_options_reference.yaml` but is read by
-  no code. It has no effect and is therefore not used in any example.
+  database) is read by no code. It has no effect and is therefore not used in
+  any example.
 - **`mapping.forced_column_mappings`** is only echoed into the mapping report;
   it is not applied to the column matching.
 - **`scheduled_actions.timer_hours`** is not implemented — only `datetime` is
   evaluated.
-- The reference file documents target partitioning as `partitioning:` with
-  `partitioning_type:`. The code reads **`target_partitioning:`** with
-  **`partition_by:`** and **`partitioning_columns:`**, which is what
-  `advanced_options.yaml` uses.
+- **`data_migration_limitation`** takes exactly three elements per entry. A
+  fourth one — a row-count threshold — is not implemented and raises
+  `ValueError` at startup.
+- **`target_partitioning.date_range: day`** is accepted but creates no
+  partitions; only `year`, `month` and `week` do.
 
 ## How complete is the migration for my engine?
 

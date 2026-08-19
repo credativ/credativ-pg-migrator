@@ -62,10 +62,7 @@ class ConfigParser:
         somewhere in the middle of a long migration - or not failing at all and quietly
         migrating less than was asked for.
 
-        The findings are printed at INFO, not at WARNING. The message levels of this
-        migrator are an inclusion order, not a severity order - '--log-level=INFO', the
-        default, shows INFO alone - so a WARNING here would be invisible to exactly the
-        run that needs to see it.
+        The findings are printed at WARNING, which the default log level shows.
         """
         try:
             from jsonschema import Draft202012Validator
@@ -91,13 +88,13 @@ class ConfigParser:
             self.print_log_message('INFO', "config_parser: check_config_against_schema: the configuration matches the schema.")
             return
 
-        self.print_log_message('INFO',
-            f"config_parser: check_config_against_schema: WARNING: {len(errors)} setting(s) of {config_file} do "
+        self.print_log_message('WARNING',
+            f"config_parser: check_config_against_schema: {len(errors)} setting(s) of {config_file} do "
             f"not match the configuration schema. The migration continues - see docs/config_reference.md for "
             f"what each option accepts.")
         for error in errors:
             location = '.'.join(str(part) for part in error.path) or '(top level)'
-            self.print_log_message('INFO', f"config_parser: check_config_against_schema: WARNING: {location}: {error.message}")
+            self.print_log_message('WARNING', f"config_parser: check_config_against_schema: {location}: {error.message}")
 
     def validate_config(self):
 
@@ -155,7 +152,7 @@ class ConfigParser:
         # log level, and a message saying that nothing is anonymized must always be visible.
         if not anonymization_config:
             if self.is_anonymization_workflow():
-                self.print_log_message('INFO', "config_parser: validate_anonymization_config: WARNING: Workflow is 'anonymization' but no rules are configured - the run will be a plain data copy, nothing will be anonymized.")
+                self.print_log_message('WARNING', "config_parser: validate_anonymization_config: Workflow is 'anonymization' but no rules are configured - the run will be a plain data copy, nothing will be anonymized.")
             return True
 
         # the whole section is checked, including on_value_too_long, even when it carries no rules
@@ -164,11 +161,11 @@ class ConfigParser:
 
         if not has_rules:
             if self.is_anonymization_workflow():
-                self.print_log_message('INFO', "config_parser: validate_anonymization_config: WARNING: Workflow is 'anonymization' but no rules are configured - the run will be a plain data copy, nothing will be anonymized.")
+                self.print_log_message('WARNING', "config_parser: validate_anonymization_config: Workflow is 'anonymization' but no rules are configured - the run will be a plain data copy, nothing will be anonymized.")
             return True
 
         if not self.is_anonymization_workflow():
-            self.print_log_message('INFO', f"config_parser: validate_anonymization_config: WARNING: Anonymization rules are configured but the workflow is '{self.get_workflow()}' - the rules are ignored and no data will be anonymized.")
+            self.print_log_message('WARNING', f"config_parser: validate_anonymization_config: Anonymization rules are configured but the workflow is '{self.get_workflow()}' - the rules are ignored and no data will be anonymized.")
 
         self.print_log_message('INFO', f"config_parser: validate_anonymization_config: {anonymizer.rules_count} anonymization rules validated, all methods are registered. Values not fitting into the target column: {anonymizer.on_value_too_long}.")
         return True
@@ -1048,8 +1045,8 @@ class ConfigParser:
         normalized = str(value).strip().lower()
         if normalized in self.PATTERN_SYNTAX_ALIASES:
             return self.PATTERN_SYNTAX_ALIASES[normalized]
-        self.print_log_message('INFO',
-            f"config_parser: get_pattern_syntax: WARNING: unknown pattern_syntax '{value}' - "
+        self.print_log_message('WARNING',
+            f"config_parser: get_pattern_syntax: unknown pattern_syntax '{value}' - "
             f"using 'glob'. Valid values are 'glob', 'regex' and 'like'.")
         return 'glob'
 
@@ -1078,8 +1075,8 @@ class ConfigParser:
                 f"Write a list to select individual objects.")
         if isinstance(value, (list, tuple)):
             return [entry for entry in value if entry is not None]
-        self.print_log_message('INFO',
-            f"config_parser: get_object_filter_patterns: WARNING: {option_name} must be 'all' or a "
+        self.print_log_message('WARNING',
+            f"config_parser: get_object_filter_patterns: {option_name} must be 'all' or a "
             f"list of patterns, found {type(value).__name__} - it is ignored.")
         return []
 
@@ -1207,8 +1204,8 @@ class ConfigParser:
                     self.compile_object_pattern(pattern, option_name)
                     advice = self.pattern_syntax_advice(pattern, syntax)
                     if advice:
-                        self.print_log_message('INFO',
-                            f"config_parser: validate_object_filters: WARNING: {option_name}: '{pattern}' {advice} "
+                        self.print_log_message('WARNING',
+                            f"config_parser: validate_object_filters: {option_name}: '{pattern}' {advice} "
                             f"The patterns are read as '{syntax}' - set the top level 'pattern_syntax' to change that.")
 
     @staticmethod
@@ -1248,22 +1245,45 @@ class ConfigParser:
         return 'INFO'
 
     def print_log_message(self, message_level, message):
-        if message_level.upper() == 'ERROR':
-            self.logger.error(message)
+        """
+        Write one message, if the level the run was started with asks for it.
+
+        A message is written when its severity is at least the severity of that level.
+        The default level INFO therefore shows ERROR, WARNING and INFO, and each DEBUG
+        step adds more - which is how --log-level behaves in other tools, and what the
+        name of each level says.
+
+        Until 0.16.1 the levels were compared as positions in a list which had INFO first,
+        so the default level showed INFO alone and a WARNING was invisible unless the run
+        was started with --log-level=WARNING. Warnings report what a migration could not
+        convert, so hiding them by default hid exactly what had to be read.
+        """
+        level = str(message_level).strip().upper()
+        severity = MigratorConstants.get_message_level_severity(level)
+        if severity is None:
+            raise ValueError(
+                f"Invalid message_level: {message_level}. "
+                f"Must be one of {MigratorConstants.get_message_levels()}")
+
+        threshold = MigratorConstants.get_message_level_severity(self.get_log_level())
+        if threshold is None:
+            ## an unusable --log-level must not silence the run
+            threshold = MigratorConstants.get_message_level_severity('INFO')
+
+        if severity < threshold:
             return
-        current_log_level = self.get_log_level()
-        if message_level.upper() not in MigratorConstants.get_message_levels():
-            raise ValueError(f"Invalid message_level: {message_level}. Must be one of {MigratorConstants.get_message_levels()}")
-        # self.logger.debug(f"Log level: {current_log_level}, Message level: {message_level.upper()}, Message level index: {MigratorConstants.get_message_levels().index(message_level.upper())}, Current log level index: {MigratorConstants.get_message_levels().index(current_log_level.upper())}")
-        if MigratorConstants.get_message_levels().index(message_level.upper()) <= MigratorConstants.get_message_levels().index(current_log_level.upper()):
-            if message_level == 'DEBUG':
-                self.logger.debug(message)
-            elif message_level == 'DEBUG2':
-                self.logger.debug('DEBUG2: ' + message)
-            elif message_level == 'DEBUG3':
-                self.logger.debug('DEBUG3: ' + message)
-            else:
-                self.logger.info(message_level.upper() + ': ' + message)
+
+        if level == 'ERROR':
+            self.logger.error(message)
+        elif level == 'WARNING':
+            self.logger.warning(message)
+        elif level == 'INFO':
+            self.logger.info(message)
+        elif level == 'DEBUG':
+            self.logger.debug(message)
+        else:
+            ## DEBUG2 and DEBUG3 have no counterpart in the logging module
+            self.logger.debug(f'{level}: {message}')
 
     def get_indent(self):
         return (self.config.get('migrator') or {}).get('indent', MigratorConstants.get_default_indent())

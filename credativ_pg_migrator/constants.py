@@ -27,9 +27,32 @@ class MigratorConstants:
     def get_application_name():
         return 'credativ-pg-migrator'
 
+    ## Message levels, from the quietest threshold to the noisiest, and their severity.
+    ## A message is written when its severity is at least the severity of the level the
+    ## run was started with, which is the way --log-level behaves everywhere else:
+    ## the default INFO shows ERROR, WARNING and INFO, and each DEBUG step adds more.
+    MESSAGE_LEVEL_SEVERITIES = {
+        'ERROR': 50,
+        'WARNING': 40,
+        'INFO': 30,
+        'DEBUG': 20,
+        'DEBUG2': 10,
+        'DEBUG3': 0,
+    }
+
     @staticmethod
     def get_message_levels():
-        return ['INFO', 'WARNING', 'ERROR', 'DEBUG', 'DEBUG2', 'DEBUG3']
+        """The accepted --log-level values, quietest first."""
+        return list(MigratorConstants.MESSAGE_LEVEL_SEVERITIES.keys())
+
+    @staticmethod
+    def get_message_level_severity(level):
+        """
+        The severity of a message level, or None when the name is not a level.
+        """
+        if level is None:
+            return None
+        return MigratorConstants.MESSAGE_LEVEL_SEVERITIES.get(str(level).strip().upper())
 
     @staticmethod
     def get_default_name():

@@ -276,15 +276,14 @@ class SQLiteConnector(DatabaseConnector):
             raise ValueError(
                 f"sqlite_connector: the DDL script(s) under '{self.ddl_path}' produced no database "
                 f"objects. Check that the files contain SQLite CREATE statements"
-                + (f" - {failed_statements} statement(s) could not be executed, run with --log-level=WARNING to see them." if failed_statements else "."))
+                + (f" - {failed_statements} statement(s) could not be executed; each one is logged at WARNING." if failed_statements else "."))
 
         os.replace(build_path, self._ddl_database_path)
         self.config_parser.print_log_message('INFO', f"sqlite_connector: _build_ddl_database: Staging database created from DDL: {summary}")
         if failed_statements:
-            # Reported at INFO because a skipped CREATE statement means a missing object -
-            # the per statement detail is logged at WARNING, which this tool ranks as more
-            # verbose than INFO and therefore does not show by default.
-            self.config_parser.print_log_message('INFO', f"sqlite_connector: _build_ddl_database: ATTENTION: {failed_statements} statement(s) of the DDL script(s) could not be executed and were SKIPPED - the objects they create are missing from the migration. Run with --log-level=WARNING to see each skipped statement.")
+            # A skipped CREATE statement means a missing object, so this is a warning -
+            # shown by the default log level, with each skipped statement logged beside it.
+            self.config_parser.print_log_message('WARNING', f"sqlite_connector: _build_ddl_database: ATTENTION: {failed_statements} statement(s) of the DDL script(s) could not be executed and were SKIPPED - the objects they create are missing from the migration. Each skipped statement is logged separately.")
         return self._ddl_database_path
 
     def parse_ddl_files(self, settings):

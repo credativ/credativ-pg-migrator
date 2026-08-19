@@ -554,9 +554,9 @@ file. Consequences worth knowing:
   run — it is useful for inspecting what the scripts actually produced.
 - The scripts are first executed in one go; if that fails, they are replayed **statement by
   statement** so that one bad statement does not cost you every object in the file. Skipped
-  statements are counted and reported at `INFO` (`ATTENTION: n statement(s) ... were SKIPPED`), with
-  each individual statement logged at `WARNING`. Because this tool ranks `WARNING` as *more* verbose
-  than `INFO`, run with `--log-level=WARNING` to see them.
+  statements are counted and reported at `WARNING` (`ATTENTION: n statement(s) ... were SKIPPED`),
+  with each individual statement logged at `WARNING` as well. Both are shown by the default
+  log level.
 - **If the scripts contain `INSERT` statements** (i.e. a full `.dump`), that data lands in the
   staging database and is migrated from there — no `data_export` block is needed. When a CSV data
   source *is* configured for a table, the CSV takes precedence, exactly as for the other DDL based
@@ -794,11 +794,18 @@ Parameters:
 - --log-file
   - Path to the log file. The log is also printed to the console by default.
 - --log-level
-  - Logging verbosity for the CLI output and log file. The tool supports at least:
-    - INFO – high‑level progress and important messages
-    - DEBUG – detailed internal operations
-	- DEBUG2 – very verbose, low‑level details (may produce large logs)
-	- DEBUG3 – maximum verbosity, for deep troubleshooting
+  - Lowest severity written to the CLI output and the log file. Each level shows itself
+    and everything more severe, so the levels run from quietest to noisiest:
+    - ERROR – only what failed
+    - WARNING – ERROR, plus what could not be converted or was skipped
+    - INFO – **the default**: ERROR, WARNING, and high‑level progress
+    - DEBUG – all of the above, plus detailed internal operations
+    - DEBUG2 – very verbose, low‑level details (may produce large logs)
+    - DEBUG3 – maximum verbosity, for deep troubleshooting
+  - Note: before 0.16.1 the levels were an inclusion ladder starting at INFO, so
+    `--log-level=INFO` showed INFO alone and warnings stayed hidden unless the run was
+    started with `--log-level=WARNING`. Warnings are now shown by default, and
+    `--log-level=WARNING` is now *quieter* than INFO rather than noisier.
     - --dry-run
       - Run the tool in dry-run mode (no changes to target).
     - --resume
@@ -947,7 +954,7 @@ Checklist:
   - For Sybase ASE, double‑check FreeTDS and unixODBC configuration (odbcinst -j, odbcinst.ini, odbc.ini).
   - For Informix, ensure the JAR paths in the libraries setting are correct and readable.
   - For SQLite there is no driver at all. A failure here means the file itself: the migrator stops with `SQLite database file not found` when `database` does not point at an existing file — remember that a relative path is resolved against the directory of the **config file**, not the current working directory. A `WARNING` about opening the file read-write instead of read-only means a leftover journal/WAL had to be recovered; verify that the file is not in use by a running application. `file is not a database` means the file is not SQLite (or is encrypted — SQLCipher and other encrypted variants are not supported).
-  - Also for SQLite: the valid `connectivity` values are `"native"` (a database file, the default) and `"ddl"` (SQL script files). Anything else is rejected at start-up with an explanatory message. With `"ddl"`, a missing `ddl: path:` block, a path matching no file, and scripts that produce no objects at all are each reported with their own message; if objects *are* created but some statements failed, look for `ATTENTION: n statement(s) ... were SKIPPED` in the log and re-run with `--log-level=WARNING` to see which ones.
+  - Also for SQLite: the valid `connectivity` values are `"native"` (a database file, the default) and `"ddl"` (SQL script files). Anything else is rejected at start-up with an explanatory message. With `"ddl"`, a missing `ddl: path:` block, a path matching no file, and scripts that produce no objects at all are each reported with their own message; if objects *are* created but some statements failed, look for `ATTENTION: n statement(s) ... were SKIPPED` in the log - it and each skipped statement are logged at `WARNING`, which the default log level shows.
 - Check YAML formatting
   - YAML is whitespace‑sensitive; wrong indentation or quoting can cause subtle errors.
   - Validate your config with a YAML linter if you suspect a formatting issue.

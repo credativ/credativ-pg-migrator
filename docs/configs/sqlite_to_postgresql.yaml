@@ -92,7 +92,7 @@ include_tables: all
 # The connector filters virtual tables and their shadow tables by itself; this
 # list is the safety net and documents the intent.
 exclude_tables:
-  - "sqlite_.*"
+  - "sqlite_*"
   # - "products_fts"          # the FTS5 virtual table itself
   # - "products_fts_.*"       # its shadow tables
   # - "warehouse_bbox"        # an R-Tree virtual table

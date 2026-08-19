@@ -492,16 +492,11 @@ class Planner:
         include_tables / exclude_tables evaluation as in stdwf_prepare_tables.
         """
         selected = []
-        include_tables = self.config_parser.get_include_tables()
-        exclude_tables = self.config_parser.get_exclude_tables() or []
         source_tables = self.source_connection.fetch_table_names(self.source_schema_name)
         for _, table_info in (source_tables or {}).items():
             table_name = table_info['table_name']
-            if include_tables == ['.*'] or '.*' in include_tables:
-                pass
-            elif include_tables and not any(fnmatch.fnmatch(table_name, pattern) for pattern in include_tables):
-                continue
-            if any(fnmatch.fnmatch(table_name, pattern) for pattern in exclude_tables):
+            included, _reason = self.config_parser.is_object_selected('table', table_name)
+            if not included:
                 continue
             selected.append(table_name)
         return selected
@@ -679,14 +674,8 @@ class Planner:
                             'success': True,
                             'message': f"Alias used as target name for table {table_info['table_name']}"
                         })
-            # If include_tables is empty, include all tables
-            # If include_tables is ['.*'] or contains '.*', include all tables
-            if include_tables == ['.*'] or '.*' in include_tables:
-                pass
-            elif include_tables and not any(fnmatch.fnmatch(table_info['table_name'], pattern) for pattern in include_tables):
-                continue
-            if any(fnmatch.fnmatch(table_info['table_name'], pattern) for pattern in exclude_tables):
-                self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_tables: Table {table_info['table_name']} is excluded from migration.")
+            if not self.config_parser.report_object_selection(
+                    'table', table_info['table_name'], 'planner: stdwf_prepare_tables'):
                 continue
 
             source_columns = []
@@ -1086,6 +1075,7 @@ class Planner:
                 self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_tables: Skipping trigger migration.")
 
             self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_tables: Table {table_info['table_name']} processed successfully.")
+        self.config_parser.log_object_selection_summary('table', 'planner: stdwf_prepare_tables')
         self.stdwf_ensure_parent_fk_indexes()
         self.stdwf_sync_fk_column_types()
 
@@ -1437,13 +1427,8 @@ class Planner:
 
             for order_num, view_info in views.items():
                 self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_views: Processing view ({order_num}): {view_info}")
-                if include_views == ['.*'] or '.*' in include_views:
-                    pass
-                elif not any(fnmatch.fnmatch(view_info['view_name'], pattern) for pattern in include_views):
-                    self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_views: View {view_info['view_name']} does not match patterns for migration.")
-                    continue
-                if any(fnmatch.fnmatch(view_info['view_name'], pattern) for pattern in exclude_views):
-                    self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_views: View {view_info['view_name']} is excluded from migration.")
+                if not self.config_parser.report_object_selection(
+                        'view', view_info['view_name'], 'planner: stdwf_prepare_views'):
                     continue
                 self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_views: View {view_info['view_name']} is included for migration.")
                 target_view_name = view_info.get('target_view_name', view_info['view_name'])
@@ -1506,6 +1491,7 @@ class Planner:
                     'view_comment': view_info['comment']
                 })
                 self.config_parser.print_log_message( 'INFO', f"planner: stdwf_prepare_views: View {view_info['view_name']} processed successfully.")
+            self.config_parser.log_object_selection_summary('view', 'planner: stdwf_prepare_views')
             self.config_parser.print_log_message( 'INFO', "planner: stdwf_prepare_views: Views processed successfully.")
         else:
             self.config_parser.print_log_message( 'INFO', "planner: stdwf_prepare_views: Skipping views migration.")

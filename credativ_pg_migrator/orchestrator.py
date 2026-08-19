@@ -2075,12 +2075,8 @@ class Orchestrator:
             if funcproc_names:
                 for order_num, funcproc_data in funcproc_names.items():
                     self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_funcprocs: Processing func/proc {order_num}/{len(funcproc_names)}: {funcproc_data['name']}")
-                    if include_funcprocs == ['.*'] or '.*' in include_funcprocs:
-                        pass
-                    elif not any(fnmatch.fnmatch(funcproc_data['name'], pattern) for pattern in include_funcprocs):
-                        continue
-                    if any(fnmatch.fnmatch(funcproc_data['name'], pattern) for pattern in exclude_funcprocs):
-                        self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_funcprocs: Func/proc {funcproc_data['name']} is excluded from migration.")
+                    if not self.config_parser.report_object_selection(
+                            'funcproc', funcproc_data['name'], 'orchestrator: stdwf_migrate_funcprocs'):
                         continue
 
                     funcproc_id = funcproc_data['id']
@@ -2184,6 +2180,7 @@ class Orchestrator:
                         except:
                             pass
 
+                self.config_parser.log_object_selection_summary('funcproc', 'orchestrator: stdwf_migrate_funcprocs')
                 self.config_parser.print_log_message('INFO', "orchestrator: run_migrate_funcprocs: Functions and procedures migrated successfully.")
             else:
                 self.config_parser.print_log_message('INFO', "orchestrator: run_migrate_funcprocs: No functions or procedures found to migrate.")

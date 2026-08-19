@@ -8,11 +8,8 @@
   "required": [
     "source",
     "target",
-    "migrator",
-    "include_tables",
-    "exclude_tables"
+    "migrator"
   ],
-  "x-required-note": "include_tables and exclude_tables are required because config_parser reads them by direct indexing (config_parser.py:50 and :920) and raises KeyError when they are absent. Write [] when you do not want to filter. They become optional once those two lines use .get().",
   "properties": {
     "workflow": {
       "type": "string",
@@ -23,6 +20,16 @@
       ],
       "default": "standard",
       "description": "Which workflow the run executes. 'standard' reads the source objects, converts and creates them on the target and copies the data. 'mapping' maps existing target objects onto existing source objects and copies only data. 'anonymization' is a standalone data-masking copy."
+    },
+    "pattern_syntax": {
+      "type": "string",
+      "enum": [
+        "glob",
+        "regex",
+        "like"
+      ],
+      "default": "glob",
+      "description": "The syntax the patterns of include_tables / exclude_tables and the same pairs for views and functions/procedures are written in. It applies to all six alike.\n  glob  (default) - shell wildcards: * is any sequence, ? is one character, [abc] a set. This is what the migrator has always applied, so a configuration written before this setting existed keeps its meaning.\n  regex - Python regular expressions, e.g. 'BIN\\\\$.*'.\n  like  - SQL LIKE: % is any sequence, _ is one character, a backslash escapes either.\nIn every syntax a pattern must match the WHOLE object name and matching ignores case. A pattern which looks as if it were written in one of the other syntaxes is reported at startup, because such a pattern is valid in its own right and simply matches nothing."
     },
     "pre_migration_analysis": {
       "type": "object",
@@ -834,31 +841,48 @@
           "enum": [
             "all"
           ],
-          "description": "Every table."
+          "description": "Every object of this kind."
         },
         {
           "type": "array",
           "items": {
             "type": "string"
           },
-          "description": "Names or patterns of the tables to migrate."
+          "description": "Names or patterns."
+        },
+        {
+          "type": "null",
+          "description": "The key left empty - the same as an empty list."
         }
       ],
       "default": "all",
-      "description": "Which tables to migrate. 'all' or an empty list means every table. A string other than 'all' is refused at startup. Write [] rather than leaving the key empty - an empty key parses as null.",
-      "x-required-reason": "read by direct indexing at config_parser.py:50"
+      "description": "Which tables to migrate. Absent, empty, null and 'all' all mean every object; so does a pattern which matches everything ('*', '.*', '%'). Patterns are written in the syntax chosen by the top level 'pattern_syntax' (default glob), must match the whole name, and ignore case. exclude_tables is applied afterwards and wins.",
+      "x-pattern-syntax": "pattern_syntax"
     },
     "exclude_tables": {
-      "type": [
-        "array",
-        "null"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "all"
+          ],
+          "description": "Every object of this kind."
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Names or patterns."
+        },
+        {
+          "type": "null",
+          "description": "The key left empty - the same as an empty list."
+        }
       ],
-      "items": {
-        "type": "string"
-      },
       "default": [],
-      "description": "Names or patterns of tables to leave out, applied after include_tables. Write [] rather than leaving the key empty.",
-      "x-required-reason": "read by direct indexing at config_parser.py:920"
+      "description": "Tables to leave out, applied after include_tables and winning over it. An absent or empty list excludes nothing. Patterns are written in the syntax chosen by the top level 'pattern_syntax' (default glob), must match the whole name, and ignore case. ",
+      "x-pattern-syntax": "pattern_syntax"
     },
     "include_views": {
       "oneOf": [
@@ -867,29 +891,48 @@
           "enum": [
             "all"
           ],
-          "description": "Every view."
+          "description": "Every object of this kind."
         },
         {
           "type": "array",
           "items": {
             "type": "string"
           },
-          "description": "Names or patterns of the views to migrate."
+          "description": "Names or patterns."
+        },
+        {
+          "type": "null",
+          "description": "The key left empty - the same as an empty list."
         }
       ],
       "default": "all",
-      "description": "Which views to migrate. 'all' or absent means every view. Note that an empty list matches nothing and silently skips every view."
+      "description": "Which views to migrate. Absent, empty, null and 'all' all mean every object; so does a pattern which matches everything ('*', '.*', '%'). Patterns are written in the syntax chosen by the top level 'pattern_syntax' (default glob), must match the whole name, and ignore case. exclude_views is applied afterwards and wins.",
+      "x-pattern-syntax": "pattern_syntax"
     },
     "exclude_views": {
-      "type": [
-        "array",
-        "null"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "all"
+          ],
+          "description": "Every object of this kind."
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Names or patterns."
+        },
+        {
+          "type": "null",
+          "description": "The key left empty - the same as an empty list."
+        }
       ],
-      "items": {
-        "type": "string"
-      },
       "default": [],
-      "description": "Names or patterns of views to leave out, applied after include_views."
+      "description": "Views to leave out, applied after include_views and winning over it. An absent or empty list excludes nothing. Patterns are written in the syntax chosen by the top level 'pattern_syntax' (default glob), must match the whole name, and ignore case. ",
+      "x-pattern-syntax": "pattern_syntax"
     },
     "include_funcprocs": {
       "oneOf": [
@@ -898,29 +941,48 @@
           "enum": [
             "all"
           ],
-          "description": "Every function and procedure."
+          "description": "Every object of this kind."
         },
         {
           "type": "array",
           "items": {
             "type": "string"
           },
-          "description": "Names or patterns of the routines to migrate."
+          "description": "Names or patterns."
+        },
+        {
+          "type": "null",
+          "description": "The key left empty - the same as an empty list."
         }
       ],
       "default": "all",
-      "description": "Which functions and procedures to migrate. 'all' or absent means all of them. An empty list matches nothing and silently skips every routine."
+      "description": "Which functions and procedures to migrate. Absent, empty, null and 'all' all mean every object; so does a pattern which matches everything ('*', '.*', '%'). Patterns are written in the syntax chosen by the top level 'pattern_syntax' (default glob), must match the whole name, and ignore case. exclude_funcprocs is applied afterwards and wins.",
+      "x-pattern-syntax": "pattern_syntax"
     },
     "exclude_funcprocs": {
-      "type": [
-        "array",
-        "null"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "all"
+          ],
+          "description": "Every object of this kind."
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Names or patterns."
+        },
+        {
+          "type": "null",
+          "description": "The key left empty - the same as an empty list."
+        }
       ],
-      "items": {
-        "type": "string"
-      },
       "default": [],
-      "description": "Names or patterns of functions and procedures to leave out, applied after include_funcprocs."
+      "description": "Functions and procedures to leave out, applied after include_funcprocs and winning over it. An absent or empty list excludes nothing. Patterns are written in the syntax chosen by the top level 'pattern_syntax' (default glob), must match the whole name, and ignore case. ",
+      "x-pattern-syntax": "pattern_syntax"
     },
     "tables": {
       "type": [

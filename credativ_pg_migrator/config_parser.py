@@ -14,6 +14,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import fnmatch
 import json
 import yaml
 from credativ_pg_migrator.constants import MigratorConstants
@@ -29,6 +30,8 @@ class ConfigParser:
     def __init__(self, args, logger):
         self.args = args
         self.logger = logger
+        ## counts of objects kept and left out by include_*/exclude_*, per object kind
+        self.object_filter_counters = {}
         self.config = self.load_config(args.config)
         self.print_log_message('DEBUG3', f"config_parser: __init__: Configuration loaded: {self.config}")
         self.validate_config()
@@ -104,10 +107,28 @@ class ConfigParser:
         if names_case_handling not in ['lower', 'upper', 'keep']:
             raise ValueError(f"Invalid names_case_handling in the config file: {names_case_handling}. Must be one of 'lower', 'upper', or 'keep'.")
 
-        include_tables = self.config['include_tables']
-        if (include_tables is not None and type(include_tables) is str and include_tables.lower() != 'all'):
-            # and type(include_tables) is not list):
-            raise ValueError("When include_tables is used, it must be a list of names or regex patterns")
+        pattern_syntax = self.get_pattern_syntax()
+        configured_syntax = self.config.get('pattern_syntax', None)
+        if configured_syntax is not None and str(configured_syntax).strip().lower() not in self.PATTERN_SYNTAX_ALIASES:
+            raise ValueError(
+                f"Invalid pattern_syntax in the config file: {configured_syntax}. "
+                f"Must be one of 'glob', 'regex' or 'like'.")
+
+        for include_option, exclude_option in self.OBJECT_FILTER_KEYS.values():
+            for option_name in (include_option, exclude_option):
+                value = self.config.get(option_name, None)
+                if value is not None and not isinstance(value, (list, tuple)) and not isinstance(value, str):
+                    raise ValueError(
+                        f"{option_name} must be 'all' or a list of patterns, "
+                        f"found {type(value).__name__}.")
+                if isinstance(value, str) and value.strip().lower() not in self.MATCH_EVERYTHING_PATTERNS:
+                    raise ValueError(
+                        f"When {option_name} is written as a single value it must be 'all'. "
+                        f"Write a list to select individual objects.")
+
+        ## compiles every pattern and reports any written in another syntax
+        self.validate_object_filters()
+        self.print_log_message('DEBUG', f"config_parser: validate_config: object filter pattern syntax: {pattern_syntax}")
 
         data_types_substitution = self.get_data_types_substitution()
         if isinstance(data_types_substitution, list):
@@ -922,13 +943,7 @@ class ConfigParser:
         return (self.config.get('migration') or {}).get('migrate_lob_values', True)
 
     def get_include_tables(self):
-        include_tables = self.config.get('include_tables', None)
-        if (include_tables is None or (type(include_tables) is str and include_tables.lower() == 'all')):
-            return ['.*']  # Pattern matching all table names
-        elif type(include_tables) is list:
-            return include_tables
-        else:
-            return []
+        return self.get_object_filter_patterns('include_tables')
 
     ## Validator
     def get_validation_tables_name(self):
@@ -974,33 +989,255 @@ class ConfigParser:
         return int(self.get_validation_config().get('random_sample_size', 1000))
 
     def get_exclude_tables(self):
-        return self.config['exclude_tables']
+        return self.get_object_filter_patterns('exclude_tables')
 
     def get_include_views(self):
-        include_views = self.config.get('include_views', None)
-        if include_views is None or (type(include_views) is str and include_views.lower() == 'all'):
-            # Pattern matching all view names
-            return ['.*']
-        elif type(include_views) is list:
-            return include_views
-        else:
-            return []
+        return self.get_object_filter_patterns('include_views')
 
     def get_exclude_views(self):
-        return self.config.get('exclude_views', [])
+        return self.get_object_filter_patterns('exclude_views')
 
     def get_include_funcprocs(self):
-        include_funcprocs = self.config.get('include_funcprocs', None)
-        if include_funcprocs is None or (type(include_funcprocs) is str and include_funcprocs.lower() == 'all'):
-            # Pattern matching all function/procedure names
-            return ['.*']
-        elif type(include_funcprocs) is list:
-            return include_funcprocs
-        else:
-            return []
+        return self.get_object_filter_patterns('include_funcprocs')
 
     def get_exclude_funcprocs(self):
-        return self.config.get('exclude_funcprocs', [])
+        return self.get_object_filter_patterns('exclude_funcprocs')
+
+    ## ------------------------------------------------------------------------
+    ## Object selection - include_tables / exclude_tables and the same pair for
+    ## views and functions/procedures.
+    ##
+    ## All six behave identically:
+    ##   - the patterns are written in one syntax, chosen by the top level
+    ##     'pattern_syntax' (glob, regex or like),
+    ##   - a pattern must match the WHOLE name, and matching ignores case,
+    ##   - an include list which is absent, empty, 'all' or contains a
+    ##     match-everything pattern selects every object,
+    ##   - an exclude list which is absent or empty removes nothing,
+    ##   - exclude is applied after include and wins.
+    ## ------------------------------------------------------------------------
+
+    ## Spellings of "everything", accepted in any syntax and on both sides, so that
+    ## exclude_tables: ['.*'] really excludes everything instead of silently excluding
+    ## nothing, which is what a glob '.*' used to do.
+    MATCH_EVERYTHING_PATTERNS = ('all', '*', '.*', '%', '.+')
+
+    PATTERN_SYNTAX_ALIASES = {
+        'glob': 'glob', 'wildcard': 'glob', 'wildcards': 'glob', 'fnmatch': 'glob', 'shell': 'glob',
+        'regex': 'regex', 'regexp': 'regex', 're': 'regex', 'regular_expression': 'regex',
+        'like': 'like', 'sql': 'like', 'sql_like': 'like',
+    }
+
+    OBJECT_FILTER_KEYS = {
+        'table':    ('include_tables', 'exclude_tables'),
+        'view':     ('include_views', 'exclude_views'),
+        'funcproc': ('include_funcprocs', 'exclude_funcprocs'),
+    }
+
+    def get_pattern_syntax(self):
+        """
+        The syntax the object filter patterns are written in.
+
+        'glob' (the default) is what the migrator has always applied, so a configuration
+        written before this setting existed keeps its meaning. 'regex' and 'like' are
+        opted into explicitly.
+        """
+        value = self.config.get('pattern_syntax', None)
+        if value is None:
+            return 'glob'
+        normalized = str(value).strip().lower()
+        if normalized in self.PATTERN_SYNTAX_ALIASES:
+            return self.PATTERN_SYNTAX_ALIASES[normalized]
+        self.print_log_message('INFO',
+            f"config_parser: get_pattern_syntax: WARNING: unknown pattern_syntax '{value}' - "
+            f"using 'glob'. Valid values are 'glob', 'regex' and 'like'.")
+        return 'glob'
+
+    def get_object_filter_patterns(self, option_name):
+        """
+        The patterns of one include_* / exclude_* option, as a list.
+
+        An absent key and an empty key (which YAML reads as null) give an empty list: on
+        the include side that means every object, on the exclude side that nothing is
+        excluded. The scalar 'all' is kept as a match-everything pattern instead of being
+        collapsed to an empty list, so that it reads the same way on both sides -
+        'exclude_tables: all' excludes everything, exactly as 'exclude_tables: [.*]' does.
+
+        A bare string other than 'all' is refused rather than read as a list of one: it is
+        almost always a forgotten '- ' in the YAML, and reading it as a single pattern
+        would quietly migrate a different set of objects than was meant.
+        """
+        value = self.config.get(option_name, None)
+        if value is None:
+            return []
+        if isinstance(value, str):
+            if value.strip().lower() in self.MATCH_EVERYTHING_PATTERNS:
+                return [value.strip().lower()]
+            raise ValueError(
+                f"When {option_name} is written as a single value it must be 'all'. "
+                f"Write a list to select individual objects.")
+        if isinstance(value, (list, tuple)):
+            return [entry for entry in value if entry is not None]
+        self.print_log_message('INFO',
+            f"config_parser: get_object_filter_patterns: WARNING: {option_name} must be 'all' or a "
+            f"list of patterns, found {type(value).__name__} - it is ignored.")
+        return []
+
+    @staticmethod
+    def _like_pattern_to_regex(pattern):
+        """SQL LIKE to a regular expression: % is any sequence, _ is one character."""
+        out = []
+        index = 0
+        while index < len(pattern):
+            char = pattern[index]
+            if char == '\\' and index + 1 < len(pattern):
+                out.append(re.escape(pattern[index + 1]))
+                index += 2
+                continue
+            if char == '%':
+                out.append('.*')
+            elif char == '_':
+                out.append('.')
+            else:
+                out.append(re.escape(char))
+            index += 1
+        return ''.join(out)
+
+    def compile_object_pattern(self, pattern, option_name):
+        """
+        One pattern as a compiled, case-insensitive regular expression matching the whole
+        name. None is returned for a pattern which means "everything".
+
+        An unusable pattern stops the migration: a filter which silently matches nothing
+        would migrate less than was asked for without saying so.
+        """
+        text = str(pattern).strip()
+        if text.lower() in self.MATCH_EVERYTHING_PATTERNS:
+            return None
+
+        syntax = self.get_pattern_syntax()
+        if syntax == 'glob':
+            expression = fnmatch.translate(text)
+        elif syntax == 'like':
+            expression = self._like_pattern_to_regex(text)
+        else:
+            expression = text
+
+        try:
+            return re.compile(expression, re.IGNORECASE)
+        except re.error as e:
+            raise ValueError(
+                f"{option_name}: '{pattern}' is not a valid {syntax} pattern - {e}. "
+                f"The pattern syntax is set by the top level 'pattern_syntax' "
+                f"(currently '{syntax}'; 'glob', 'regex' and 'like' are available).") from e
+
+    def object_name_matches_any(self, object_name, patterns, option_name):
+        """True when the name matches at least one of the patterns."""
+        for pattern in patterns or []:
+            compiled = self.compile_object_pattern(pattern, option_name)
+            if compiled is None:
+                return True
+            if compiled.fullmatch(str(object_name)):
+                return True
+        return False
+
+    def is_object_selected(self, object_kind, object_name):
+        """
+        Whether one object is migrated, together with the reason when it is not.
+
+        Returns (True, None) or (False, reason). The reason is meant to be logged - an
+        object left out without a word in the log is the failure this migrator treats as
+        a bug.
+        """
+        include_option, exclude_option = self.OBJECT_FILTER_KEYS[object_kind]
+        include_patterns = self.get_object_filter_patterns(include_option)
+        exclude_patterns = self.get_object_filter_patterns(exclude_option)
+
+        if include_patterns and not self.object_name_matches_any(object_name, include_patterns, include_option):
+            return False, f"no pattern of {include_option} matches it"
+        if exclude_patterns and self.object_name_matches_any(object_name, exclude_patterns, exclude_option):
+            return False, f"it is matched by {exclude_option}"
+        return True, None
+
+    def report_object_selection(self, object_kind, object_name, caller):
+        """
+        Apply the filters to one object and log the decision. Returns True when the object
+        is migrated. Every call site of the filters uses this, so the three object kinds
+        cannot drift apart again.
+        """
+        selected, reason = self.is_object_selected(object_kind, object_name)
+        counters = self.object_filter_counters.setdefault(
+            object_kind, {'selected': 0, 'skipped': 0})
+        if selected:
+            counters['selected'] += 1
+        else:
+            counters['skipped'] += 1
+            self.print_log_message('INFO', f"{caller}: {object_kind} {object_name} is not migrated - {reason}.")
+        return selected
+
+    def log_object_selection_summary(self, object_kind, caller):
+        """One line per object kind saying how many were left out, and by which option."""
+        counters = self.object_filter_counters.get(object_kind)
+        if not counters:
+            return
+        include_option, exclude_option = self.OBJECT_FILTER_KEYS[object_kind]
+        total = counters['selected'] + counters['skipped']
+        if counters['skipped']:
+            self.print_log_message('INFO',
+                f"{caller}: {counters['selected']} of {total} {object_kind}s selected for migration, "
+                f"{counters['skipped']} left out by {include_option} / {exclude_option} "
+                f"(pattern_syntax: {self.get_pattern_syntax()}).")
+        else:
+            self.print_log_message('INFO',
+                f"{caller}: all {total} {object_kind}s selected for migration.")
+
+    def validate_object_filters(self):
+        """
+        Compile every filter pattern at startup, and report a pattern which looks as if it
+        were written in a different syntax than the configured one.
+
+        A pattern in the wrong syntax is not an error - it is valid in its own right and
+        simply matches nothing, which is why it has to be reported rather than caught.
+        """
+        syntax = self.get_pattern_syntax()
+        for include_option, exclude_option in self.OBJECT_FILTER_KEYS.values():
+            for option_name in (include_option, exclude_option):
+                for pattern in self.get_object_filter_patterns(option_name):
+                    ## raises ValueError with the option and the pattern named
+                    self.compile_object_pattern(pattern, option_name)
+                    advice = self.pattern_syntax_advice(pattern, syntax)
+                    if advice:
+                        self.print_log_message('INFO',
+                            f"config_parser: validate_object_filters: WARNING: {option_name}: '{pattern}' {advice} "
+                            f"The patterns are read as '{syntax}' - set the top level 'pattern_syntax' to change that.")
+
+    @staticmethod
+    def pattern_syntax_advice(pattern, syntax):
+        """
+        A note when a pattern carries the marks of another syntax, or None. Written to be
+        quiet about patterns which are plain names or unambiguous.
+        """
+        text = str(pattern)
+        if text.strip().lower() in ConfigParser.MATCH_EVERYTHING_PATTERNS:
+            return None
+
+        looks_like_regex = bool(re.search(r'\.\*|\.\+|\\[dwsSWDb]|^\^|\$$|\[\^|\)\?|\)\+', text))
+        looks_like_glob = bool(re.search(r'(?:^|[\w$])\*', text)) or '?' in text
+        has_like_wildcard = '%' in text
+
+        if syntax == 'glob' and looks_like_regex:
+            return ("reads as a regular expression, but is applied as a glob - as a glob "
+                    "'.' is a literal dot and '.*' matches a dot followed by anything, so this "
+                    "pattern probably matches nothing.")
+        if syntax == 'regex' and looks_like_glob and not looks_like_regex:
+            return ("reads as a glob, but is applied as a regular expression - as a regular "
+                    "expression 'X*' means zero or more X, not 'starting with X'.")
+        if syntax == 'regex' and has_like_wildcard:
+            return "contains '%', which is a LIKE wildcard and has no special meaning in a regular expression."
+        if syntax == 'like' and (looks_like_glob or looks_like_regex):
+            return ("reads as a glob or a regular expression, but is applied as SQL LIKE, where "
+                    "only '%' and '_' are wildcards.")
+        return None
 
     def get_log_file(self):
         return self.args.log_file or MigratorConstants.get_default_log()

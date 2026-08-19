@@ -113,7 +113,7 @@ migration:
   validate_objects: retry
 
 include_tables: all
-exclude_tables: []            # >>> ADJUST - e.g. - "BIN\\$.*"  (recycle bin)
+exclude_tables: []            # >>> ADJUST - e.g. - "BIN$*"  (recycle bin)
 include_views: all
 exclude_views: []
 include_funcprocs: all

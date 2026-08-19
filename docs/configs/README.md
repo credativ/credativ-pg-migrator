@@ -164,6 +164,39 @@ for every source.
 
 ---
 
+## Choosing which objects are migrated
+
+`include_tables` / `exclude_tables`, and the same pairs for views and
+functions/procedures, all behave identically:
+
+- **"all", an empty list, or leaving the key out selects everything.** An empty
+  include list no longer means "nothing" — that used to skip every view and every
+  routine without saying so.
+- **`exclude_*` is applied after `include_*` and wins over it.**
+- **A pattern must match the whole name, and matching ignores case.** `orders`
+  selects `ORDERS`, not `back_orders`.
+
+`pattern_syntax` (top level) says how the patterns are written, for all six at once:
+
+| value | wildcards | example |
+|---|---|---|
+| `glob` (default) | `*` any sequence, `?` one character, `[abc]` a set | `SYS*`, `TMP_?` |
+| `regex` | Python regular expressions | `BIN\$.*`, `^tmp_.+$` |
+| `like` | SQL LIKE: `%` any sequence, `_` one character, `\` escapes | `SYS%`, `TMP__` |
+
+The default is `glob` because that is what the migrator has always applied — a
+configuration written before this setting existed keeps its meaning.
+
+**The same text can mean different things in different syntaxes.** `log_.*`
+excludes `log_2024` as a regular expression and nothing at all as a glob, because
+a glob `.` is a literal dot. A pattern that looks as though it were written in
+another syntax is therefore reported at startup, naming the option and the
+pattern — it is valid in its own right and would otherwise just silently match
+nothing. A pattern that cannot be compiled at all stops the run.
+
+At the end of each phase the log states how many objects were selected and how
+many were left out, by which option.
+
 ## Known gaps in the option set
 
 Options that exist in the configuration language but do nothing yet. They are

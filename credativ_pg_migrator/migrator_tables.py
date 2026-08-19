@@ -19,6 +19,7 @@ import uuid
 import psycopg2
 import traceback
 from credativ_pg_migrator.constants import MigratorConstants
+from credativ_pg_migrator.protocol_comments import COMMON_COLUMN_COMMENTS, build_comments_catalog
 
 
 def remove_nul_characters(value):
@@ -129,6 +130,76 @@ class MigratorTables:
         self.create_ddl_tables()
         self.create_table_for_mapping()
         self.create_table_for_anonymization_stats()
+        self.apply_comments()
+
+    def quote_comment(self, text):
+        """Quotes a comment for a COMMENT ON statement - such a statement takes no parameters."""
+        quoted = psycopg2.extensions.QuotedString(text)
+        quoted.prepare(self.protocol_connection.connection)
+        return quoted.getquoted().decode('utf-8')
+
+    def apply_comments(self, table_names=None):
+        """
+        Writes the descriptions of the protocol schema into the database itself - COMMENT ON
+        TABLE and COMMENT ON COLUMN for every table the migrator creates there. Everything
+        reading the catalog then has them: the web GUI shows them as the hints of a table and
+        of its columns, and psql shows the same texts with \\dt+ and \\d+, so whoever looks at
+        the metadata of a migration is told what a value means without reading the code.
+        The texts stand in protocol_comments.py. Tables which the run did not create are
+        skipped - the catalog covers the whole schema, while one workflow creates only the
+        tables it needs. A comment which cannot be written is reported and does not stop the
+        migration: the metadata is described by it, not produced by it.
+        """
+        catalog = build_comments_catalog(self.config_parser)
+        if table_names is not None:
+            wanted = set(table_names)
+            catalog = {name: entry for name, entry in catalog.items() if name in wanted}
+
+        existing_columns = {}
+        cursor = self.protocol_connection.connection.cursor()
+        cursor.execute("""
+            SELECT table_name, column_name
+            FROM information_schema.columns
+            WHERE table_schema = %s
+        """, (self.protocol_schema,))
+        for existing_table, existing_column in cursor.fetchall():
+            existing_columns.setdefault(existing_table, set()).add(existing_column)
+        cursor.close()
+
+        commented_tables = 0
+        for table_name, entry in sorted(catalog.items()):
+            table_columns = existing_columns.get(table_name)
+            if table_columns is None:
+                self.config_parser.print_log_message('DEBUG3', f"migrator_tables: apply_comments: table {table_name} does not exist in schema {self.protocol_schema} - skipped")
+                continue
+
+            column_comments = entry.get('columns', {})
+            ## a comment written for a column which is not there means the catalog drifted
+            ## away from the DDL - it is reported instead of being silently dropped
+            for unknown_column in sorted(set(column_comments) - table_columns):
+                self.config_parser.print_log_message('WARNING', f"migrator_tables: apply_comments: table {table_name} has no column {unknown_column} - the comment written for it is not used")
+
+            statements = []
+            if entry.get('comment'):
+                table_comment = self.quote_comment(entry['comment'])
+                statements.append(f'COMMENT ON TABLE "{self.protocol_schema}"."{table_name}" IS {table_comment}')
+            for column_name in sorted(table_columns):
+                comment = column_comments.get(column_name) or COMMON_COLUMN_COMMENTS.get(column_name)
+                if not comment:
+                    self.config_parser.print_log_message('DEBUG3', f"migrator_tables: apply_comments: no comment defined for {table_name}.{column_name}")
+                    continue
+                column_comment = self.quote_comment(comment)
+                statements.append(f'COMMENT ON COLUMN "{self.protocol_schema}"."{table_name}"."{column_name}" IS {column_comment}')
+
+            if not statements:
+                continue
+            try:
+                self.protocol_connection.execute_query(";\n".join(statements))
+                commented_tables += 1
+            except Exception as e:
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: apply_comments: Error writing the comments of table {table_name}: {e}")
+
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: apply_comments: Comments written for {commented_tables} tables in schema {self.protocol_schema}")
 
     def prepare_data_types_substitution(self):
         # Drop table if exists
@@ -156,6 +227,7 @@ class MigratorTables:
             VALUES (%s, %s, %s, %s, %s)
             """, (table_name, column_name, source_type, target_type, comment))
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: prepare_data_types_substitution: Data inserted into table data_types_substitution in schema {self.protocol_schema}")
+        self.apply_comments(['data_types_substitution'])
 
     def check_data_types_substitution(self, settings):
         """
@@ -239,6 +311,7 @@ class MigratorTables:
             VALUES (%s, %s, %s)
             """, (source_table_name, where_limitation, use_when_column_present))
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: prepare_data_migration_limitation: Data inserted into table data_migration_limitation in schema {self.protocol_schema}")
+        self.apply_comments(['data_migration_limitation'])
 
     def get_records_data_migration_limitation(self, source_table_name):
         query = f"""
@@ -280,6 +353,7 @@ class MigratorTables:
             VALUES (%s, %s)
             """, (source_object_name, target_object_name))
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: prepare_remote_objects_substitution: Data inserted into table remote_objects_substitution in schema {self.protocol_schema}")
+        self.apply_comments(['remote_objects_substitution'])
 
     def get_records_remote_objects_substitution(self):
         query = f"""
@@ -318,6 +392,7 @@ class MigratorTables:
                 'target_default_value': target_default_value
             })
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: prepare_default_values_substitution: Data inserted into table default_values_substitution in schema {self.protocol_schema}")
+        self.apply_comments(['default_values_substitution'])
 
     def insert_default_values_substitution(self, settings):
         self.protocol_connection.execute_query(f"""
@@ -5961,6 +6036,13 @@ class MigratorTables:
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: create_table_for_validation: Error: {e}")
             raise
+
+        self.apply_comments([
+            self.config_parser.get_validation_tables_name(),
+            self.config_parser.get_validation_columns_name(),
+            self.config_parser.get_validation_indexes_name(),
+            self.config_parser.get_validation_constraints_name(),
+        ])
 
     def insert_validation_table_result(self, settings):
         source_schema_name = settings.get('source_schema_name')

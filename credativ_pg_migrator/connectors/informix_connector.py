@@ -16,7 +16,7 @@
 
 import jaydebeapi
 # import jpype
-from credativ_pg_migrator.database_connector import DatabaseConnector
+from credativ_pg_migrator.database_connector import DatabaseConnector, first_line
 from credativ_pg_migrator.migrator_logging import MigratorLogger
 from credativ_pg_migrator.jvm_helper import detach_thread_from_jvm
 import re
@@ -333,6 +333,10 @@ class InformixConnector(DatabaseConnector):
                 'year(': 'extract(year from ',
                 'month(': 'extract(month from ',
                 'day(': 'extract(day from ',
+                ## WEEKDAY() of Informix counts the days of the week from Sunday as 0, and so
+                ## does the 'dow' of PostgreSQL
+                'weekday(': 'extract(dow from ',
+                'pow(': 'power(',
                 ## NVL is the Informix spelling of COALESCE, and a routine using it is
                 ## created without a word by PostgreSQL - the body of a PL/pgSQL routine is
                 ## only checked for its syntax - and fails on the first call with
@@ -635,7 +639,7 @@ class InformixConnector(DatabaseConnector):
             elements.append(element)
         return elements
 
-    def convert_matches_operator(self, code):
+    def convert_matches_operator(self, code, messages=None):
         """
         Convert the MATCHES operator of Informix, which PostgreSQL does not know.
 
@@ -650,7 +654,17 @@ class InformixConnector(DatabaseConnector):
         an index. A pattern with one becomes SIMILAR TO, whose bracket expression means the
         same thing. Only a pattern written as a literal can be translated - MATCHES against
         an expression is reported and left as it is.
+
+        A caller which hands over a list is given the messages in it instead of having them
+        written into the log - see convert_outer_joins().
         """
+        def report(level, message):
+            if messages is None:
+                self.config_parser.print_log_message(
+                    level, f"informix_connector: convert_matches_operator: {message}")
+            else:
+                messages.append((level, message))
+
         def convert_pattern(match):
             pattern = match.group('pattern')[1:-1]
             converted = []
@@ -678,15 +692,16 @@ class InformixConnector(DatabaseConnector):
                 index += 1
 
             operator = 'SIMILAR TO' if character_class else 'LIKE'
-            self.config_parser.print_log_message('DEBUG',
-                f"informix_connector: convert_matches_operator: MATCHES {match.group('pattern')} converted to {operator} '{''.join(converted)}'")
+            report('DEBUG',
+                   f"MATCHES {match.group('pattern')} converted to {operator} '{''.join(converted)}'")
             return f"{operator} '{''.join(converted)}'"
 
         code = re.sub(r"(?i)\bMATCHES\s+(?P<pattern>'(?:[^']|'')*')", convert_pattern, code)
 
-        if re.search(r'(?i)\bMATCHES\b', code):
-            self.config_parser.print_log_message('WARNING',
-                "informix_connector: convert_matches_operator: A MATCHES operator whose pattern is not a literal was left in the code - PostgreSQL does not know the operator, it has to be rewritten manually.")
+        if self.found_outside_string_literals(code, r'(?i)\bMATCHES\b'):
+            report('WARNING',
+                   "a MATCHES operator whose pattern is not a literal was left in the code - "
+                   "PostgreSQL does not know the operator, it has to be rewritten manually")
         return code
 
     ## The operators which Informix writes as a call to a function of its own system schema when it
@@ -817,7 +832,7 @@ class InformixConnector(DatabaseConnector):
                           'references': [name for child in children for name in child['references']]})
         return nodes
 
-    def build_outer_join_tree(self, nodes, predicates):
+    def build_outer_join_tree(self, nodes, predicates, messages=None):
         """
         The FROM clause of the nodes written with the explicit joins of PostgreSQL, and the
         conditions which were used for them.
@@ -828,6 +843,13 @@ class InformixConnector(DatabaseConnector):
         is what makes it a condition of the join and not a filter of the query.
         """
         used = set()
+
+        def report(level, message):
+            if messages is None:
+                self.config_parser.print_log_message(
+                    level, f"informix_connector: build_outer_join_tree: {message}")
+            else:
+                messages.append((level, message))
 
         def claim(node, index_of, is_outer):
             """
@@ -879,9 +901,9 @@ class InformixConnector(DatabaseConnector):
                 if node['outer']:
                     joined += f" LEFT OUTER JOIN {part} ON ({condition or 'TRUE'})"
                     if not condition:
-                        self.config_parser.print_log_message('WARNING',
-                            "informix_connector: convert_outer_joins: An outer join of the source has no condition in the "
-                            "WHERE clause - it is written as 'ON (TRUE)', which keeps every row of both tables.")
+                        report('WARNING',
+                               "an outer join of the source has no condition in the WHERE clause - "
+                               "it is written as 'ON (TRUE)', which keeps every row of both tables")
                 elif condition:
                     joined += f" INNER JOIN {part} ON ({condition})"
                 else:
@@ -895,7 +917,7 @@ class InformixConnector(DatabaseConnector):
         remaining = [predicate['text'] for position, predicate in enumerate(predicates) if position not in used]
         return from_clause, remaining
 
-    def convert_outer_joins(self, code):
+    def convert_outer_joins(self, code, messages=None):
         """
         The outer joins of Informix, written as OUTER in the FROM clause, as the explicit joins of
         PostgreSQL.
@@ -912,7 +934,19 @@ class InformixConnector(DatabaseConnector):
         A WHERE clause whose conditions cannot be attributed - an OR spanning the subordinate
         table - is left as it is and reported, so that the view fails to be created instead of
         being created with another meaning.
+
+        A caller which does not want the messages written into the log hands over a list, and
+        they are collected in it instead: the query conversion reports what happened to a
+        statement next to the statement itself, and its preparation step runs before anything
+        of the migrator has been built.
         """
+        def report(level, message):
+            if messages is None:
+                self.config_parser.print_log_message(
+                    level, f"informix_connector: convert_outer_joins: {message}")
+            else:
+                messages.append((level, message))
+
         for _ in range(20):
             masked, depths = self.scan_sql_text(code)
 
@@ -942,11 +976,11 @@ class InformixConnector(DatabaseConnector):
                 condition_depths = [depth - from_clause['depth'] for depth in depths[where_start:where_end]]
                 if re.search(r'(?i)\bOR\b', ''.join(character if condition_depths[position] == 0 else ' '
                                                     for position, character in enumerate(condition_masked))):
-                    self.config_parser.print_log_message('WARNING',
-                        "informix_connector: convert_outer_joins: The WHERE clause of a query with an outer join of "
-                        "Informix contains an OR which is not parenthesized - which of its conditions belong to the join "
-                        "cannot be told, so the query is left as it is and has to be rewritten manually: "
-                        f"{' '.join(code[from_clause['start']:where_end].split())}")
+                    report('WARNING',
+                           "the WHERE clause of a query with an outer join of Informix contains an OR "
+                           "which is not parenthesized - which of its conditions belong to the join "
+                           "cannot be told, so the query is left as it is and has to be rewritten "
+                           f"manually: {' '.join(code[from_clause['start']:where_end].split())}")
                     return code
                 start = 0
                 for keyword in re.finditer(r'(?i)\bAND\b', condition_masked):
@@ -960,29 +994,524 @@ class InformixConnector(DatabaseConnector):
                               for text in predicates if text.strip()]
 
             nodes = self.parse_outer_join_items(code[from_clause['start']:from_clause['end']])
-            joined, remaining = self.build_outer_join_tree(nodes, predicates)
+            joined, remaining = self.build_outer_join_tree(nodes, predicates, messages)
 
             rebuilt = f" {joined} "
             if remaining:
                 rebuilt += f"WHERE {' AND '.join(remaining)} "
             replaced_until = where_end if where_start is not None else from_clause['end']
             code = code[:from_clause['start']] + rebuilt + code[replaced_until:]
-            self.config_parser.print_log_message('DEBUG',
-                f"informix_connector: convert_outer_joins: outer join converted to {' '.join(joined.split())}")
+            report('DEBUG', f"outer join converted to {' '.join(joined.split())}")
 
         return code
 
-    def convert_view_code(self, settings: dict):
-        view_code = settings['view_code']
-        converted_view_code = view_code
+    ## ------------------------------------------------------------------ query conversion
+    ##
+    ## What Informix spells its own way and no SQL parser models. Every rewrite below is one
+    ## the conversion has to do in any case - the constructs have no counterpart in the target
+    ## and are not a matter of taste - and doing them before anything parses the statement is
+    ## what lets a statement of an application be classified and converted rather than reported
+    ## as one the migrator cannot read.
+
+    ## the fields of a DATETIME or an INTERVAL of Informix, from the coarsest to the finest
+    DATETIME_FIELDS = ('YEAR', 'MONTH', 'DAY', 'HOUR', 'MINUTE', 'SECOND', 'FRACTION')
+    ## one field of a qualifier, with the precision a FRACTION or a leading field may carry
+    FIELD_QUALIFIER = r'(YEAR|MONTH|DAY|HOUR|MINUTE|SECOND|FRACTION)(?:\s*\(\s*\d+\s*\))?'
+
+    ## TODAY is the current date of Informix and CURRENT its current timestamp - both are
+    ## keywords written without parentheses, so a conversion which renames them into a function
+    ## produces 'current_date()', which PostgreSQL refuses. The 'CURRENT ROW' of a window frame
+    ## and the 'WHERE CURRENT OF cursor' of a positioned update are not the register.
+    TODAY_REGISTER = re.compile(r'(?i)\bTODAY\b')
+    CURRENT_REGISTER = re.compile(r'(?i)\bCURRENT\b(?!\s+(?:ROW|OF)\b)'
+                                  r'(?:\s+' + FIELD_QUALIFIER + r'\s+TO\s+' + FIELD_QUALIFIER + r')?')
+
+    ## SELECT [ALL | DISTINCT | UNIQUE] [SKIP n] [FIRST m] - the paging of Informix, written
+    ## between SELECT and the select list where PostgreSQL writes LIMIT / OFFSET at the end
+    FIRST_SKIP = re.compile(r'(?i)\bSELECT\b(?P<quantifier>\s+(?:ALL|DISTINCT|UNIQUE))?'
+                            r'(?:\s+SKIP\s+(?P<skip>\d+))?(?:\s+FIRST\s+(?P<first>\d+))?')
+    SET_OPERATOR = re.compile(r'(?i)\b(?:UNION|INTERSECT|EXCEPT)\b')
+
+    ## 'sysmaster:sysdual' is the one row table of Informix - a SELECT of PostgreSQL needs no
+    ## table there at all - and 'database[@server]:owner.table' is how a statement of Informix
+    ## names a table which lives in another database of the same server
+    SYSDUAL = re.compile(r'(?i)\bFROM\s+(?:[A-Za-z_][\w$]*(?:@[A-Za-z_][\w$]*)?\s*:\s*)?"?SYSDUAL"?')
+    DATABASE_QUALIFIER = re.compile(r'''(?i)(?<![\w."'])([A-Za-z_][\w$]*(?:@[A-Za-z_][\w$]*)?)'''
+                                    r'\s*:(?![:=])\s*(?=[A-Za-z_"])')
+
+    ## 'n UNITS DAY' is the interval of Informix. An interval of PostgreSQL is built from a
+    ## literal, so a duration which counts something else than a literal is multiplied out.
+    UNITS_LITERAL = re.compile(r'(?i)\b(\d+)\s+UNITS\s+(YEAR|MONTH|DAY|HOUR|MINUTE|SECOND)S?\b')
+    UNITS_EXPRESSION = re.compile(r'(?i)(\([^()]*\)|[A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*)?)'
+                                  r'\s+UNITS\s+(YEAR|MONTH|DAY|HOUR|MINUTE|SECOND)S?\b')
+
+    ## the literals - INTERVAL (2 15:30) DAY TO MINUTE, DATETIME (2024-01-15 10:30) YEAR TO
+    ## MINUTE - and the two types written the same way, which a cast of the statement names
+    INTERVAL_LITERAL = re.compile(r'(?i)\bINTERVAL\s*\(\s*([^()]*?)\s*\)\s*'
+                                  + FIELD_QUALIFIER + r'\s+TO\s+' + FIELD_QUALIFIER)
+    DATETIME_LITERAL = re.compile(r'(?i)\bDATETIME\s*\(\s*([^()]*?)\s*\)\s*'
+                                  + FIELD_QUALIFIER + r'\s+TO\s+' + FIELD_QUALIFIER)
+    INTERVAL_TYPE = re.compile(r'(?i)\bINTERVAL\s+' + FIELD_QUALIFIER + r'\s+TO\s+' + FIELD_QUALIFIER)
+    DATETIME_TYPE = re.compile(r'(?i)\bDATETIME\s+' + FIELD_QUALIFIER + r'\s+TO\s+' + FIELD_QUALIFIER)
+
+    ## 'column[2,4]' is the substring of Informix, and PostgreSQL reads the brackets as the
+    ## subscript of an array
+    SUBSCRIPT = re.compile(r'(?i)(?<![\w)\]])([A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*)*)'
+                           r'\s*\[\s*(\d+)\s*,\s*(\d+)\s*\]')
+
+    ## What Informix writes and PostgreSQL has nothing for. A statement which still holds one
+    ## of them after the conversion is reported as not converted: a statement handed back with
+    ## a construct the target cannot answer would look like a conversion without being one.
+    WITHOUT_COUNTERPART = (
+        (re.compile(r'(?i)(?<!AS\s)(?<![\w.])ROWID\b'),
+         "ROWID is the hidden row number of a table of Informix. The ctid of PostgreSQL is not "
+         "the same thing - it changes when the row is updated - so the statement has to be "
+         "rewritten to read the key of the table"),
+        (re.compile(r'(?i)\bDBINFO\s*\('),
+         "DBINFO() answers what the Informix server knows about itself and the session, and "
+         "PostgreSQL has no counterpart for it"),
+        (re.compile(r'(?i)\bHEX\s*\('),
+         "HEX() of Informix answers '0x0000002a' and to_hex() of PostgreSQL answers '2a', so "
+         "the two do not give back the same string"),
+        (re.compile(r'(?i)(?<!AS\s)(?<![\w.])(?:SITENAME|DBSERVERNAME)\b'),
+         "SITENAME and DBSERVERNAME name the Informix server and have no counterpart"),
+        (re.compile(r'(?i)\bMONTHS_BETWEEN\s*\('),
+         "MONTHS_BETWEEN() has no counterpart in PostgreSQL - it is written there with age() "
+         "and the fields of the interval it answers"),
+        (re.compile(r'(?i)\bMATCHES\b'),
+         "a MATCHES whose pattern is not a literal cannot be rewritten - which characters of "
+         "the pattern are wildcards is only known when it is read"),
+        (re.compile(r'(?i)\bOUTER\s*\('),
+         "the outer join written OUTER(...) could not be rewritten as a LEFT OUTER JOIN - a "
+         "statement whose WHERE clause holds an OR spanning the subordinate table does not say "
+         "which of its conditions belong to the join, and a converted statement which answers "
+         "other rows is worse than one which is reported as not converted"),
+        (re.compile(r'(?i)\bUNITS\s+(?:YEAR|MONTH|DAY|HOUR|MINUTE|SECOND|FRACTION)\b'),
+         "a duration written with UNITS could not be rewritten as an interval"),
+        (re.compile(r'(?i)\b(?:INTERVAL|DATETIME)\s*\('),
+         "a DATETIME or an INTERVAL literal of Informix could not be rewritten - the fields it "
+         "holds are not the fields its qualifier names, or the qualifier ends in FRACTION"),
+        (re.compile(r'(?i)\b(?:EXTEND|DECODE|LAST_DAY)\s*\('),
+         "EXTEND(), DECODE() or LAST_DAY() could not be rewritten - it was called with other "
+         "arguments than the ones the conversion knows how to write for PostgreSQL"),
+    )
+
+    def replace_outside_string_literals(self, code, pattern, replacement):
+        """
+        re.sub over the parts of the statement which SQL reads as SQL: not inside a string
+        literal, not inside a comment and not inside a quoted identifier. A keyword of
+        Informix spelled in the text of a condition is data, and a column deliberately named
+        "today" is a name.
+        """
+        if not code:
+            return code
+        compiled = pattern if hasattr(pattern, 'finditer') else re.compile(pattern)
+        masked, _depths = self.scan_sql_text(code)
+        rebuilt = []
+        position = 0
+        for match in compiled.finditer(masked):
+            ## the match is found in the blanked text and read in the original one - what a
+            ## group holds is blank in the other
+            original = compiled.match(code, match.start(), match.end()) or match
+            rebuilt.append(code[position:match.start()])
+            rebuilt.append(replacement(original) if callable(replacement)
+                           else original.expand(replacement))
+            position = match.end()
+        rebuilt.append(code[position:])
+        return ''.join(rebuilt)
+
+    def found_outside_string_literals(self, code, pattern):
+        """
+        Whether the pattern stands in the statement itself - not inside a string literal, a
+        comment or a quoted identifier. `notes = 'MATCHES TODAY'` holds neither the operator
+        nor the register, it holds a string, and a statement which reads one must not be
+        reported as one which cannot be converted.
+        """
+        if not code:
+            return False
+        masked, _depths = self.scan_sql_text(code)
+        compiled = pattern if hasattr(pattern, 'search') else re.compile(pattern)
+        return bool(compiled.search(masked))
+
+    def query_block_end(self, masked, depths, start, depth):
+        """
+        Where the query which begins at the given position ends: at the parenthesis which
+        closes it, at the semicolon which ends the statement, or at the end of the text. It is
+        where a LIMIT of PostgreSQL has to be written, behind an ORDER BY which keeps standing
+        in front of it.
+        """
+        for position in range(start, len(masked)):
+            if depths[position] == depth and masked[position] in (')', ';'):
+                return position
+        return len(masked)
+
+    def rewrite_call(self, code, name, builder):
+        """
+        Every call of the named routine rewritten by the given builder, which is handed the
+        arguments of the call and answers the text which takes its place, or None to leave the
+        call as it is. An argument may be a call of its own, so the arguments are split on the
+        commas which are not inside parentheses and not inside a literal.
+        """
+        pattern = re.compile(rf'(?i)(?<![\w."]){name}\s*\(')
+        position = 0
+        while True:
+            masked, depths = self.scan_sql_text(code)
+            match = pattern.search(masked, position)
+            if match is None:
+                return code
+            opening = match.end() - 1
+            closing = next((index for index in range(opening + 1, len(code))
+                            if masked[index] == ')' and depths[index] == depths[opening]), None)
+            if closing is None:
+                return code
+            replacement = builder(self.split_top_level_commas(code[opening + 1:closing]))
+            if replacement is None:
+                position = match.end()
+                continue
+            code = code[:match.start()] + replacement + code[closing + 1:]
+            position = match.start()
+
+    def informix_datetime_fields(self, value, start_field, end_field):
+        """
+        The numbers a DATETIME or an INTERVAL literal of Informix holds, paired with the fields
+        its qualifier names - `(2 15:30) DAY TO MINUTE` is 2 days, 15 hours and 30 minutes.
+
+        The separators of the value depend on the field: the date fields are separated by '-',
+        the time fields by ':', the day from the hour by a space. Whichever is written, the
+        numbers stand in the order of the qualifier, so they are read as numbers and paired
+        with the fields from the first to the last. A literal which holds another number of
+        fields than its qualifier names is not translated - which of them is missing cannot be
+        told - and neither is a qualifier ending in FRACTION, whose value is a fraction of a
+        second and not a count of them.
+        """
+        if start_field not in self.DATETIME_FIELDS or end_field not in self.DATETIME_FIELDS:
+            return None
+        first = self.DATETIME_FIELDS.index(start_field)
+        last = self.DATETIME_FIELDS.index(end_field)
+        if last < first:
+            return None
+        chain = self.DATETIME_FIELDS[first:last + 1]
+        if 'FRACTION' in chain:
+            return None
+        numbers = [number for number in re.split(r'\D+', value) if number]
+        if len(numbers) != len(chain):
+            return None
+        return list(zip(chain, numbers))
+
+    def informix_interval_literal(self, match, messages):
+        """
+        `INTERVAL (2 15:30) DAY TO MINUTE` of Informix as `INTERVAL '2 day 15 hour 30 minute'`.
+        """
+        value = match.group(1).strip()
+        negative = value.startswith('-')
+        fields = self.informix_datetime_fields(value.lstrip('-').strip(),
+                                               match.group(2).upper(), match.group(3).upper())
+        if fields is None:
+            messages.append(('WARNING',
+                f"the interval literal \"{' '.join(match.group(0).split())}\" could not be "
+                f"rewritten - it holds another number of fields than its qualifier names, or "
+                f"the qualifier ends in FRACTION, whose value is a fraction of a second"))
+            return match.group(0)
+        written = ' '.join(f"{int(number)} {field.lower()}" for field, number in fields)
+        return f"{'- ' if negative else ''}INTERVAL '{written}'"
+
+    def informix_datetime_literal(self, match, messages):
+        """
+        `DATETIME (2024-01-15 10:30) YEAR TO MINUTE` of Informix as the timestamp it is. A
+        literal which ends at the day is a date, one which holds no date at all is a time.
+        """
+        end_field = match.group(3).upper()
+        fields = self.informix_datetime_fields(match.group(1).strip(),
+                                               match.group(2).upper(), end_field)
+        if fields is None:
+            messages.append(('WARNING',
+                f"the datetime literal \"{' '.join(match.group(0).split())}\" could not be "
+                f"rewritten - it holds another number of fields than its qualifier names, or "
+                f"the qualifier ends in FRACTION"))
+            return match.group(0)
+        held = {field: int(number) for field, number in fields}
+        if 'YEAR' in held:
+            date = f"{held['YEAR']:04d}-{held.get('MONTH', 1):02d}-{held.get('DAY', 1):02d}"
+            if end_field in ('YEAR', 'MONTH', 'DAY'):
+                return f"DATE '{date}'"
+            return (f"TIMESTAMP '{date} {held.get('HOUR', 0):02d}:"
+                    f"{held.get('MINUTE', 0):02d}:{held.get('SECOND', 0):02d}'")
+        if set(held) <= {'HOUR', 'MINUTE', 'SECOND'}:
+            return (f"TIME '{held.get('HOUR', 0):02d}:{held.get('MINUTE', 0):02d}:"
+                    f"{held.get('SECOND', 0):02d}'")
+        messages.append(('WARNING',
+            f"the datetime literal \"{' '.join(match.group(0).split())}\" begins at a field "
+            f"which is neither the year nor the hour - PostgreSQL has no value which holds "
+            f"only the fields in between, so it is left as it is"))
+        return match.group(0)
+
+    def rewrite_first_skip(self, code, messages):
+        """
+        The FIRST and SKIP of Informix as the LIMIT and OFFSET of PostgreSQL.
+
+        The two numbers stand in front of the select list in Informix and at the end of the
+        statement in PostgreSQL, so the clause is not renamed, it is moved: the query which
+        carries it is read to its end - the parenthesis which closes a subquery, the semicolon
+        which ends the statement, or the end of the text - and LIMIT / OFFSET is written there,
+        behind the ORDER BY which decides which rows the two mean.
+
+        A query whose block holds a set operator is left as it is and reported: whether the
+        number limits the branch or the whole result is not written anywhere, and a statement
+        which answers other rows is worse than one which is reported as not converted.
+        """
+        for _ in range(20):
+            masked, depths = self.scan_sql_text(code)
+            paging = next((match for match in self.FIRST_SKIP.finditer(masked)
+                           if match.group('skip') or match.group('first')), None)
+            if paging is None:
+                return code
+
+            depth = depths[paging.start()]
+            end = self.query_block_end(masked, depths, paging.end(), depth)
+            block = ''.join(character if depths[paging.end() + offset] == depth else ' '
+                            for offset, character in enumerate(masked[paging.end():end]))
+            if self.SET_OPERATOR.search(block):
+                messages.append(('WARNING',
+                    f"\"{' '.join(paging.group(0).split())}\" stands in a query which is "
+                    f"combined with UNION, INTERSECT or EXCEPT - whether it limits the branch "
+                    f"or the whole result is not written anywhere, so it is left as it is"))
+                return code
+
+            limit = ''
+            if paging.group('first'):
+                limit += f" LIMIT {paging.group('first')}"
+            if paging.group('skip'):
+                limit += f" OFFSET {paging.group('skip')}"
+            messages.append(('DEBUG',
+                f"\"{' '.join(paging.group(0).split())}\" converted to \"{limit.strip()}\""))
+            code = (code[:paging.start()] + 'SELECT' + (paging.group('quantifier') or '')
+                    + code[paging.end():end] + limit + code[end:])
+
+        messages.append(('WARNING',
+            "a statement holding FIRST or SKIP was rewritten twenty times and still holds one "
+            "of them - it is left as it is"))
+        return code
+
+    def informix_dialect_preparation(self, code, messages):
+        """
+        Everything Informix writes its own way, rewritten into what PostgreSQL writes. What
+        could not be rewritten is left standing and said in `messages`, so that the statement
+        fails to be converted rather than being converted into something else.
+        """
+        if not code:
+            return code
+
+        def current_register(match):
+            start_field = (match.group(1) or '').upper()
+            end_field = (match.group(2) or '').upper()
+            if end_field and end_field != 'SECOND':
+                messages.append(('WARNING',
+                    f"\"{' '.join(match.group(0).split())}\" of Informix answers a timestamp "
+                    f"which holds the fields from {start_field} to {end_field} and nothing "
+                    f"else; CURRENT_TIMESTAMP of PostgreSQL holds all of them - write "
+                    f"date_trunc('{end_field.lower()}', CURRENT_TIMESTAMP) where that matters"))
+            return 'CURRENT_TIMESTAMP'
+
+        def database_qualifier(match):
+            messages.append(('WARNING',
+                f"the statement names its table in the database '{match.group(1)}' of the "
+                f"source; the qualifier is removed and the converted statement reads the table "
+                f"of the database it is sent to"))
+            return ''
+
+        def duration(match):
+            return f"INTERVAL '{match.group(1)} {match.group(2).lower()}'"
+
+        def counted_duration(match):
+            return f"({match.group(1)} * INTERVAL '1 {match.group(2).lower()}')"
+
+        def subscript(match):
+            first, last = int(match.group(2)), int(match.group(3))
+            if last < first:
+                messages.append(('WARNING',
+                    f"the subscript \"{match.group(0)}\" ends in front of its own beginning - "
+                    f"it is left as it is"))
+                return match.group(0)
+            return f"SUBSTR({match.group(1)}, {first}, {last - first + 1})"
+
+        def datetime_type(match):
+            return 'DATE' if match.group(2).upper() in ('YEAR', 'MONTH', 'DAY') else 'TIMESTAMP'
+
+        def extend(arguments):
+            if len(arguments) != 2:
+                return None
+            qualifier = re.match(rf'(?i)^\s*{self.FIELD_QUALIFIER}\s+TO\s+{self.FIELD_QUALIFIER}\s*$',
+                                 arguments[1])
+            if not qualifier:
+                return None
+            value = arguments[0].strip()
+            start_field, end_field = qualifier.group(1).upper(), qualifier.group(2).upper()
+            if start_field != 'YEAR':
+                messages.append(('WARNING',
+                    f"EXTEND({value}, {start_field} TO {end_field}) answers a value which holds "
+                    f"no field in front of {start_field}; the conversion keeps them, because "
+                    f"PostgreSQL has no value which drops them"))
+            if end_field == 'DAY':
+                return f"CAST({value} AS DATE)"
+            if end_field in ('YEAR', 'MONTH'):
+                return f"CAST(date_trunc('{end_field.lower()}', CAST({value} AS TIMESTAMP)) AS DATE)"
+            if end_field == 'FRACTION':
+                return f"CAST({value} AS TIMESTAMP)"
+            return f"date_trunc('{end_field.lower()}', CAST({value} AS TIMESTAMP))"
+
+        def decode(arguments):
+            """
+            DECODE(x, s1, r1, s2, r2, default) of Informix as the CASE expression it is.
+
+            The comparison of DECODE is not the '=' of SQL: a NULL matches a NULL there, and
+            'x = NULL' is never true, which would silently answer the default instead of the
+            result the source answered. IS NOT DISTINCT FROM is the comparison DECODE makes.
+            """
+            if len(arguments) < 3:
+                return None
+            value = arguments[0].strip()
+            pairs = [argument.strip() for argument in arguments[1:]]
+            default = pairs.pop() if len(pairs) % 2 else None
+            branches = ' '.join(f"WHEN {value} IS NOT DISTINCT FROM {pairs[index]} "
+                                f"THEN {pairs[index + 1]}"
+                                for index in range(0, len(pairs), 2))
+            return f"(CASE {branches}{'' if default is None else f' ELSE {default}'} END)"
+
+        def last_day(arguments):
+            """The last day of the month of the value - PostgreSQL has no function for it."""
+            if len(arguments) != 1:
+                return None
+            return (f"CAST(date_trunc('month', CAST({arguments[0].strip()} AS TIMESTAMP))"
+                    f" + INTERVAL '1 month - 1 day' AS DATE)")
+
+        def mdy(arguments):
+            if len(arguments) != 3:
+                return None
+            month, day, year = (argument.strip() for argument in arguments)
+            return f"make_date({year}, {month}, {day})"
+
+        code = self.convert_outer_joins(code, messages)
+        code = self.convert_matches_operator(code, messages)
+        code = self.rewrite_first_skip(code, messages)
+        ## 'SELECT TODAY FROM sysmaster:sysdual' is 'SELECT CURRENT_DATE' here - the one row
+        ## table is removed before the qualifier of another database is
+        code = self.replace_outside_string_literals(code, self.SYSDUAL, '')
+        code = self.replace_outside_string_literals(code, self.DATABASE_QUALIFIER, database_qualifier)
+        code = self.replace_outside_string_literals(code, self.TODAY_REGISTER, 'CURRENT_DATE')
+        code = self.replace_outside_string_literals(code, self.CURRENT_REGISTER, current_register)
+        code = self.replace_outside_string_literals(
+            code, self.INTERVAL_LITERAL, lambda match: self.informix_interval_literal(match, messages))
+        code = self.replace_outside_string_literals(
+            code, self.DATETIME_LITERAL, lambda match: self.informix_datetime_literal(match, messages))
+        code = self.replace_outside_string_literals(code, self.INTERVAL_TYPE, 'INTERVAL')
+        code = self.replace_outside_string_literals(code, self.DATETIME_TYPE, datetime_type)
+        code = self.replace_outside_string_literals(code, self.UNITS_LITERAL, duration)
+        code = self.replace_outside_string_literals(code, self.UNITS_EXPRESSION, counted_duration)
+        code = self.rewrite_call(code, 'EXTEND', extend)
+        code = self.rewrite_call(code, 'DECODE', decode)
+        code = self.rewrite_call(code, 'LAST_DAY', last_day)
+        code = self.rewrite_call(code, 'MDY', mdy)
+        code = self.replace_outside_string_literals(code, self.SUBSCRIPT, subscript)
+        return code
+
+    def prepare_query_for_parsing(self, query_code):
+        """
+        The statement of Informix rewritten into something a SQL parser can read, without
+        converting anything it would not have to convert anyway.
+
+        The FIRST clause stands where no other dialect has one, the outer join is marked in
+        the FROM clause, TODAY and CURRENT are keywords without parentheses, a duration is
+        counted in UNITS, a substring is written as a subscript and MATCHES is an operator of
+        its own - a parser of any other dialect stops at every one of them. It is used by the
+        conversion itself and by the query conversion, which has to classify a statement
+        before it converts it: a statement which cannot be parsed is reported as one the
+        migrator does not understand, and that answer must not be given to a statement its own
+        connector can convert.
+        """
+        return self.informix_dialect_preparation(query_code, [])
+
+    def informix_conversion_warnings(self, query_code):
+        """
+        What the reader of the converted statement has to be told: what was removed, what was
+        answered with something close rather than equal, and what was left as it is because it
+        could not be rewritten.
+        """
+        messages = []
+        self.informix_dialect_preparation(query_code, messages)
+        return [text for level, text in messages if level == 'WARNING']
+
+    def informix_conversion_blockers(self, converted_code):
+        """
+        The reasons the converted statement may not be offered as a conversion: a construct of
+        Informix which is still standing in it, because PostgreSQL has nothing for it or
+        because the rewrite could not be done.
+        """
+        masked, _depths = self.scan_sql_text(converted_code or '')
+        reasons = [reason for pattern, reason in self.WITHOUT_COUNTERPART
+                   if pattern.search(masked)]
+        if any(match.group('skip') or match.group('first')
+               for match in self.FIRST_SKIP.finditer(masked)):
+            reasons.append("the SKIP / FIRST of Informix could not be moved to the end of the "
+                           "statement as LIMIT / OFFSET")
+        return reasons
+
+    def query_conversion_supported(self):
+        return True
+
+    def convert_query_code(self, settings: dict):
+        """
+        One statement of an application, converted for PostgreSQL - the same conversion the
+        query of a view is given. See the contract in DatabaseConnector.convert_query_code().
+        """
+        statement_id = settings.get('statement_id', '')
+        warnings = self.informix_conversion_warnings(settings['query_code'])
+        try:
+            converted = self.convert_statement_code({
+                'view_code': settings['query_code'],
+                'source_schema_name': settings['source_schema_name'],
+                'target_schema_name': settings['target_schema_name'],
+                'target_db_type': settings.get('target_db_type', 'postgresql'),
+            })
+        except ValueError as e:
+            return {'code': '', 'converted': False, 'warnings': warnings, 'error': first_line(e)}
+        except Exception as e:
+            return {'code': '', 'converted': False, 'warnings': warnings,
+                    'error': f"the conversion ended with an error: {first_line(e)}"}
+
+        if not (converted or '').strip():
+            return {'code': '', 'converted': False, 'warnings': warnings,
+                    'error': 'the conversion produced no statement at all'}
+
+        blockers = self.informix_conversion_blockers(converted)
+        if blockers:
+            return {'code': '', 'converted': False, 'warnings': warnings,
+                    'error': '; '.join(blockers)}
+
+        self.config_parser.print_log_message(
+            'DEBUG', f"informix_connector: convert_query_code: {statement_id}: {converted}")
+        return {'code': converted, 'converted': True, 'warnings': warnings, 'error': None}
+
+    def convert_statement_code(self, settings: dict):
+        """
+        One statement of Informix, converted for the target - the query of a view and the
+        statement of an application are given the same conversion.
+        """
+        converted_code = settings['view_code']
         ## before the schema is replaced - the qualifier of these calls is the system schema of
         ## Informix, and it is what tells them apart from a function of the user
-        converted_view_code = self.convert_operator_functions(converted_view_code)
-        converted_view_code = converted_view_code.replace(f'''"{settings['source_schema_name']}".''', f'''"{settings['target_schema_name']}".''')
-        converted_view_code = self.convert_outer_joins(converted_view_code)
-        converted_view_code = self.convert_matches_operator(converted_view_code)
-        converted_view_code = self.apply_sql_functions_mapping(converted_view_code, settings)
-        return converted_view_code
+        converted_code = self.convert_operator_functions(converted_code)
+        converted_code = converted_code.replace(f'''"{settings['source_schema_name']}".''', f'''"{settings['target_schema_name']}".''')
+        messages = []
+        converted_code = self.informix_dialect_preparation(converted_code, messages)
+        for level, message in messages:
+            self.config_parser.print_log_message(
+                level, f"informix_connector: convert_statement_code: {message}")
+        converted_code = self.apply_sql_functions_mapping(converted_code, settings)
+        return converted_code
+
+    def convert_view_code(self, settings: dict):
+        """The query of a view, converted for the target."""
+        return self.convert_statement_code(settings)
 
     def get_types_mapping(self, settings):
         target_db_type = settings['target_db_type']

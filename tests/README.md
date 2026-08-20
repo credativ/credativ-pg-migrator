@@ -1,6 +1,6 @@
 # credativ-pg-migrator — test suite
 
-381 test functions in 30 files. **No test in this directory needs a database, a driver
+462 test functions in 32 files. **No test in this directory needs a database, a driver
 connection, or a network.** Everything that would talk to a server is either constructed
 with `Class.__new__(Class)` and fed a fake config, or replaced with `unittest.mock`. A
 full run touches nothing outside the repository and finishes in seconds.
@@ -35,9 +35,9 @@ tests, and no test depends on the order of the others.
 | group | needs | files |
 |---|---|---|
 | configuration & logging | `pyyaml`, `jsonschema`, `pytest` | the 5 `test_config_*` / `test_logging_*` / `test_object_*` files, and `test_schema_names.py` |
-| query conversion | `sqlglot`, `pytest` | the 4 `test_query_*` files |
+| query conversion | `sqlglot`, `pytest` | the 4 `test_query_*` files and `test_db2_query_conversion.py` |
 | anonymization, Db2 CSV | nothing beyond the standard library | 3 files |
-| everything else | the package's own dependencies — `psycopg2`, `tabulate`, `jaydebeapi` | 17 files |
+| everything else | the package's own dependencies — `psycopg2`, `tabulate`, `jaydebeapi` | 18 files, `test_informix_query_conversion.py` among them |
 
 The third group imports the connectors, which import their drivers at module level, so
 those files fail to **collect** if the drivers are absent — the message is
@@ -488,6 +488,40 @@ marker inside a string literal or a comment, a `::` cast, a `@@` global variable
 source. The name the converters see instead of `$1`, because a parser reads `$1` as a column
 and writes it back quoted. And the order: a conversion which moved the parameters -
 `TOP (?)` becomes `LIMIT $1` at the other end - or lost one is reported as BLOCKING.
+
+### `test_db2_query_conversion.py` — 22 functions, 47 tests
+
+**Purpose.** The dialect of Db2, which is one dialect behind three connectors and therefore
+stands once, in `connectors/db2_query_conversion.py`.
+
+**Covers.** The special registers written without parentheses, the labelled durations, the
+isolation clause and the optimizer hints which are removed, `SYSIBM.SYSDUMMY1`,
+`DAYS(a) - DAYS(b)` and the single `DAYS()` which is reported rather than guessed at. Then
+the two properties which matter: a statement of a Db2 application **is a read once it has
+been prepared** and would not parse at all without the preparation, and the preparation
+**does not make a write look like a read** - the gates read the text of the application and
+none of it is changed. The wrapper around the connector's converter is asserted through a
+fake connector, and the function mapping is asserted to be the one mapping the three
+flavours share.
+
+### `test_informix_query_conversion.py` — 40 functions, 77 tests
+
+**Purpose.** The dialect of Informix, which has more spellings of its own than any other
+source here, and the line between what is converted and what stops the conversion.
+
+**Covers.** `FIRST` / `SKIP` moved to the end of the statement as `LIMIT` / `OFFSET`,
+including inside a subquery and including the query combined with a set operator, where
+nothing is moved because whether the number limits the branch or the result is written
+nowhere. `TODAY` and `CURRENT` with their field qualifiers - and the `CURRENT ROW` of a
+window frame, which is not the register. The durations counted in `UNITS`, the `DATETIME` /
+`INTERVAL` literals and types, the `sysmaster:sysdual` which is left out, the subscript which
+becomes `SUBSTR`, `MATCHES` in all four of its forms, the `OUTER()` join and the one which
+cannot be attributed and is therefore refused, and `DECODE` / `MDY` / `EXTEND` / `LAST_DAY`.
+Then the same two properties as for Db2 - the statement is a read once it is prepared, and no
+write is made to look like one - the constructs which stop the conversion with a reason, and
+the names which only read like them: `SUM(x) AS units`, `AS rowid`, `note = 'MATCHES TODAY'`.
+The preparation is also asserted to work on a connector built with `Class.__new__(Class)`,
+because that is how the test suite of the migration repository asks for it.
 
 ### `test_query_conversion_workflow.py` — 27 functions, 31 tests
 

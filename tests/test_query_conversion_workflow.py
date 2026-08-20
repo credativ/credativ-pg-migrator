@@ -257,10 +257,80 @@ def test_the_sidecar_can_be_switched_off(tmp_path):
 
 
 def test_the_summary_counts_every_status():
-    summary = render_summary([make_result(CONVERTED), make_result(SKIPPED), make_result(SKIPPED)])
-    assert 'statements: 3' in summary
-    assert 'converted         : 1' in summary
-    assert 'skipped           : 2' in summary
+    summary = render_summary([make_result(CONVERTED, 1), make_result(SKIPPED, 2), make_result(SKIPPED, 3)])
+    lines = [line for line in summary.splitlines() if line.startswith('TOTAL')]
+    assert len(lines) == 1, summary
+    ## stmts | conv | unch | fail | n/conv | skip
+    assert [cell.strip() for cell in lines[0].split('|')] == ['TOTAL', '3', '1', '0', '0', '0', '2']
+
+
+def test_the_summary_counts_each_file_of_its_own():
+    summary = render_summary([make_result(CONVERTED, 1, file_name='a.sql'),
+                              make_result(SKIPPED, 1, file_name='b.sql'),
+                              make_result(SKIPPED, 2, file_name='b.sql')])
+    rows = {line.split('|')[0].strip(): [cell.strip() for cell in line.split('|')[1:]]
+            for line in summary.splitlines() if '|' in line}
+    assert rows['a.sql'][:2] == ['1', '1']
+    assert rows['b.sql'][0] == '2'
+    assert rows['b.sql'][-1] == '2'
+
+
+def test_the_summary_names_what_has_to_be_looked_at():
+    """A statement which needs a person is named with the place it stands in."""
+    failing = make_result(CONVERTED_FAILING, 7, file_name='queries/01_reports.sql')
+    failing.reason = 'relation "migtest.orders" does not exist'
+    summary = render_summary([make_result(CONVERTED, 1), failing])
+    assert 'STATEMENTS WHICH NEED ATTENTION' in summary
+    assert '01_reports.sql:1-1' in summary
+    assert 'relation "migtest.orders" does not exist' in summary
+    assert 'STATEMENTS NEEDING ATTENTION: 1' in summary
+
+
+def test_the_summary_says_so_when_there_is_nothing_to_look_at():
+    summary = render_summary([make_result(CONVERTED, 1), make_result(SKIPPED, 2)])
+    assert 'STATEMENTS NEEDING ATTENTION: 0' in summary
+    assert 'STATEMENTS WHICH NEED ATTENTION' not in summary
+
+
+def test_the_summary_groups_the_refusals_by_their_reason():
+    first = make_result(SKIPPED, 1)
+    first.reason = 'gate 2: the statement is a UPDATE, not a read'
+    second = make_result(SKIPPED, 2)
+    second.reason = 'gate 2: the statement is a UPDATE, not a read'
+    summary = render_summary([first, second])
+    assert 'REFUSED - NOT A READ, NEVER SENT TO A DATABASE' in summary
+    assert '2 x gate 2: the statement is a UPDATE, not a read' in summary
+
+
+def test_the_summary_counts_the_blocking_warnings_separately():
+    result = make_result(CONVERTED, 1, warnings=['BLOCKING: the conversion moved the bind parameters'])
+    summary = render_summary([result, make_result(CONVERTED, 2, warnings=['the table hint NOLOCK is removed'])])
+    assert '2 statement(s) carry a warning, 1 of them BLOCKING' in summary
+
+
+def test_the_summary_reports_the_target_test():
+    tested = make_result(CONVERTED, 1)
+    tested.target_test_ms = 12.5
+    summary = render_summary([tested, make_result(SKIPPED, 2)])
+    assert 'TARGET TEST' in summary
+    assert '1 statement(s) tested: OK 1' in summary
+
+
+def test_the_summary_names_the_files_which_were_written():
+    summary = render_summary([make_result(CONVERTED, 1)],
+                             {'written': ['converted/01_reports_pg.sql', 'converted/01_reports_pg.json']})
+    assert 'FILES WRITTEN' in summary
+    assert 'converted/01_reports_pg.json' in summary
+
+
+def test_the_summary_names_both_databases():
+    summary = render_summary([make_result(CONVERTED, 1)], {
+        'source_db_type': 'mssql', 'source_database': 'migtest', 'source_schema': 'dbo',
+        'target_db_type': 'postgresql', 'target_database': 'mssql', 'target_schema': 'migtest',
+        'notes': ['name mapping: off']})
+    assert 'Source: migtest, schema: dbo (mssql)' in summary
+    assert 'Target: mssql, schema: migtest (postgresql)' in summary
+    assert 'name mapping: off' in summary
 
 
 def test_a_statement_which_needs_attention_is_a_failure_of_the_run():

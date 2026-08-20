@@ -243,21 +243,160 @@ class OutputWriter:
         raise ValueError(f"Unknown query_conversion.output.sidecar '{self.sidecar}' - json, csv or off.")
 
 
-def render_summary(all_results):
-    """The closing count of the whole run, for the log and for the console."""
+WIDTH = 80
+
+## the order the statuses are counted and reported in - from the best outcome to the worst
+STATUS_ORDER = (CONVERTED, UNCHANGED, CONVERTED_FAILING, NOT_CONVERTED, SKIPPED)
+
+## the heading of each status column, and the width it is printed in
+SHORT_STATUS = {
+    CONVERTED: 'conv',
+    UNCHANGED: 'unch',
+    CONVERTED_FAILING: 'fail',
+    NOT_CONVERTED: 'n/conv',
+    SKIPPED: 'skip',
+}
+STATUS_COLUMN = 6
+
+
+def shorten(text, length):
+    text = ' '.join((text or '').split())
+    return text if len(text) <= length else text[:length - 3] + '...'
+
+
+def render_summary(all_results, context=None):
+    """
+    The closing summary of the run, in the shape the summary of a migration has: what was
+    read, what became of it per file, what has to be looked at and where the answer was
+    written.
+
+    It is the part of the run a user reads. Everything in it is countable - a statement is
+    in exactly one of the five statuses - and everything which is not simply converted is
+    named with the place it stands in, so that it can be found without opening the file.
+    """
+    context = context or {}
     counts = counts_of(all_results)
-    output = io.StringIO()
-    output.write('[ QUERY CONVERSION ]\n')
-    output.write(f"  statements: {len(all_results)}\n")
-    for status in (CONVERTED, UNCHANGED, CONVERTED_FAILING, NOT_CONVERTED, SKIPPED):
-        output.write(f"  {status.lower().replace(' ', '_'):18}: {counts.get(status, 0)}\n")
-    reasons = {}
+    lines = []
+
+    lines.append('=' * WIDTH)
+    lines.append('QUERY CONVERSION SUMMARY'.center(WIDTH))
+    lines.append('=' * WIDTH)
+    lines.append('')
+
+    lines.append('[ CONTEXT ]')
+    if context.get('source_db_type'):
+        lines.append(f"Source: {context.get('source_database', '-')}, "
+                     f"schema: {context.get('source_schema', '-')} ({context['source_db_type']})")
+    if context.get('target_db_type'):
+        lines.append(f"Target: {context.get('target_database', '-')}, "
+                     f"schema: {context.get('target_schema', '-')} ({context['target_db_type']})")
+    for note in context.get('notes', []):
+        lines.append(note)
+    lines.append('')
+
+    ## ------------------------------------------------------------------ per file
+    files = []
     for result in all_results:
-        if result.status in (CONVERTED_FAILING, NOT_CONVERTED, SKIPPED) and result.reason:
-            key = result.reason.split(' - ')[0][:80]
-            reasons[key] = reasons.get(key, 0) + 1
-    if reasons:
-        output.write('  most frequent reasons:\n')
-        for reason, count in sorted(reasons.items(), key=lambda item: -item[1])[:5]:
-            output.write(f"    {count:4} x {reason}\n")
-    return output.getvalue()
+        if result.statement.input_file not in files:
+            files.append(result.statement.input_file)
+
+    lines.append('[ QUERY CONVERSION ]')
+    lines.append('-' * WIDTH)
+    lines.append(f"{'File':<34} | {'stmts':>5} | "
+                 + ' | '.join(f"{SHORT_STATUS[status]:>{STATUS_COLUMN}}" for status in STATUS_ORDER))
+    lines.append('-' * WIDTH)
+    for input_file in files:
+        of_file = [result for result in all_results if result.statement.input_file == input_file]
+        file_counts = counts_of(of_file)
+        lines.append(
+            f"{shorten(os.path.basename(input_file), 34):<34} | {len(of_file):>5} | "
+            + ' | '.join(f"{file_counts.get(status, 0):>{STATUS_COLUMN}}" for status in STATUS_ORDER))
+    lines.append('-' * WIDTH)
+    lines.append(f"{'TOTAL':<34} | {len(all_results):>5} | "
+                 + ' | '.join(f"{counts.get(status, 0):>{STATUS_COLUMN}}" for status in STATUS_ORDER))
+    lines.append('-' * WIDTH)
+    lines.append('conv = converted   unch = already valid PostgreSQL   fail = converted, the '
+                 'target refused it')
+    lines.append('n/conv = the converter could not do it   skip = a gate refused it (not a read)')
+    lines.append('')
+
+    ## ------------------------------------------------------------------ what to look at
+    attention = [result for result in all_results if result.is_failure]
+    if attention:
+        lines.append('[ STATEMENTS WHICH NEED ATTENTION ]')
+        lines.append('-' * WIDTH)
+        for result in attention[:20]:
+            name = f" {result.name}" if result.name else ''
+            ## the file by its name and the lines it stands at - the whole path is in the
+            ## output file and in the protocol table, and would take the line up here
+            where = (f"{os.path.basename(result.statement.input_file)}:"
+                     f"{result.statement.line_from}-{result.statement.line_to}")
+            lines.append(f"{result.status:<18} {shorten(where, 44)}{name}")
+            if result.reason:
+                lines.append(f"{'':<18} {shorten(result.reason, WIDTH - 20)}")
+        if len(attention) > 20:
+            lines.append(f"... and {len(attention) - 20} more - the whole list is in the output "
+                         f"files and in the protocol table")
+        lines.append('')
+
+    ## ------------------------------------------------------------------ the refusals
+    refused = [result for result in all_results if result.status == SKIPPED]
+    if refused:
+        lines.append('[ REFUSED - NOT A READ, NEVER SENT TO A DATABASE ]')
+        lines.append('-' * WIDTH)
+        reasons = {}
+        for result in refused:
+            reasons[shorten(result.reason, 66)] = reasons.get(shorten(result.reason, 66), 0) + 1
+        for reason, count in sorted(reasons.items(), key=lambda item: (-item[1], item[0])):
+            lines.append(f"{count:>5} x {reason}")
+        lines.append('')
+
+    ## ------------------------------------------------------------------ the warnings
+    with_warnings = [result for result in all_results if result.warnings]
+    blocking = [result for result in with_warnings
+                if any(warning.startswith('BLOCKING') for warning in result.warnings)]
+    if with_warnings:
+        lines.append('[ WARNINGS ]')
+        lines.append('-' * WIDTH)
+        lines.append(f"{len(with_warnings)} statement(s) carry a warning"
+                     + (f", {len(blocking)} of them BLOCKING - those must not be used as they stand"
+                        if blocking else ''))
+        texts = {}
+        for result in with_warnings:
+            for warning in result.warnings:
+                key = shorten(warning, 66)
+                texts[key] = texts.get(key, 0) + 1
+        for warning, count in sorted(texts.items(), key=lambda item: (-item[1], item[0]))[:8]:
+            lines.append(f"{count:>5} x {warning}")
+        lines.append('')
+
+    ## ------------------------------------------------------------------ the target test
+    tested = [result for result in all_results if result.target_test_ms is not None]
+    if tested:
+        outcomes = {}
+        for result in tested:
+            outcomes[result.target_test[0]] = outcomes.get(result.target_test[0], 0) + 1
+        total_ms = sum(result.target_test_ms for result in tested)
+        slowest = max(tested, key=lambda result: result.target_test_ms)
+        lines.append('[ TARGET TEST ]')
+        lines.append('-' * WIDTH)
+        lines.append(f"{len(tested)} statement(s) tested: "
+                     + ', '.join(f"{outcome} {count}" for outcome, count in sorted(outcomes.items())))
+        lines.append(f"total {total_ms:.1f} ms, slowest {slowest.target_test_ms:.1f} ms "
+                     f"({shorten(slowest.name or slowest.statement.location, 40)})")
+        lines.append('')
+
+    ## ------------------------------------------------------------------ what was written
+    written = context.get('written') or []
+    if written:
+        lines.append('[ FILES WRITTEN ]')
+        lines.append('-' * WIDTH)
+        for path in written:
+            lines.append(f"  {path}")
+        lines.append('')
+
+    failures = len(attention)
+    lines.append(f"STATEMENTS NEEDING ATTENTION: {failures}"
+                 + ('' if failures else ' - every statement was converted or refused as it should be'))
+    lines.append('=' * WIDTH)
+    return '\n'.join(lines)

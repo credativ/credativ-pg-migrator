@@ -399,15 +399,31 @@ class QueryConverter:
                 written.append(sidecar)
 
         self.record_protocol()
-        summary = render_summary(self.results)
-        for line in summary.rstrip().splitlines():
-            self.print_log_message('INFO', line)
-        print(summary)
+        self.print_summary(written, header)
 
         failures = [result for result in self.results if result.is_failure]
-        self.print_log_message('INFO', f"query_conversion: {len(written)} file(s) written, "
-                                       f"{len(failures)} statement(s) need attention.")
         return failures
+
+    def print_summary(self, written, header):
+        """
+        The closing summary of the run - what was read, what became of it per file, what has
+        to be looked at and where the answer was written.
+
+        It is written as one message, the way the summary of a migration is, so that it
+        stands in the log file and on the console in one piece rather than interleaved with
+        whatever a worker logs at the same moment.
+        """
+        summary = render_summary(self.results, {
+            'source_db_type': self.source_db_type,
+            'source_database': self.config_parser.get_source_db_name(),
+            'source_schema': self.source_schema,
+            'target_db_type': self.target_db_type,
+            'target_database': self.config_parser.get_target_db_name(),
+            'target_schema': self.target_schema,
+            'notes': header.get('notes', []),
+            'written': written,
+        })
+        self.print_log_message('INFO', '\n' + summary)
 
     def convert_file(self, path, source_connection, stop_on_error):
         text = self.read_file(path)

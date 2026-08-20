@@ -15,6 +15,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 from credativ_pg_migrator.database_connector import DatabaseConnector
+from credativ_pg_migrator.connectors.mysql_query_conversion import MySqlQueryConversion
 from credativ_pg_migrator.migrator_logging import MigratorLogger
 from credativ_pg_migrator.jvm_helper import detach_thread_from_jvm
 # import mariadb  ## only for native connectivity - install mariadb-connector-python
@@ -29,7 +30,7 @@ import sqlglot
 import jaydebeapi
 import pyodbc
 
-class MariaDBConnector(DatabaseConnector):
+class MariaDBConnector(MySqlQueryConversion, DatabaseConnector):
     def __init__(self, config_parser, source_or_target):
         if source_or_target not in ['source', 'target']:
             raise ValueError("MariaDB/MariaDB must be either source or target database")
@@ -84,48 +85,6 @@ class MariaDBConnector(DatabaseConnector):
             finally:
                 self.connection = None
                 detach_thread_from_jvm()
-
-    def get_sql_functions_mapping(self, settings):
-        """ Returns a dictionary of SQL functions mapping for the target database """
-        target_db_type = settings['target_db_type']
-        if target_db_type == 'postgresql':
-            return {
-                'uuid_to_bin(uuid(), 1)': 'gen_random_uuid()::text',
-                'uuid_to_bin(uuid(),1)': 'gen_random_uuid()::text',
-                'uuid_to_bin(uuid(), 0)': 'gen_random_uuid()::text',
-                'uuid_to_bin(uuid(),0)': 'gen_random_uuid()::text',
-                'uuid_to_bin(uuid())': 'gen_random_uuid()::text',
-                'uuid()': 'gen_random_uuid()',
-                'sysdate()': 'current_timestamp',
-                'now()': 'current_timestamp',
-                'current_timestamp()': 'current_timestamp',
-                'current_date()': 'current_date',
-                'current_time()': 'current_time',
-                'curdate()': 'current_date',
-                'curtime()': 'current_time',
-                'utc_timestamp()': "(now() at time zone 'utc')",
-                'utc_date()': "(current_date at time zone 'utc')",
-                'utc_time()': "(current_time at time zone 'utc')",
-                'unix_timestamp()': 'extract(epoch from now())::bigint',
-                'rand()': 'random()',
-                'ifnull(': 'coalesce(',
-                'isnull(': 'coalesce(',
-                'char_length(': 'length(',
-                'character_length(': 'length(',
-                'length(': 'length(',
-                'concat(': 'concat(',
-                'substring(': 'substring(',
-                'substr(': 'substring(',
-                'instr(': 'strpos(',
-                'replace(': 'replace(',
-                'upper(': 'upper(',
-                'lower(': 'lower(',
-                'ltrim(': 'ltrim(',
-                'rtrim(': 'rtrim(',
-                'space(': "repeat(' ', ",
-            }
-        else:
-            self.config_parser.print_log_message('ERROR', f"mariadb_connector: get_sql_functions_mapping: Unsupported target database type: {target_db_type}")
 
     def migrate_sequences(self, target_connector, settings):
         """
@@ -1107,32 +1066,6 @@ class MariaDBConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"mariadb_connector: fetch_view_code: Error fetching view {source_view_name} code: {e}")
             raise
 
-    def convert_view_code(self, settings: dict):
-        view_code = settings['view_code']
-        target_db_type = settings.get('target_db_type', self.config_parser.get_target_db_type() if getattr(self, 'config_parser', None) else 'postgresql')
-
-        if target_db_type == 'postgresql' and view_code:
-            view_code = re.sub(r'(?i)\b(?:CHARACTER\s+SET|CHARSET)\s+[a-zA-Z0-9_]+', '', view_code)
-            view_code = re.sub(r'(?i)\bCOLLATE\s+[`\'"]?[a-zA-Z0-9_]+[`\'"]?', '', view_code)
-            view_code = re.sub(r'(?i)\bGROUP\s+BY\s+(.*?)\s+WITH\s+ROLLUP\b', r'GROUP BY ROLLUP (\1)', view_code, flags=re.DOTALL)
-
-        if target_db_type == 'postgresql':
-            try:
-                transpiled = sqlglot.transpile(view_code, read="mysql", write="postgres")
-                if transpiled:
-                    view_code = transpiled[0]
-            except Exception as e:
-                if getattr(self, 'config_parser', None) and hasattr(self.config_parser, 'args'):
-                    self.config_parser.print_log_message('WARNING', f"mariadb_connector: convert_view_code: sqlglot transpilation failed: {e}")
-
-        converted_view_code = view_code
-        converted_view_code = converted_view_code.replace('`', '"')
-        converted_view_code = converted_view_code.replace(f'''"{settings['source_schema_name']}".''', f'''"{settings['target_schema_name']}".''')
-        converted_view_code = converted_view_code.replace(f'''{settings['source_schema_name']}.''', f'''"{settings['target_schema_name']}".''')
-        converted_view_code = converted_view_code.replace('""', '"')
-        
-        converted_view_code = self.apply_sql_functions_mapping(converted_view_code, settings)
-        return converted_view_code
 
     def get_sequence_current_value(self, sequence_id: int):
         # Implement sequence current value fetching logic

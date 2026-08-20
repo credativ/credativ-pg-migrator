@@ -1,6 +1,6 @@
 # credativ-pg-migrator — test suite
 
-462 test functions in 32 files. **No test in this directory needs a database, a driver
+494 test functions in 33 files. **No test in this directory needs a database, a driver
 connection, or a network.** Everything that would talk to a server is either constructed
 with `Class.__new__(Class)` and fed a fake config, or replaced with `unittest.mock`. A
 full run touches nothing outside the repository and finishes in seconds.
@@ -37,7 +37,7 @@ tests, and no test depends on the order of the others.
 | configuration & logging | `pyyaml`, `jsonschema`, `pytest` | the 5 `test_config_*` / `test_logging_*` / `test_object_*` files, and `test_schema_names.py` |
 | query conversion | `sqlglot`, `pytest` | the 4 `test_query_*` files and `test_db2_query_conversion.py` |
 | anonymization, Db2 CSV | nothing beyond the standard library | 3 files |
-| everything else | the package's own dependencies — `psycopg2`, `tabulate`, `jaydebeapi` | 18 files, `test_informix_query_conversion.py` among them |
+| everything else | the package's own dependencies — `psycopg2`, `tabulate`, `jaydebeapi` | 19 files, `test_informix_query_conversion.py` and `test_mysql_query_conversion.py` among them |
 
 The third group imports the connectors, which import their drivers at module level, so
 those files fail to **collect** if the drivers are absent — the message is
@@ -522,6 +522,26 @@ write is made to look like one - the constructs which stop the conversion with a
 the names which only read like them: `SUM(x) AS units`, `AS rowid`, `note = 'MATCHES TODAY'`.
 The preparation is also asserted to work on a connector built with `Class.__new__(Class)`,
 because that is how the test suite of the migration repository asks for it.
+
+### `test_mysql_query_conversion.py` — 32 functions, 148 tests
+
+**Purpose.** The dialect of MySQL and MariaDB - two connectors and one dialect, so every test
+here is run against both - and the line between what a transpiler may be trusted with and
+what it may not.
+
+**Covers.** This is the source the parser of the migrator really models, so the tests are
+about the edges of that. What the transpiler writes correctly is asserted as such, so that a
+rewrite added later cannot quietly take it over. What it writes as something PostgreSQL does
+not have or does not mean is asserted expression by expression: `CONCAT_WS`, which it wraps
+in a CASE which answers NULL where MySQL skips the NULL; `DATEDIFF`; the date fields, each of
+which is counted from another end in the two dialects; `TIMESTAMPDIFF` in five units and in
+one it cannot count; `SUBSTRING_INDEX` forwards, backwards and with a count which is not a
+literal; the casts to an unsigned integer; a `DATE_FORMAT` whose format holds a code with no
+counterpart. Then the constructs which stop the conversion, each with the reason it gives -
+and the names which only read like one: `AS hex`, `t.user`, a call named in a comment or in
+a literal. Finally the entry point, the view path which keeps the text of the source when the
+statement cannot be parsed, and the assertion that both connectors really do share one
+conversion and one function mapping.
 
 ### `test_query_conversion_workflow.py` — 27 functions, 31 tests
 

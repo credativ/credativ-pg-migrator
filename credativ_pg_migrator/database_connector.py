@@ -323,6 +323,161 @@ class DatabaseConnector(ABC):
         sql_str = re.sub(r'(?i)\bCAST\s*\((.*?)\s+AS\s+CHAR(?:ACTER)?\s*\)', r'CAST(\1 AS VARCHAR)', sql_str)
         return sql_str
 
+    def convert_db2_cast_functions(self, sql_str: str) -> str:
+        """
+        DB2 provides casting scalar functions named after data types - VARCHAR(expr),
+        INTEGER(expr), DECIMAL(expr, p, s), TIMESTAMP(expr) etc.
+        PostgreSQL has no equivalents for most of them, so they are rewritten
+        into standard CAST expressions.
+
+        Type specifications like VARCHAR(30) or DECIMAL(10,2) - used in DECLARE
+        statements, CAST clauses or parameter lists - contain only integer literals
+        and are left untouched. Forms which cannot be expressed as a plain CAST
+        (for example CHAR(date_column, ISO)) are also left untouched, so that they
+        are reported as errors instead of being converted incorrectly.
+        """
+        if not sql_str:
+            return sql_str
+        import re
+
+        cast_functions = {
+            'VARCHAR': 'VARCHAR',
+            'CHARACTER': 'VARCHAR',
+            'CHAR': 'VARCHAR',
+            'SMALLINT': 'SMALLINT',
+            'INTEGER': 'INTEGER',
+            'INT': 'INTEGER',
+            'BIGINT': 'BIGINT',
+            'DECIMAL': 'NUMERIC',
+            'DEC': 'NUMERIC',
+            'NUMERIC': 'NUMERIC',
+            'DOUBLE': 'DOUBLE PRECISION',
+            'FLOAT': 'DOUBLE PRECISION',
+            'REAL': 'REAL',
+            'DATE': 'DATE',
+            'TIME': 'TIME',
+            'TIMESTAMP': 'TIMESTAMP',
+        }
+        length_types = ('VARCHAR',)
+        function_pattern = re.compile(
+            r'(' + '|'.join(sorted(cast_functions.keys(), key=len, reverse=True)) + r')\s*\(',
+            re.IGNORECASE)
+        integer_pattern = re.compile(r'^\d+$')
+
+        def find_closing_parenthesis(text: str, open_index: int):
+            depth = 0
+            in_single = False
+            in_double = False
+            index = open_index
+            while index < len(text):
+                char = text[index]
+                if char == "'" and not in_double:
+                    in_single = not in_single
+                elif char == '"' and not in_single:
+                    in_double = not in_double
+                elif not in_single and not in_double:
+                    if char == '(':
+                        depth += 1
+                    elif char == ')':
+                        depth -= 1
+                        if depth == 0:
+                            return index
+                index += 1
+            return None
+
+        def split_arguments(text: str):
+            arguments = []
+            current = []
+            depth = 0
+            in_single = False
+            in_double = False
+            for char in text:
+                if char == "'" and not in_double:
+                    in_single = not in_single
+                elif char == '"' and not in_single:
+                    in_double = not in_double
+                elif not in_single and not in_double:
+                    if char == '(':
+                        depth += 1
+                    elif char == ')':
+                        depth -= 1
+                    elif char == ',' and depth == 0:
+                        arguments.append(''.join(current).strip())
+                        current = []
+                        continue
+                current.append(char)
+            arguments.append(''.join(current).strip())
+            return arguments
+
+        result = []
+        position = 0
+        text_length = len(sql_str)
+        in_single = False
+        in_double = False
+        while position < text_length:
+            char = sql_str[position]
+            if char == "'" and not in_double:
+                in_single = not in_single
+                result.append(char)
+                position += 1
+                continue
+            if char == '"' and not in_single:
+                in_double = not in_double
+                result.append(char)
+                position += 1
+                continue
+            if in_single or in_double:
+                result.append(char)
+                position += 1
+                continue
+
+            match = function_pattern.match(sql_str, position)
+            if not match:
+                result.append(char)
+                position += 1
+                continue
+            # part of a longer identifier - not a function call
+            if position > 0 and (sql_str[position - 1].isalnum() or sql_str[position - 1] in '_."'):
+                result.append(char)
+                position += 1
+                continue
+            # data type in an existing CAST expression - CAST(x AS DECIMAL(10,2))
+            if re.search(r'(?i)\bAS\s+$', sql_str[:position]):
+                result.append(char)
+                position += 1
+                continue
+
+            open_index = match.end() - 1
+            close_index = find_closing_parenthesis(sql_str, open_index)
+            if close_index is None:
+                result.append(char)
+                position += 1
+                continue
+
+            source_type = match.group(1).upper()
+            target_type = cast_functions[source_type]
+            # nested casting functions have to be converted as well
+            arguments_text = self.convert_db2_cast_functions(sql_str[open_index + 1:close_index])
+            arguments = split_arguments(arguments_text)
+            replacement = None
+            if arguments and arguments[0] and not all(integer_pattern.match(argument) for argument in arguments):
+                if len(arguments) == 1:
+                    replacement = f'CAST({arguments[0]} AS {target_type})'
+                elif (target_type in length_types and len(arguments) == 2
+                      and integer_pattern.match(arguments[1])):
+                    replacement = f'CAST({arguments[0]} AS {target_type}({arguments[1]}))'
+                elif (target_type == 'NUMERIC' and len(arguments) in (2, 3)
+                      and all(integer_pattern.match(argument) for argument in arguments[1:])):
+                    replacement = f'CAST({arguments[0]} AS NUMERIC({", ".join(arguments[1:])}))'
+
+            if replacement is None:
+                # type specification or unsupported form - keep the original wording
+                replacement = sql_str[position:open_index + 1] + arguments_text + ')'
+            result.append(replacement)
+            position = close_index + 1
+
+        return ''.join(result)
+
     def convert_grouping_boolean_in_case(self, sql_str: str) -> str:
         if not sql_str:
             return sql_str
@@ -394,6 +549,12 @@ class DatabaseConnector(ABC):
                 escaped_src_func = re.escape(src_func)
                 if src_func and (src_func[0].isalnum() or src_func[0] == '_') and (src_func[-1].isalnum() or src_func[-1] == '_'):
                     pattern = rf"(?i)\b{escaped_src_func}\b"
+                elif src_func and (src_func[0].isalnum() or src_func[0] == '_') and src_func.endswith('('):
+                    ## A mapping written as a call ('nvl(') also has to find the call written with
+                    ## a space in front of its parenthesis. Informix stores the text of a view that
+                    ## way - 'NVL (sum(x))' - and the function stayed as it was, which PostgreSQL
+                    ## answered with 'function nvl(numeric, integer) does not exist'.
+                    pattern = rf"(?i)\b{re.escape(src_func[:-1])}\s*\("
                 elif src_func and (src_func[0].isalnum() or src_func[0] == '_'):
                     pattern = rf"(?i)\b{escaped_src_func}"
                 else:
@@ -609,6 +770,132 @@ class DatabaseConnector(ABC):
                 break
             value = value[1:-1].strip()
         return value
+
+    def is_string_expression(self, node):
+        """
+        True when the expression node produces text, as far as it can be told without the types
+        of the columns: a string literal, a cast to a character type, a concatenation.
+        """
+        import sqlglot
+        if node is None:
+            return False
+        if node.is_string:
+            return True
+        if isinstance(node, sqlglot.exp.Cast) and getattr(node.to.this, 'name', '').upper() in (
+                'VARCHAR', 'CHAR', 'TEXT', 'NVARCHAR', 'NCHAR', 'UNIVARCHAR', 'UNICHAR'):
+            return True
+        if isinstance(node, sqlglot.exp.DPipe):
+            return True
+        if isinstance(node, sqlglot.exp.Add):
+            return self.is_string_expression(node.left) or self.is_string_expression(node.right)
+        return False
+
+    def convert_string_concatenation(self, node):
+        """
+        A transformation for sqlglot which turns the '+' of T-SQL into the '||' of PostgreSQL
+        wherever one of its operands is text - '+' concatenates in Sybase ASE and MS SQL Server
+        and adds in PostgreSQL, which refuses it on text with 'operator does not exist'. The
+        operand which is not text is cast, because PostgreSQL does not concatenate a number
+        with a text without one.
+        """
+        import sqlglot
+        if isinstance(node, sqlglot.exp.Add):
+            # Process children first to do a bottom-up replacement
+            left = node.left.transform(self.convert_string_concatenation)
+            right = node.right.transform(self.convert_string_concatenation)
+
+            is_left_string = self.is_string_expression(left)
+            is_right_string = self.is_string_expression(right)
+
+            if is_left_string or is_right_string:
+                new_left = left.copy() if is_left_string else sqlglot.exp.Cast(
+                    this=left.copy(), to=sqlglot.exp.DataType.build('text'))
+                new_right = right.copy() if is_right_string else sqlglot.exp.Cast(
+                    this=right.copy(), to=sqlglot.exp.DataType.build('text'))
+                return sqlglot.exp.DPipe(this=new_left, expression=new_right)
+        return node
+
+    def keep_source_variables(self, node):
+        """
+        A transformation for sqlglot which keeps a variable of the source in its own spelling.
+
+        sqlglot reads '@v' of T-SQL as a parameter, and the PostgreSQL generator writes a
+        parameter as '$v', while the conversion of a routine expects '@v' - it renames the
+        variables to locvar_v afterwards. '@@v', a global variable, is read as a parameter of a
+        parameter. Used by every connector which converts T-SQL statements for PostgreSQL.
+        """
+        import sqlglot
+        if isinstance(node, sqlglot.exp.Parameter):
+            inner = node.this
+            if isinstance(inner, sqlglot.exp.Parameter):
+                return sqlglot.exp.Var(this='@@' + inner.this.name)
+            return sqlglot.exp.Var(this='@' + (inner.name if hasattr(inner, 'name') else str(inner)))
+        return node
+
+    def mapped_function_expression(self, mapped_text: str):
+        """
+        The replacement of a function from `get_sql_functions_mapping()` as an expression node.
+
+        A replacement which is not the bare name of a function is a complete expression, and
+        writing a call around it produces SQL the target refuses: the niladic keyword functions
+        of PostgreSQL are written without parentheses ('suser_name()' as `CURRENT_USER()` fails
+        with 'syntax error at or near "("'), and a replacement which is a call of its own would
+        end with a second, empty argument list (`TIMEZONE('UTC', NOW())()`).
+
+        Returns None when the text cannot be parsed - the caller then keeps renaming the
+        function, which is the right thing for a replacement that really is only a name.
+        """
+        import sqlglot
+        if not mapped_text:
+            return None
+        try:
+            return sqlglot.parse_one(mapped_text, read='postgres')
+        except Exception:
+            return None
+
+    def strip_sql_comments(self, code: str) -> str:
+        """
+        Removes '--' line comments and '/* */' block comments, leaving the content of
+        string literals and quoted names alone - both may contain these sequences.
+        Every comment is replaced by a space, so the words around it stay separated.
+        """
+        if not code:
+            return code
+        result = []
+        index = 0
+        length = len(code)
+        quote = None
+        while index < length:
+            character = code[index]
+            if quote:
+                result.append(character)
+                if character == quote:
+                    quote = None
+                index += 1
+                continue
+            if character in ('"', "'", '`'):
+                quote = character
+                result.append(character)
+                index += 1
+                continue
+            if character == '[':
+                quote = ']'
+                result.append(character)
+                index += 1
+                continue
+            if character == '-' and code.startswith('--', index):
+                while index < length and code[index] != '\n':
+                    index += 1
+                result.append(' ')
+                continue
+            if character == '/' and code.startswith('/*', index):
+                end_of_comment = code.find('*/', index + 2)
+                index = length if end_of_comment == -1 else end_of_comment + 2
+                result.append(' ')
+                continue
+            result.append(character)
+            index += 1
+        return ''.join(result)
 
     @abstractmethod
     def is_string_type(self, column_type: str) -> bool:
@@ -835,6 +1122,21 @@ class DatabaseConnector(ABC):
     def convert_trigger(self, settings: dict):
         """ The trigger source is passed in settings['trigger_sql'] - see planner.stdwf_prepare_tables """
         pass
+
+    def trigger_needs_manual_adjustment(self, converted_code):
+        """
+        Whether a converted trigger carries something the conversion could not express and which
+        has to be written by hand before the trigger does what the trigger of the source did.
+
+        Such a trigger is not created in the target and is reported as failed - see
+        orchestrator.stdwf_migrate_triggers(). A connector which cannot tell says no, which is
+        the behaviour of every connector that does not override this.
+        """
+        return False
+
+    def trigger_manual_adjustment_details(self, converted_code):
+        """ What has to be done by hand, for the migration report. """
+        return None
 
     @abstractmethod
     def fetch_funcproc_names(self, schema: str):

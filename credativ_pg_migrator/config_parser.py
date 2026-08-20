@@ -14,11 +14,14 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import copy
+import fnmatch
+import json
 import yaml
 from credativ_pg_migrator.constants import MigratorConstants
 import re
 import csv
-from datetime import datetime
+from datetime import datetime, date, timedelta
 import os
 import time
 from collections import Counter
@@ -28,16 +31,151 @@ class ConfigParser:
     def __init__(self, args, logger):
         self.args = args
         self.logger = logger
+        ## counts of objects kept and left out by include_*/exclude_*, per object kind
+        self.object_filter_counters = {}
         self.config = self.load_config(args.config)
         self.print_log_message('DEBUG3', f"config_parser: __init__: Configuration loaded: {self.config}")
         self.validate_config()
 
+    ## The configuration language, as a JSON Schema. It is the single source of truth:
+    ## docs/config_reference.md is generated from it and tests/test_config_docs.py checks
+    ## the sample configurations and the code against it.
+    CONFIG_SCHEMA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.schema.json')
+
     def load_config(self, config_file):
-        """Load the configuration file."""
+        """Load the configuration file and report what the schema says about it."""
         self.print_log_message('INFO', f"config_parser: load_config: Working directory: {os.path.dirname(os.path.abspath(self.args.config))}")
         self.print_log_message('INFO', f"config_parser: load_config: Loading configuration from {config_file}")
         with open(config_file, 'r') as file:
-            return yaml.safe_load(file)
+            config = yaml.safe_load(file)
+        self.check_config_against_schema(config, config_file)
+        return config
+
+    ## Settings whose value the code lower-cases before it interprets it. The schema is
+    ## checked against the value the code will really see, so that a spelling which works
+    ## is not refused on its capitalisation alone.
+    CASE_INSENSITIVE_SETTINGS = (
+        ('pattern_syntax',),
+        ('migration', 'names_case_handling'),
+        ('migration', 'packages_as'),
+        ('migration', 'validate_objects'),
+    )
+
+    @classmethod
+    def config_as_the_code_reads_it(cls, config):
+        """A copy of the configuration with the case-insensitive settings lower-cased."""
+        if not isinstance(config, dict):
+            return config
+        normalized = copy.deepcopy(config)
+        for path in cls.CASE_INSENSITIVE_SETTINGS:
+            holder = normalized
+            for step in path[:-1]:
+                holder = holder.get(step) if isinstance(holder, dict) else None
+                if not isinstance(holder, dict):
+                    break
+            else:
+                key = path[-1]
+                if isinstance(holder, dict) and isinstance(holder.get(key), str):
+                    holder[key] = holder[key].strip().lower()
+        return normalized
+
+    @staticmethod
+    def describe_schema_error(error):
+        """
+        The message of one validation error, in the words of the reference.
+
+        A setting with standard values and aliases fails as "is not valid under any of
+        the given schemas", which says nothing about what to write instead - so for those
+        the standard values are named, and the aliases mentioned as what they are.
+        """
+        standard = (error.schema or {}).get('x-standard-values') if isinstance(error.schema, dict) else None
+        if not standard:
+            return error.message
+        aliases = (error.schema or {}).get('x-aliases') or {}
+        text = f"{error.instance!r} is not one of {', '.join(repr(v) for v in standard)}"
+        if aliases:
+            text += f" (nor one of their aliases: {', '.join(sorted(aliases))})"
+        return text
+
+    def check_config_against_schema(self, config, config_file):
+        """
+        Compare the configuration with credativ_pg_migrator/config.schema.json and report
+        every difference as a WARNING.
+
+        A setting the migrator cannot carry out stops the run, here, at the start -
+        rather than failing somewhere in the middle of a long migration, or not failing
+        at all and quietly migrating less than was asked for. A wrong type, a value
+        outside the allowed set, a list of the wrong length and a missing required block
+        are all of that kind.
+
+        An UNKNOWN key is reported but does not stop the run. A configuration written for
+        a later version of the migrator has to stay usable with an earlier one, so an
+        unrecognised key is a warning - which still catches the misspelling that would
+        otherwise have done nothing at all, silently.
+
+        --ignore-config-schema-errors turns the blocking errors into warnings as well, for
+        the case where the schema is wrong and the configuration is right.
+        """
+        try:
+            from jsonschema import Draft202012Validator
+        except ImportError:
+            self.print_log_message('DEBUG', "config_parser: check_config_against_schema: jsonschema is not installed - the configuration is not checked against the schema.")
+            return
+
+        try:
+            with open(self.CONFIG_SCHEMA_FILE, 'r', encoding='utf-8') as schema_file:
+                schema = json.load(schema_file)
+        except (OSError, ValueError) as e:
+            self.print_log_message('DEBUG', f"config_parser: check_config_against_schema: the schema {self.CONFIG_SCHEMA_FILE} could not be read ({e}) - the configuration is not checked.")
+            return
+
+        try:
+            errors = sorted(Draft202012Validator(schema).iter_errors(
+                                self.config_as_the_code_reads_it(config)),
+                            key=lambda error: list(error.path))
+        except Exception as e:
+            self.print_log_message('DEBUG', f"config_parser: check_config_against_schema: the schema could not be applied ({e}) - the configuration is not checked.")
+            return
+
+        if not errors:
+            self.print_log_message('INFO', "config_parser: check_config_against_schema: the configuration matches the schema.")
+            return
+
+        ## An unrecognised key is reported, never fatal - see the docstring.
+        unknown_key_errors = [error for error in errors if error.validator == 'additionalProperties']
+        blocking_errors = [error for error in errors if error.validator != 'additionalProperties']
+
+        for error in unknown_key_errors:
+            location = '.'.join(str(part) for part in error.path) or '(top level)'
+            self.print_log_message('WARNING',
+                f"config_parser: check_config_against_schema: {location}: {error.message} "
+                f"The migrator does not read it - check the spelling against docs/config_reference.md.")
+
+        if not blocking_errors:
+            return
+
+        override = getattr(self.args, 'ignore_config_schema_errors', False)
+        level = 'WARNING' if override else 'ERROR'
+        for error in blocking_errors:
+            location = '.'.join(str(part) for part in error.path) or '(top level)'
+            self.print_log_message(level, f"config_parser: check_config_against_schema: {location}: {self.describe_schema_error(error)}")
+
+        if override:
+            self.print_log_message('WARNING',
+                f"config_parser: check_config_against_schema: {len(blocking_errors)} setting(s) of {config_file} do "
+                f"not match the configuration schema; the migration continues because "
+                f"--ignore-config-schema-errors was given.")
+            return
+
+        named = ', '.join(
+            '.'.join(str(part) for part in error.path) or '(top level)'
+            for error in blocking_errors[:5])
+        if len(blocking_errors) > 5:
+            named += ', ...'
+        raise ValueError(
+            f"{len(blocking_errors)} setting(s) of {config_file} do not match the configuration "
+            f"schema ({named}) - see the messages above and docs/config_reference.md for what each "
+            f"option accepts. Start with --ignore-config-schema-errors to run anyway.")
 
     def validate_config(self):
 
@@ -47,10 +185,29 @@ class ConfigParser:
         if names_case_handling not in ['lower', 'upper', 'keep']:
             raise ValueError(f"Invalid names_case_handling in the config file: {names_case_handling}. Must be one of 'lower', 'upper', or 'keep'.")
 
-        include_tables = self.config['include_tables']
-        if (include_tables is not None and type(include_tables) is str and include_tables.lower() != 'all'):
-            # and type(include_tables) is not list):
-            raise ValueError("When include_tables is used, it must be a list of names or regex patterns")
+        pattern_syntax = self.get_pattern_syntax()
+        configured_syntax = self.config.get('pattern_syntax', None)
+        if configured_syntax is not None and self.resolve_standard_value(
+                configured_syntax, self.PATTERN_SYNTAX_STANDARD, self.PATTERN_SYNTAX_ALIASES) is None:
+            raise ValueError(
+                f"Invalid pattern_syntax in the config file: {configured_syntax}. "
+                f"Must be one of {', '.join(self.PATTERN_SYNTAX_STANDARD)}.")
+
+        for include_option, exclude_option in self.OBJECT_FILTER_KEYS.values():
+            for option_name in (include_option, exclude_option):
+                value = self.config.get(option_name, None)
+                if value is not None and not isinstance(value, (list, tuple)) and not isinstance(value, str):
+                    raise ValueError(
+                        f"{option_name} must be 'all' or a list of patterns, "
+                        f"found {type(value).__name__}.")
+                if isinstance(value, str) and value.strip().lower() not in self.MATCH_EVERYTHING_PATTERNS:
+                    raise ValueError(
+                        f"When {option_name} is written as a single value it must be 'all'. "
+                        f"Write a list to select individual objects.")
+
+        ## compiles every pattern and reports any written in another syntax
+        self.validate_object_filters()
+        self.print_log_message('DEBUG', f"config_parser: validate_config: object filter pattern syntax: {pattern_syntax}")
 
         data_types_substitution = self.get_data_types_substitution()
         if isinstance(data_types_substitution, list):
@@ -58,6 +215,41 @@ class ConfigParser:
                 if not isinstance(entry, (list, tuple)) or len(entry) != 5:
                     raise ValueError("Please update your config file. Each entry in data_types_substitution must have 5 elements - [table_name, column_name, source_type, target_type, comment].")
 
+        self.validate_anonymization_config()
+
+        return True
+
+    def validate_anonymization_config(self):
+        """
+        Check every anonymization rule before any data is read.
+
+        A typo in a method name would otherwise be discovered only while the data is being
+        copied, where the rule is simply not applied - the original personal data would land
+        in a target that everybody treats as anonymized. Such a configuration is fatal here.
+        """
+        anonymization_config = self.get_anonymization_config()
+        has_rules = bool(anonymization_config.get('tables')) or bool(anonymization_config.get('regex_mappings'))
+
+        # These messages are sent as INFO on purpose - WARNING is not printed with the default
+        # log level, and a message saying that nothing is anonymized must always be visible.
+        if not anonymization_config:
+            if self.is_anonymization_workflow():
+                self.print_log_message('WARNING', "config_parser: validate_anonymization_config: Workflow is 'anonymization' but no rules are configured - the run will be a plain data copy, nothing will be anonymized.")
+            return True
+
+        # the whole section is checked, including on_value_too_long, even when it carries no rules
+        from credativ_pg_migrator.anonymization.routing import MigratorAnonymizer
+        anonymizer = MigratorAnonymizer(self.config)
+
+        if not has_rules:
+            if self.is_anonymization_workflow():
+                self.print_log_message('WARNING', "config_parser: validate_anonymization_config: Workflow is 'anonymization' but no rules are configured - the run will be a plain data copy, nothing will be anonymized.")
+            return True
+
+        if not self.is_anonymization_workflow():
+            self.print_log_message('WARNING', f"config_parser: validate_anonymization_config: Anonymization rules are configured but the workflow is '{self.get_workflow()}' - the rules are ignored and no data will be anonymized.")
+
+        self.print_log_message('INFO', f"config_parser: validate_anonymization_config: {anonymizer.rules_count} anonymization rules validated, all methods are registered. Values not fitting into the target column: {anonymizer.on_value_too_long}.")
         return True
 
 
@@ -321,7 +513,10 @@ class ConfigParser:
         return (self.config.get('anonymization') or {})
 
     def get_migration_settings(self):
-        return self.config['migration']
+        ## .get(), not indexing: the 'migration' block is optional - a configuration which
+        ## leaves it out takes the default of every one of its settings, and must not die
+        ## with a KeyError on the first accessor that looks inside it.
+        return self.config.get('migration') or {}
 
     def get_workflow(self):
         return self.config.get('workflow', 'standard')
@@ -494,6 +689,9 @@ class ConfigParser:
     def get_protocol_name_data_chunks(self):
         return f"{self.get_protocol_name()}_data_chunks"
 
+    def get_protocol_name_anonymization_stats(self):
+        return f"{self.get_protocol_name()}_anonymization_stats"
+
     def get_protocol_name_indexes(self):
         return f"{self.get_protocol_name()}_indexes"
 
@@ -540,7 +738,69 @@ class ConfigParser:
             # If from_config_file is a dict, convert its items to list of lists
             merged_substitutions.extend([list(item) for item in from_config_file.items()])
         merged_substitutions.extend(implicit_substitutions)
-        return merged_substitutions
+        return [self.repair_over_escaped_substitution(substitution) for substitution in merged_substitutions]
+
+    def repair_over_escaped_substitution(self, substitution):
+        """
+        The replacement of a default value is written into the DDL of the target as it
+        stands, so its string literals need single apostrophes. A value written with the
+        escaping of a SQL literal instead - "session_user||''@''||coalesce(...,''UDS'')" -
+        arrives as an empty literal followed by a word and is refused with
+        'syntax error at or near "UDS"'.
+
+        Such a value is repaired, but only when halving the apostrophes really makes it
+        readable: an empty literal is a legitimate default (coalesce(x, '')) and stays as
+        it is.
+        """
+        if not isinstance(substitution, (list, tuple)) or len(substitution) < 4:
+            return substitution
+        target_default_value = substitution[3]
+        if not isinstance(target_default_value, str) or "''" not in target_default_value:
+            return substitution
+        if self.reads_as_sql_expression(target_default_value):
+            return substitution
+        repaired_value = target_default_value.replace("''", "'")
+        if not self.reads_as_sql_expression(repaired_value):
+            return substitution
+        self.print_log_message('WARNING',
+            f"config_parser: get_default_values_substitution: the replacement of the default value '{substitution[2]}' "
+            f"is written with doubled apostrophes ({target_default_value}), which the target reads as empty string "
+            f"literals - it is used as {repaired_value}. Write the apostrophes of a literal singly in "
+            f"'default_values_substitution'; doubling them is needed inside a YAML value quoted with apostrophes, "
+            f"where YAML removes the doubling again.")
+        repaired_substitution = list(substitution)
+        repaired_substitution[3] = repaired_value
+        return repaired_substitution
+
+    @staticmethod
+    def reads_as_sql_expression(expression):
+        """
+        True when the apostrophes of an expression delimit its string literals the way
+        PostgreSQL reads them: every literal is closed, and none of them is written
+        directly against a following word - "''UDS''" is the empty literal '' followed by
+        the name UDS, which is what an over-escaped value looks like.
+        """
+        index = 0
+        length = len(expression)
+        while index < length:
+            if expression[index] != "'":
+                index += 1
+                continue
+            index += 1
+            while index < length:
+                if expression[index] == "'":
+                    if index + 1 < length and expression[index + 1] == "'":
+                        index += 2
+                        continue
+                    break
+                index += 1
+            if index >= length:
+                ## the literal is never closed
+                return False
+            index += 1
+            if index < length and (expression[index].isalnum() or expression[index] == '_'):
+                return False
+        return True
 
     def get_data_migration_limitation(self):
         return (self.config.get('data_migration_limitation') or {})
@@ -619,11 +879,12 @@ class ConfigParser:
         #   'schemas'            : a schema named after the package, holding one function
         #                          per package routine under its own name
         val = (self.config.get('migration') or {}).get('packages_as', 'functions')
-        normalized = str(val).strip().lower() if val is not None else 'functions'
-        if normalized in ('schemas', 'schema', 'package_schema', 'package_schemas'):
-            return 'schemas'
-        if normalized in ('functions', 'function', 'prefixed_functions', 'prefix'):
+        if val is None:
             return 'functions'
+        resolved = self.resolve_standard_value(val, self.PACKAGES_AS_STANDARD,
+                                               self.PACKAGES_AS_ALIASES)
+        if resolved:
+            return resolved
         self.print_log_message('WARNING', f"config_parser: get_packages_migration_style: Unknown value '{val}' for migration.packages_as - using 'functions'.")
         return 'functions'
 
@@ -640,14 +901,9 @@ class ConfigParser:
             return 'retry'
         if val is False or val is None:
             return 'off'
-        normalized = str(val).strip().lower()
-        if normalized in ('retry', 'true', 'yes', 'on'):
-            return 'retry'
-        if normalized in ('check', 'verify', 'check_only'):
-            return 'check'
-        if normalized in ('off', 'false', 'no', 'none', 'skip'):
-            return 'off'
-        return 'retry'
+        resolved = self.resolve_standard_value(val, self.VALIDATE_OBJECTS_STANDARD,
+                                               self.VALIDATE_OBJECTS_ALIASES)
+        return resolved or 'retry'
 
     def should_map_numeric_1_to_boolean(self, schema_name=None, table_name=None, column_name=None):
         # Decides whether a narrow numeric source column (precision 1, scale 0 -
@@ -765,13 +1021,7 @@ class ConfigParser:
         return (self.config.get('migration') or {}).get('migrate_lob_values', True)
 
     def get_include_tables(self):
-        include_tables = self.config.get('include_tables', None)
-        if (include_tables is None or (type(include_tables) is str and include_tables.lower() == 'all')):
-            return ['.*']  # Pattern matching all table names
-        elif type(include_tables) is list:
-            return include_tables
-        else:
-            return []
+        return self.get_object_filter_patterns('include_tables')
 
     ## Validator
     def get_validation_tables_name(self):
@@ -817,33 +1067,288 @@ class ConfigParser:
         return int(self.get_validation_config().get('random_sample_size', 1000))
 
     def get_exclude_tables(self):
-        return self.config['exclude_tables']
+        return self.get_object_filter_patterns('exclude_tables')
 
     def get_include_views(self):
-        include_views = self.config.get('include_views', None)
-        if include_views is None or (type(include_views) is str and include_views.lower() == 'all'):
-            # Pattern matching all view names
-            return ['.*']
-        elif type(include_views) is list:
-            return include_views
-        else:
-            return []
+        return self.get_object_filter_patterns('include_views')
 
     def get_exclude_views(self):
-        return self.config.get('exclude_views', [])
+        return self.get_object_filter_patterns('exclude_views')
 
     def get_include_funcprocs(self):
-        include_funcprocs = self.config.get('include_funcprocs', None)
-        if include_funcprocs is None or (type(include_funcprocs) is str and include_funcprocs.lower() == 'all'):
-            # Pattern matching all function/procedure names
-            return ['.*']
-        elif type(include_funcprocs) is list:
-            return include_funcprocs
-        else:
-            return []
+        return self.get_object_filter_patterns('include_funcprocs')
 
     def get_exclude_funcprocs(self):
-        return self.config.get('exclude_funcprocs', [])
+        return self.get_object_filter_patterns('exclude_funcprocs')
+
+    ## ------------------------------------------------------------------------
+    ## Object selection - include_tables / exclude_tables and the same pair for
+    ## views and functions/procedures.
+    ##
+    ## All six behave identically:
+    ##   - the patterns are written in one syntax, chosen by the top level
+    ##     'pattern_syntax' (glob, regex or like),
+    ##   - a pattern must match the WHOLE name, and matching ignores case,
+    ##   - an include list which is absent, empty, 'all' or contains a
+    ##     match-everything pattern selects every object,
+    ##   - an exclude list which is absent or empty removes nothing,
+    ##   - exclude is applied after include and wins.
+    ## ------------------------------------------------------------------------
+
+    ## Spellings of "everything", accepted in any syntax and on both sides, so that
+    ## exclude_tables: ['.*'] really excludes everything instead of silently excluding
+    ## nothing, which is what a glob '.*' used to do.
+    MATCH_EVERYTHING_PATTERNS = ('all', '*', '.*', '%', '.+')
+
+    ## The value to write is one of PATTERN_SYNTAX_STANDARD. The entries of
+    ## PATTERN_SYNTAX_ALIASES are synonyms accepted for compatibility, each read as the
+    ## standard value it points at - they are not alternatives of equal standing, and the
+    ## reference documents them as aliases. Declared here once: the schema mirrors these
+    ## tables and a test compares the two, so they cannot disagree.
+    PATTERN_SYNTAX_STANDARD = ('glob', 'regex', 'like')
+    PATTERN_SYNTAX_ALIASES = {
+        'wildcard': 'glob', 'wildcards': 'glob', 'fnmatch': 'glob', 'shell': 'glob',
+        'regexp': 'regex', 're': 'regex', 'regular_expression': 'regex',
+        'sql': 'like', 'sql_like': 'like',
+    }
+
+    VALIDATE_OBJECTS_STANDARD = ('retry', 'check', 'off')
+    VALIDATE_OBJECTS_ALIASES = {
+        'true': 'retry', 'yes': 'retry', 'on': 'retry',
+        'verify': 'check', 'check_only': 'check',
+        'false': 'off', 'no': 'off', 'none': 'off', 'skip': 'off',
+    }
+
+    PACKAGES_AS_STANDARD = ('functions', 'schemas')
+    PACKAGES_AS_ALIASES = {
+        'function': 'functions', 'prefixed_functions': 'functions', 'prefix': 'functions',
+        'schema': 'schemas', 'package_schema': 'schemas', 'package_schemas': 'schemas',
+    }
+
+    @staticmethod
+    def resolve_standard_value(value, standard_values, aliases):
+        """
+        The standard value a written value stands for, or None when it is neither a
+        standard value nor one of the aliases. Reading is case-insensitive.
+        """
+        if value is None:
+            return None
+        text = str(value).strip().lower()
+        if text in standard_values:
+            return text
+        return aliases.get(text)
+
+    OBJECT_FILTER_KEYS = {
+        'table':    ('include_tables', 'exclude_tables'),
+        'view':     ('include_views', 'exclude_views'),
+        'funcproc': ('include_funcprocs', 'exclude_funcprocs'),
+    }
+
+    def get_pattern_syntax(self):
+        """
+        The syntax the object filter patterns are written in.
+
+        'glob' (the default) is what the migrator has always applied, so a configuration
+        written before this setting existed keeps its meaning. 'regex' and 'like' are
+        opted into explicitly.
+        """
+        value = self.config.get('pattern_syntax', None)
+        if value is None:
+            return 'glob'
+        resolved = self.resolve_standard_value(value, self.PATTERN_SYNTAX_STANDARD,
+                                               self.PATTERN_SYNTAX_ALIASES)
+        if resolved:
+            return resolved
+        self.print_log_message('WARNING',
+            f"config_parser: get_pattern_syntax: unknown pattern_syntax '{value}' - "
+            f"using 'glob'. The values are {', '.join(self.PATTERN_SYNTAX_STANDARD)}.")
+        return 'glob'
+
+    def get_object_filter_patterns(self, option_name):
+        """
+        The patterns of one include_* / exclude_* option, as a list.
+
+        An absent key and an empty key (which YAML reads as null) give an empty list: on
+        the include side that means every object, on the exclude side that nothing is
+        excluded. The scalar 'all' is kept as a match-everything pattern instead of being
+        collapsed to an empty list, so that it reads the same way on both sides -
+        'exclude_tables: all' excludes everything, exactly as 'exclude_tables: [.*]' does.
+
+        A bare string other than 'all' is refused rather than read as a list of one: it is
+        almost always a forgotten '- ' in the YAML, and reading it as a single pattern
+        would quietly migrate a different set of objects than was meant.
+        """
+        value = self.config.get(option_name, None)
+        if value is None:
+            return []
+        if isinstance(value, str):
+            if value.strip().lower() in self.MATCH_EVERYTHING_PATTERNS:
+                return [value.strip().lower()]
+            raise ValueError(
+                f"When {option_name} is written as a single value it must be 'all'. "
+                f"Write a list to select individual objects.")
+        if isinstance(value, (list, tuple)):
+            return [entry for entry in value if entry is not None]
+        self.print_log_message('WARNING',
+            f"config_parser: get_object_filter_patterns: {option_name} must be 'all' or a "
+            f"list of patterns, found {type(value).__name__} - it is ignored.")
+        return []
+
+    @staticmethod
+    def _like_pattern_to_regex(pattern):
+        """SQL LIKE to a regular expression: % is any sequence, _ is one character."""
+        out = []
+        index = 0
+        while index < len(pattern):
+            char = pattern[index]
+            if char == '\\' and index + 1 < len(pattern):
+                out.append(re.escape(pattern[index + 1]))
+                index += 2
+                continue
+            if char == '%':
+                out.append('.*')
+            elif char == '_':
+                out.append('.')
+            else:
+                out.append(re.escape(char))
+            index += 1
+        return ''.join(out)
+
+    def compile_object_pattern(self, pattern, option_name):
+        """
+        One pattern as a compiled, case-insensitive regular expression matching the whole
+        name. None is returned for a pattern which means "everything".
+
+        An unusable pattern stops the migration: a filter which silently matches nothing
+        would migrate less than was asked for without saying so.
+        """
+        text = str(pattern).strip()
+        if text.lower() in self.MATCH_EVERYTHING_PATTERNS:
+            return None
+
+        syntax = self.get_pattern_syntax()
+        if syntax == 'glob':
+            expression = fnmatch.translate(text)
+        elif syntax == 'like':
+            expression = self._like_pattern_to_regex(text)
+        else:
+            expression = text
+
+        try:
+            return re.compile(expression, re.IGNORECASE)
+        except re.error as e:
+            raise ValueError(
+                f"{option_name}: '{pattern}' is not a valid {syntax} pattern - {e}. "
+                f"The pattern syntax is set by the top level 'pattern_syntax' "
+                f"(currently '{syntax}'; 'glob', 'regex' and 'like' are available).") from e
+
+    def object_name_matches_any(self, object_name, patterns, option_name):
+        """True when the name matches at least one of the patterns."""
+        for pattern in patterns or []:
+            compiled = self.compile_object_pattern(pattern, option_name)
+            if compiled is None:
+                return True
+            if compiled.fullmatch(str(object_name)):
+                return True
+        return False
+
+    def is_object_selected(self, object_kind, object_name):
+        """
+        Whether one object is migrated, together with the reason when it is not.
+
+        Returns (True, None) or (False, reason). The reason is meant to be logged - an
+        object left out without a word in the log is the failure this migrator treats as
+        a bug.
+        """
+        include_option, exclude_option = self.OBJECT_FILTER_KEYS[object_kind]
+        include_patterns = self.get_object_filter_patterns(include_option)
+        exclude_patterns = self.get_object_filter_patterns(exclude_option)
+
+        if include_patterns and not self.object_name_matches_any(object_name, include_patterns, include_option):
+            return False, f"no pattern of {include_option} matches it"
+        if exclude_patterns and self.object_name_matches_any(object_name, exclude_patterns, exclude_option):
+            return False, f"it is matched by {exclude_option}"
+        return True, None
+
+    def report_object_selection(self, object_kind, object_name, caller):
+        """
+        Apply the filters to one object and log the decision. Returns True when the object
+        is migrated. Every call site of the filters uses this, so the three object kinds
+        cannot drift apart again.
+        """
+        selected, reason = self.is_object_selected(object_kind, object_name)
+        counters = self.object_filter_counters.setdefault(
+            object_kind, {'selected': 0, 'skipped': 0})
+        if selected:
+            counters['selected'] += 1
+        else:
+            counters['skipped'] += 1
+            self.print_log_message('INFO', f"{caller}: {object_kind} {object_name} is not migrated - {reason}.")
+        return selected
+
+    def log_object_selection_summary(self, object_kind, caller):
+        """One line per object kind saying how many were left out, and by which option."""
+        counters = self.object_filter_counters.get(object_kind)
+        if not counters:
+            return
+        include_option, exclude_option = self.OBJECT_FILTER_KEYS[object_kind]
+        total = counters['selected'] + counters['skipped']
+        if counters['skipped']:
+            self.print_log_message('INFO',
+                f"{caller}: {counters['selected']} of {total} {object_kind}s selected for migration, "
+                f"{counters['skipped']} left out by {include_option} / {exclude_option} "
+                f"(pattern_syntax: {self.get_pattern_syntax()}).")
+        else:
+            self.print_log_message('INFO',
+                f"{caller}: all {total} {object_kind}s selected for migration.")
+
+    def validate_object_filters(self):
+        """
+        Compile every filter pattern at startup, and report a pattern which looks as if it
+        were written in a different syntax than the configured one.
+
+        A pattern in the wrong syntax is not an error - it is valid in its own right and
+        simply matches nothing, which is why it has to be reported rather than caught.
+        """
+        syntax = self.get_pattern_syntax()
+        for include_option, exclude_option in self.OBJECT_FILTER_KEYS.values():
+            for option_name in (include_option, exclude_option):
+                for pattern in self.get_object_filter_patterns(option_name):
+                    ## raises ValueError with the option and the pattern named
+                    self.compile_object_pattern(pattern, option_name)
+                    advice = self.pattern_syntax_advice(pattern, syntax)
+                    if advice:
+                        self.print_log_message('WARNING',
+                            f"config_parser: validate_object_filters: {option_name}: '{pattern}' {advice} "
+                            f"The patterns are read as '{syntax}' - set the top level 'pattern_syntax' to change that.")
+
+    @staticmethod
+    def pattern_syntax_advice(pattern, syntax):
+        """
+        A note when a pattern carries the marks of another syntax, or None. Written to be
+        quiet about patterns which are plain names or unambiguous.
+        """
+        text = str(pattern)
+        if text.strip().lower() in ConfigParser.MATCH_EVERYTHING_PATTERNS:
+            return None
+
+        looks_like_regex = bool(re.search(r'\.\*|\.\+|\\[dwsSWDb]|^\^|\$$|\[\^|\)\?|\)\+', text))
+        looks_like_glob = bool(re.search(r'(?:^|[\w$])\*', text)) or '?' in text
+        has_like_wildcard = '%' in text
+
+        if syntax == 'glob' and looks_like_regex:
+            return ("reads as a regular expression, but is applied as a glob - as a glob "
+                    "'.' is a literal dot and '.*' matches a dot followed by anything, so this "
+                    "pattern probably matches nothing.")
+        if syntax == 'regex' and looks_like_glob and not looks_like_regex:
+            return ("reads as a glob, but is applied as a regular expression - as a regular "
+                    "expression 'X*' means zero or more X, not 'starting with X'.")
+        if syntax == 'regex' and has_like_wildcard:
+            return "contains '%', which is a LIKE wildcard and has no special meaning in a regular expression."
+        if syntax == 'like' and (looks_like_glob or looks_like_regex):
+            return ("reads as a glob or a regular expression, but is applied as SQL LIKE, where "
+                    "only '%' and '_' are wildcards.")
+        return None
 
     def get_log_file(self):
         return self.args.log_file or MigratorConstants.get_default_log()
@@ -854,22 +1359,45 @@ class ConfigParser:
         return 'INFO'
 
     def print_log_message(self, message_level, message):
-        if message_level.upper() == 'ERROR':
-            self.logger.error(message)
+        """
+        Write one message, if the level the run was started with asks for it.
+
+        A message is written when its severity is at least the severity of that level.
+        The default level INFO therefore shows ERROR, WARNING and INFO, and each DEBUG
+        step adds more - which is how --log-level behaves in other tools, and what the
+        name of each level says.
+
+        Until 0.16.1 the levels were compared as positions in a list which had INFO first,
+        so the default level showed INFO alone and a WARNING was invisible unless the run
+        was started with --log-level=WARNING. Warnings report what a migration could not
+        convert, so hiding them by default hid exactly what had to be read.
+        """
+        level = str(message_level).strip().upper()
+        severity = MigratorConstants.get_message_level_severity(level)
+        if severity is None:
+            raise ValueError(
+                f"Invalid message_level: {message_level}. "
+                f"Must be one of {MigratorConstants.get_message_levels()}")
+
+        threshold = MigratorConstants.get_message_level_severity(self.get_log_level())
+        if threshold is None:
+            ## an unusable --log-level must not silence the run
+            threshold = MigratorConstants.get_message_level_severity('INFO')
+
+        if severity < threshold:
             return
-        current_log_level = self.get_log_level()
-        if message_level.upper() not in MigratorConstants.get_message_levels():
-            raise ValueError(f"Invalid message_level: {message_level}. Must be one of {MigratorConstants.get_message_levels()}")
-        # self.logger.debug(f"Log level: {current_log_level}, Message level: {message_level.upper()}, Message level index: {MigratorConstants.get_message_levels().index(message_level.upper())}, Current log level index: {MigratorConstants.get_message_levels().index(current_log_level.upper())}")
-        if MigratorConstants.get_message_levels().index(message_level.upper()) <= MigratorConstants.get_message_levels().index(current_log_level.upper()):
-            if message_level == 'DEBUG':
-                self.logger.debug(message)
-            elif message_level == 'DEBUG2':
-                self.logger.debug('DEBUG2: ' + message)
-            elif message_level == 'DEBUG3':
-                self.logger.debug('DEBUG3: ' + message)
-            else:
-                self.logger.info(message_level.upper() + ': ' + message)
+
+        if level == 'ERROR':
+            self.logger.error(message)
+        elif level == 'WARNING':
+            self.logger.warning(message)
+        elif level == 'INFO':
+            self.logger.info(message)
+        elif level == 'DEBUG':
+            self.logger.debug(message)
+        else:
+            ## DEBUG2 and DEBUG3 have no counterpart in the logging module
+            self.logger.debug(f'{level}: {message}')
 
     def get_indent(self):
         return (self.config.get('migrator') or {}).get('indent', MigratorConstants.get_default_indent())
@@ -1279,6 +1807,437 @@ class ConfigParser:
             return value
         return converted
 
+    ## the data types whose value is a date, a time or a timestamp, and which of the three
+    ## it is. Only a column of such a type gets a value rewritten from one of the formats
+    ## described below - a text column which happens to hold something looking like a date
+    ## is migrated exactly as it was exported.
+    TEMPORAL_DATA_TYPES = {
+        'DATE': 'DATE',
+        'TIME': 'TIME',
+        'TIMESTAMP': 'TIMESTAMP',
+        'TIMESTMP': 'TIMESTAMP',
+        'TIMESTAMPTZ': 'TIMESTAMP',
+        'DATETIME': 'TIMESTAMP',
+        'SMALLDATETIME': 'TIMESTAMP',
+    }
+
+    ## the order in which the three parts of a date can be written
+    DATE_ORDERS = ('MDY', 'DMY', 'YMD')
+
+    DATE_ORDER_DESCRIPTIONS = {
+        'MDY': 'MDY (month/day/year, Db2 *MDY and *USA)',
+        'DMY': 'DMY (day/month/year, Db2 *DMY and *EUR)',
+        'YMD': 'YMD (year/month/day, Db2 *YMD, *ISO and *JIS)',
+    }
+
+    ## the names Db2 uses for its date formats and the order behind each of them - the
+    ## value of data_export.date_format may be written in either of the two ways, with or
+    ## without the leading '*' of the CL command
+    DATE_FORMAT_ALIASES = {
+        'MDY': 'MDY', 'USA': 'MDY',
+        'DMY': 'DMY', 'EUR': 'DMY',
+        'YMD': 'YMD', 'ISO': 'YMD', 'JIS': 'YMD',
+    }
+
+    ## a two digit year is expanded the way Db2 for i does it - 40 to 99 is 1940 to 1999,
+    ## 00 to 39 is 2000 to 2039
+    TWO_DIGIT_YEAR_PIVOT = 40
+
+    ## a date and the time behind it, as Db2 writes them: the parts of the date are held
+    ## together by one separator (DATSEP - '/', '.', ',' or '-') or written without any,
+    ## the date and the time are separated by the '-' of the Db2 timestamp (or by a space
+    ## or the 'T' of the ISO notation), and the parts of the time by TIMSEP
+    TIMESTAMP_VALUE_PATTERN = re.compile(
+        r'^(?P<date>\d{1,4}(?:[/.,-]\d{1,4}){1,2}|\d{8}|\d{6})'
+        r'(?:[-T ](?P<time>\d{1,2}[.:,]\d{2}(?:[.:,]\d{2})?(?:\.\d+)?(?:\s*[AaPp]\.?[Mm]\.?)?'
+        r'|\d{6}(?:\.\d+)?))?$')
+
+    ## the date alone, with its parts held together by one and the same separator
+    SEPARATED_DATE_PATTERN = re.compile(
+        r'^(?P<first>\d{1,4})(?P<separator>[/.,-])(?P<second>\d{1,3})'
+        r'(?:(?P=separator)(?P<third>\d{1,4}))?$')
+
+    ## the time alone. PostgreSQL reads the colon only, so '06.00.00' of the Db2 *ISO and
+    ## *EUR formats is refused with 'invalid input syntax for type time'
+    TIME_VALUE_PATTERN = re.compile(
+        r'^(?P<hour>\d{1,2})(?P<separator>[.:,])(?P<minute>\d{2})'
+        r'(?:(?P=separator)(?P<second>\d{2}))?(?:\.(?P<fraction>\d+))?'
+        r'(?:\s*(?P<meridiem>[AaPp])\.?[Mm]\.?)?$')
+
+    COMPACT_TIME_PATTERN = re.compile(
+        r'^(?P<hour>\d{2})(?P<minute>\d{2})(?P<second>\d{2})(?:\.(?P<fraction>\d+))?$')
+
+    ## the zone of a TIMESTAMP WITH TIME ZONE, which exists on Db2 for z/OS and is written
+    ## behind the value ('2022-01-11-12.00.00.000000 +01:00')
+    ZONE_SUFFIX_PATTERN = re.compile(r'^(?P<value>.+?)\s*(?P<zone>[+-]\d{2}:?\d{2})$')
+
+    ## the shape of the one value which is rewritten in a column whose type is not known -
+    ## tested first, so that the columns of a file are not taken apart field by field
+    TIMESTAMP_HINT_PATTERN = re.compile(r'^\d{4}-\d{2}-\d{2}[-T ]\d')
+
+    def temporal_column_kind(self, data_type):
+        """
+        'DATE', 'TIME' or 'TIMESTAMP' for a column holding such a value, None for every
+        other column. A type written with its length or with a suffix - 'TIMESTAMP(6)',
+        'TIMESTAMP(6) WITH TIME ZONE' of Db2 for z/OS - is recognized by its first word.
+        """
+        base_type = (data_type or '').upper().split('(')[0].strip()
+        kind = self.TEMPORAL_DATA_TYPES.get(base_type)
+        if kind is None and base_type:
+            ## a type written without its length but with a suffix, as Db2 for z/OS writes
+            ## 'TIMESTAMP WITH TIME ZONE'
+            kind = self.TEMPORAL_DATA_TYPES.get(base_type.split()[0])
+        return kind
+
+    def date_format_to_order(self, date_format):
+        """
+        The order of the parts of a date behind the value of data_export.date_format.
+        Returns None when nothing was configured, and raises when the value is not one of
+        the names Db2 uses - a name nobody recognizes must not be read as 'no format'.
+        """
+        if date_format is None or str(date_format).strip() == '':
+            return None
+        name = str(date_format).strip().upper().lstrip('*')
+        if name not in self.DATE_FORMAT_ALIASES:
+            raise ValueError(
+                f"data_export.date_format: '{date_format}' is not a known date format - "
+                f"use one of {', '.join(sorted(self.DATE_FORMAT_ALIASES.keys()))} "
+                f"(the Db2 names *MDY, *DMY, *YMD, *USA, *EUR, *ISO and *JIS are accepted as well).")
+        return self.DATE_FORMAT_ALIASES[name]
+
+    def _expand_year(self, year_text):
+        """A four digit year as it is, a two digit one through the window Db2 for i uses."""
+        if len(year_text) == 4:
+            return int(year_text)
+        if len(year_text) <= 2:
+            year = int(year_text)
+            return 1900 + year if year >= self.TWO_DIGIT_YEAR_PIVOT else 2000 + year
+        return None
+
+    def _date_value_shape(self, date_text):
+        """
+        How the date is written, without deciding yet what its parts mean:
+        ('parts', (first, second, third)) for a date written with a separator,
+        ('julian', (year, day_of_year)) for the *JUL format of Db2 for i (22/123),
+        ('compact', digits) for a date written without any separator.
+        None when the text is not a date at all.
+        """
+        match = self.SEPARATED_DATE_PATTERN.match(date_text)
+        if match:
+            third = match.group('third')
+            if third is None:
+                ## two parts only - a year and the day inside it, the *JUL format
+                if len(match.group('second')) == 3:
+                    return ('julian', (match.group('first'), match.group('second')))
+                return None
+            return ('parts', (match.group('first'), match.group('second'), third))
+        if re.fullmatch(r'\d{8}|\d{6}', date_text):
+            return ('compact', date_text)
+        return None
+
+    def _date_from_shape(self, shape, order):
+        """
+        The date the value stands for when its parts are read in the given order, as
+        'YYYY-MM-DD'. None when they cannot be read that way - '01/13/22' is not a date
+        with 13 as its month, which is what tells DMY and MDY apart.
+        """
+        shape_name, payload = shape
+        if shape_name == 'julian':
+            ## a Julian date carries the year first and the day of the year behind it -
+            ## the order of a three part date does not apply to it
+            year = self._expand_year(payload[0])
+            day_of_year = int(payload[1])
+            if year is None or day_of_year < 1 or day_of_year > 366:
+                return None
+            try:
+                converted = date(year, 1, 1) + timedelta(days=day_of_year - 1)
+            except ValueError:
+                return None
+            if converted.year != year:
+                return None
+            return f"{converted.year:04d}-{converted.month:02d}-{converted.day:02d}"
+
+        if shape_name == 'compact':
+            digits = payload
+            if order == 'YMD':
+                parts = (digits[:4], digits[4:6], digits[6:]) if len(digits) == 8 else (digits[:2], digits[2:4], digits[4:])
+            else:
+                parts = (digits[:2], digits[2:4], digits[4:])
+        else:
+            parts = payload
+
+        first, second, third = parts
+        if order == 'YMD':
+            year_text, month_text, day_text = first, second, third
+        elif order == 'MDY':
+            month_text, day_text, year_text = first, second, third
+        elif order == 'DMY':
+            day_text, month_text, year_text = first, second, third
+        else:
+            return None
+
+        if len(month_text) > 2 or len(day_text) > 2:
+            return None
+        year = self._expand_year(year_text)
+        if year is None:
+            return None
+        try:
+            converted = date(year, int(month_text), int(day_text))
+        except ValueError:
+            return None
+        return f"{converted.year:04d}-{converted.month:02d}-{converted.day:02d}"
+
+    def _parse_temporal_date(self, date_text, date_order=None):
+        """
+        Returns (date, status) with status 'ok', 'ambiguous' or 'unparsable'.
+
+        Without a known order every order is tried: a date which all of them write the same
+        way ('2022-01-04', a Julian date) needs no decision, one which they write
+        differently ('01/04/22' - the 4th of January, the 1st of April or the 22nd of
+        April) is reported as ambiguous, so that the caller works the order out from the
+        whole file instead of guessing here.
+        """
+        shape = self._date_value_shape(date_text)
+        if shape is None:
+            return None, 'unparsable'
+        if date_order is not None:
+            converted = self._date_from_shape(shape, date_order)
+            return (converted, 'ok') if converted is not None else (None, 'unparsable')
+
+        readings = {}
+        for order in self.DATE_ORDERS:
+            converted = self._date_from_shape(shape, order)
+            if converted is not None:
+                readings[order] = converted
+        if not readings:
+            return None, 'unparsable'
+        if len(set(readings.values())) == 1:
+            return next(iter(readings.values())), 'ok'
+        return None, 'ambiguous'
+
+    def _parse_temporal_time(self, time_text):
+        """'06.00.00', '060000' or '06:00 AM' as PostgreSQL reads them - '06:00:00'."""
+        match = self.TIME_VALUE_PATTERN.match(time_text) or self.COMPACT_TIME_PATTERN.match(time_text)
+        if not match:
+            return None
+        groups = match.groupdict()
+        hour = int(groups['hour'])
+        minute = int(groups['minute'])
+        second = int(groups['second']) if groups.get('second') else 0
+        meridiem = groups.get('meridiem')
+        if meridiem:
+            ## the *USA format of Db2 - 12 AM is midnight, 12 PM is noon
+            if hour < 1 or hour > 12:
+                return None
+            hour = hour % 12
+            if meridiem.upper() == 'P':
+                hour += 12
+        if hour > 24 or minute > 59 or second > 59:
+            return None
+        if hour == 24 and (minute or second):
+            return None
+        fraction = groups.get('fraction')
+        return f"{hour:02d}:{minute:02d}:{second:02d}" + (f".{fraction}" if fraction else '')
+
+    def _split_temporal_value(self, text):
+        """
+        Takes a value apart into its date, its time and its zone. Returns None when it is
+        not written as a date with an optional time behind it.
+        """
+        zone = None
+        remainder = text
+        zone_match = self.ZONE_SUFFIX_PATTERN.match(text)
+        if zone_match:
+            remainder = zone_match.group('value')
+            zone = zone_match.group('zone')
+
+        match = self.TIMESTAMP_VALUE_PATTERN.match(remainder)
+        if match is None and zone is not None:
+            ## what looked like a zone belongs to the value itself
+            zone = None
+            match = self.TIMESTAMP_VALUE_PATTERN.match(text)
+        if match is None:
+            return None
+        if zone is not None and len(zone) == 5:
+            zone = f"{zone[:3]}:{zone[3:]}"
+        return match.group('date'), match.group('time'), zone
+
+    def convert_temporal_value(self, value, kind=None, date_order=None):
+        """
+        Writes a date, a time or a timestamp of an export the way PostgreSQL reads it.
+
+        Db2 writes a timestamp as 'YYYY-MM-DD-HH.MM.SS.NNNNNN' and, on z/OS, a TIMESTAMP
+        WITH TIME ZONE with the offset behind it; a date and a time follow the format the
+        export was made with - DATFMT/DATSEP and TIMFMT/TIMSEP of CPYTOIMPF on Db2 for i -
+        so a date can arrive as '01/04/22' and a time as '06.00.00'. PostgreSQL refuses all
+        of them ('invalid input syntax for type timestamp: "01/04/22-06.00.00"').
+
+        'kind' is what the column holds ('DATE', 'TIME', 'TIMESTAMP'), or None when the
+        type of the column is not known - only a timestamp written with the ISO date Db2
+        always uses for a four digit year is rewritten then, because anything else could be
+        the text the column really holds.
+
+        Returns (value, status), status being 'converted', 'unchanged' (nothing to do),
+        'ambiguous' (the order of the parts of the date has to be decided first) or
+        'unparsable'. A value which cannot be read is returned as it was - the target
+        reports it, which is better than a value silently invented here.
+        """
+        if value is None:
+            return value, 'unchanged'
+        text = value.strip()
+        if not text:
+            return value, 'unchanged'
+
+        if kind is None and not self.TIMESTAMP_HINT_PATTERN.match(text):
+            ## the type of the column is not known and the value is not the timestamp Db2
+            ## writes with an ISO date - it stays what it is
+            return value, 'unchanged'
+
+        if kind == 'TIME':
+            converted = self._parse_temporal_time(text)
+            if converted is None:
+                return value, 'unparsable'
+            return (converted, 'unchanged' if converted == value else 'converted')
+
+        split_value = self._split_temporal_value(text)
+        if split_value is None:
+            return value, 'unchanged' if kind is None else 'unparsable'
+        date_text, time_text, zone = split_value
+
+        if kind is None:
+            ## the type of the column is not known - only the unmistakable Db2 timestamp
+            if not time_text or not re.fullmatch(r'\d{4}-\d{2}-\d{2}', date_text):
+                return value, 'unchanged'
+        if kind == 'DATE' and (time_text or zone):
+            return value, 'unparsable'
+        if zone and not time_text:
+            return value, 'unparsable'
+
+        converted_date, status = self._parse_temporal_date(date_text, date_order)
+        if status != 'ok':
+            return value, status
+
+        converted_time = None
+        if time_text:
+            converted_time = self._parse_temporal_time(time_text)
+            if converted_time is None:
+                return value, 'unparsable'
+
+        converted = converted_date
+        if converted_time:
+            converted += f" {converted_time}"
+        if zone:
+            converted += zone
+        return (converted, 'unchanged' if converted == value else 'converted')
+
+    def date_orders_of_value(self, value, kind):
+        """
+        The orders in which the date of this value can be read, for the detection below.
+        None when the value is not a date - such a value says nothing about the format and
+        is left to the target, which reports it.
+        """
+        if value is None:
+            return None
+        text = value.strip()
+        if not text:
+            return None
+        split_value = self._split_temporal_value(text)
+        if split_value is None:
+            return None
+        date_text, time_text, zone = split_value
+        if kind == 'DATE' and (time_text or zone):
+            return None
+        shape = self._date_value_shape(date_text)
+        if shape is None:
+            return None
+        orders = {order for order in self.DATE_ORDERS if self._date_from_shape(shape, order) is not None}
+        return orders or None
+
+    def detect_csv_date_orders(self, input_csv_data_file, character_set, csv_delimiter,
+                               reader_quoting, column_kinds, column_names,
+                               source_table_name, skip_header=False):
+        """
+        Works out in which order the parts of the dates of a CSV export are written.
+
+        '01/04/22' is the 4th of January in one export and the 1st of April in the next -
+        Db2 for i writes a date the way the DATFMT of the export said, and the file does
+        not record which one that was. The file is therefore read once and every order
+        which cannot write one of the values of a column is dropped: '01/13/22' can only be
+        MDY, '13/01/22' only DMY, '2022-01-04' only YMD. A column for which more than one
+        order survives is reported instead of guessed - a wrong guess does not fail, it
+        migrates a different date without a single error.
+
+        Returns {column index: order} for the columns whose dates need the decision.
+        """
+        candidates = {}
+        samples = {}
+        examined = {}
+        deciding = {}
+        rows_read = 0
+        processing_start_time = datetime.now()
+
+        with open(input_csv_data_file, 'r', encoding=character_set, errors='replace', newline='') as infile:
+            if reader_quoting is None:
+                reader = csv.reader(infile, delimiter=csv_delimiter)
+            else:
+                reader = csv.reader(infile, delimiter=csv_delimiter, quoting=reader_quoting)
+            for row in reader:
+                rows_read += 1
+                if skip_header and rows_read == 1:
+                    continue
+                ## a row of another width cannot be assigned to the columns of the table
+                if len(row) != len(column_kinds):
+                    continue
+                for column_index, kind in enumerate(column_kinds):
+                    if kind is None or kind == 'TIME':
+                        continue
+                    orders = self.date_orders_of_value(row[column_index], kind)
+                    if orders is None:
+                        continue
+                    field = row[column_index].strip()
+                    remaining = candidates.get(column_index, set(self.DATE_ORDERS))
+                    narrowed = remaining & orders
+                    examined[column_index] = examined.get(column_index, 0) + 1
+                    column_samples = samples.setdefault(column_index, [])
+                    if len(column_samples) < 3 and field not in column_samples:
+                        column_samples.append(field)
+                    if narrowed != remaining and len(narrowed) == 1:
+                        deciding[column_index] = field
+                    candidates[column_index] = narrowed
+
+        resolved = {}
+        for column_index, remaining in candidates.items():
+            column_name = column_names[column_index] if column_index < len(column_names) else f"#{column_index + 1}"
+            sample_values = ', '.join(samples.get(column_index, []))
+            if len(remaining) == 1:
+                order = next(iter(remaining))
+                resolved[column_index] = order
+                decided_by = f", e.g. {deciding[column_index]}" if column_index in deciding else ''
+                self.print_log_message('INFO',
+                    f"config_parser: detect_csv_date_orders: Table {source_table_name}: the dates of column {column_name} "
+                    f"are written as {self.DATE_ORDER_DESCRIPTIONS[order]} - decided by {examined.get(column_index, 0)} "
+                    f"value(s) of the file{decided_by}.")
+            elif not remaining:
+                raise ValueError(
+                    f"Table {source_table_name}: the dates of column {column_name} of file {input_csv_data_file} "
+                    f"are not all written in one and the same order - no order of the parts fits every value "
+                    f"(values seen: {sample_values}). State the format the export used with "
+                    f"data_export.date_format, or correct the file.")
+            else:
+                raise ValueError(
+                    f"Table {source_table_name}: the dates of column {column_name} of file {input_csv_data_file} "
+                    f"can be read as {' or '.join(self.DATE_ORDER_DESCRIPTIONS[order] for order in sorted(remaining))} "
+                    f"and every value of the column fits each of them (values seen: {sample_values}). The file does "
+                    f"not say which format the export used, and reading them the wrong way migrates different dates "
+                    f"without any error - state the format with data_export.date_format, globally for the source or "
+                    f"in table_settings for this table alone.")
+
+        self.print_log_message('DEBUG',
+            f"config_parser: detect_csv_date_orders: Table {source_table_name}: {rows_read} row(s) of "
+            f"{input_csv_data_file} read for the date format of {len(candidates)} column(s) - "
+            f"processing time: {datetime.now() - processing_start_time}")
+        return resolved
+
     def convert_csv_to_utf8(self, data_source_settings, source_columns=None, target_columns=None):
         part_name = 'convert_csv_to_utf8 start'
         self.print_log_message('DEBUG3', f"config_parser: convert_csv_to_utf8: ({part_name}): Starting conversion of CSV file '{data_source_settings.get('file_name')}' to UTF-8.")
@@ -1299,6 +2258,9 @@ class ConfigParser:
 
             character_set = data_source_settings.get('format_options', {}).get('character_set', 'UTF-8')
             csv_delimiter = data_source_settings.get('format_options', {}).get('delimiter', ',')
+            csv_header = data_source_settings.get('format_options', {}).get('header', False)
+            configured_date_order = self.date_format_to_order(
+                data_source_settings.get('format_options', {}).get('date_format', None))
             null_symbol = data_source_settings.get('null_symbol', '\\N')
 
             processing_start_time = datetime.now()
@@ -1330,27 +2292,41 @@ class ConfigParser:
                     except ValueError:
                         scale = None
 
-                    expected_types.append({'type': dtype, 'scale': scale})
+                    column_name = col.get('column_name') or col.get('source_column_name') or ''
+                    expected_types.append({'type': dtype, 'scale': scale, 'name': column_name})
             else:
                 expected_types = []
 
-            # DB2 timestamp format: YYYY-MM-DD-HH.MM.SS.mmmmmm
-            ts_pattern = re.compile(r'^(\d{4}-\d{2}-\d{2})-(\d{2})\.(\d{2})\.(\d{2})(?:\.(\d+))?$')
+            ## the columns holding a date, a time or a timestamp - only their values are
+            ## rewritten from the format of the export, plus the unmistakable Db2 timestamp
+            ## in every other column (see convert_temporal_value)
+            column_kinds = [self.temporal_column_kind(column['type']) for column in expected_types]
+            column_names = [column['name'] for column in expected_types]
+            ## the order of the parts of a date is worked out from the whole file, but only
+            ## when a value which really needs the decision shows up - a file written with
+            ## ISO dates does not pay for the extra pass
+            column_date_orders = {}
+            date_orders_detected = False
+            converted_temporal_values = 0
+            unreadable_temporal_values = {}
+            row_width_reported = False
+
+            ## An unquoted empty field of a CSV file is a NULL, a quoted empty one ("")
+            ## is an empty string. The default reader returns '' for both, so a NULL of
+            ## the source arrived in the target as an empty string and every column
+            ## which is not text refused it: 'invalid input syntax for type integer: ""'.
+            ## QUOTE_NOTNULL keeps the two apart - it returns None for the unquoted one.
+            reader_quoting = getattr(csv, 'QUOTE_NOTNULL', None)
+            if reader_quoting is None:
+                ## Python before 3.12 cannot tell them apart - an empty field is read as
+                ## an empty string and stays one
+                self.print_log_message('WARNING',
+                    "config_parser: convert_csv_to_utf8: This Python cannot distinguish an unquoted empty CSV field from a quoted one (csv.QUOTE_NOTNULL needs Python 3.12). An empty field is migrated as an empty string, which a column that is not text refuses - Python 3.12 or newer is needed for such a file.")
 
             with open(input_csv_data_file, 'r', encoding=character_set, errors='replace', newline='') as infile, \
                  open(output_csv_data_file, 'w', encoding='utf-8', newline='') as outfile:
 
-                ## An unquoted empty field of a CSV file is a NULL, a quoted empty one ("")
-                ## is an empty string. The default reader returns '' for both, so a NULL of
-                ## the source arrived in the target as an empty string and every column
-                ## which is not text refused it: 'invalid input syntax for type integer: ""'.
-                ## QUOTE_NOTNULL keeps the two apart - it returns None for the unquoted one.
-                reader_quoting = getattr(csv, 'QUOTE_NOTNULL', None)
                 if reader_quoting is None:
-                    ## Python before 3.12 cannot tell them apart - an empty field is read as
-                    ## an empty string and stays one
-                    self.print_log_message('WARNING',
-                        "config_parser: convert_csv_to_utf8: This Python cannot distinguish an unquoted empty CSV field from a quoted one (csv.QUOTE_NOTNULL needs Python 3.12). An empty field is migrated as an empty string, which a column that is not text refuses - Python 3.12 or newer is needed for such a file.")
                     reader = csv.reader(infile, delimiter=csv_delimiter)
                 else:
                     reader = csv.reader(infile, delimiter=csv_delimiter, quoting=reader_quoting)
@@ -1403,6 +2379,17 @@ class ConfigParser:
                         self.print_log_message('DEBUG3', f"config_parser: convert_csv_to_utf8: Table {source_table_name}: Expected types: {types_str}")
                         self.print_log_message('DEBUG3', f"config_parser: convert_csv_to_utf8: Table {source_table_name}: First row fields: {row}")
 
+                    ## the type of a column can only be assigned to a field when the row
+                    ## has exactly as many fields as the table has columns
+                    row_types_aligned = bool(expected_types) and len(row) == len(expected_types)
+                    if expected_types and not row_types_aligned and not row_width_reported:
+                        row_width_reported = True
+                        self.print_log_message('WARNING',
+                            f"config_parser: convert_csv_to_utf8: Table {source_table_name}: row {counter+1} of "
+                            f"{input_csv_data_file} has {len(row)} field(s) while the table has {len(expected_types)} "
+                            f"column(s) - the values of such a row are migrated without knowing the type of their "
+                            f"column, so a date or a time written in a format of the source is not recognized.")
+
                     for column_index, field in enumerate(row):
                         ## None is the unquoted empty field, which stands for NULL, and
                         ## '(null)' is what some exporters of the source write for it
@@ -1417,24 +2404,60 @@ class ConfigParser:
                                         self.print_log_message('DEBUG3', f"config_parser: convert_csv_to_utf8: Table {source_table_name}: Row {counter+1}, column {column_index+1}: number '{field}' written with a decimal comma converted to '{converted_number}'")
                                     processed_row.append(converted_number)
                                     continue
-                            match = ts_pattern.match(field)
-                            if match:
-                                date_part = match.group(1)
-                                hour = match.group(2)
-                                minute = match.group(3)
-                                second = match.group(4)
-                                frac = match.group(5)
-                                if frac:
-                                    processed_row.append(f"{date_part} {hour}:{minute}:{second}.{frac}")
-                                else:
-                                    processed_row.append(f"{date_part} {hour}:{minute}:{second}")
+                            column_kind = column_kinds[column_index] if row_types_aligned else None
+                            date_order = column_date_orders.get(column_index, configured_date_order)
+                            converted_value, status = self.convert_temporal_value(field, column_kind, date_order)
+
+                            if status == 'ambiguous' and not date_orders_detected:
+                                ## the value is a date whose parts can be read in more than
+                                ## one order - which one the export used is decided from all
+                                ## the values of the file, once, not from this one value
+                                self.print_log_message('INFO',
+                                    f"config_parser: convert_csv_to_utf8: Table {source_table_name}: value '{field.strip()}' "
+                                    f"of column {column_names[column_index] or column_index+1} is a date whose format the "
+                                    f"file does not state - reading {input_csv_data_file} once to work it out.")
+                                column_date_orders = self.detect_csv_date_orders(
+                                    input_csv_data_file, character_set, csv_delimiter, reader_quoting,
+                                    column_kinds, column_names, source_table_name, csv_header)
+                                date_orders_detected = True
+                                date_order = column_date_orders.get(column_index, configured_date_order)
+                                converted_value, status = self.convert_temporal_value(field, column_kind, date_order)
+
+                            if status == 'converted':
+                                if converted_temporal_values < 5:
+                                    self.print_log_message('DEBUG3', f"config_parser: convert_csv_to_utf8: Table {source_table_name}: Row {counter+1}, column {column_index+1}: {column_kind or 'timestamp'} value '{field}' converted to '{converted_value}'")
+                                converted_temporal_values += 1
+                                processed_row.append(converted_value)
                             else:
+                                ## a value which cannot be read is migrated as it was
+                                ## exported - the target reports it, and nothing is invented
+                                if status == 'unparsable' and field.strip():
+                                    unreadable = unreadable_temporal_values.setdefault(column_index, [0, field.strip()])
+                                    unreadable[0] += 1
                                 processed_row.append(field)
 
                     writer.writerow(processed_row)
                     counter += 1
 
             self.print_log_message('INFO', f"config_parser: convert_csv_to_utf8: Processed {counter} lines from {input_csv_data_file} and wrote to {output_csv_data_file} - source file size: {source_file_size} - processing time: {datetime.now() - processing_start_time}")
+            if converted_temporal_values:
+                self.print_log_message('INFO',
+                    f"config_parser: convert_csv_to_utf8: Table {source_table_name}: {converted_temporal_values} "
+                    f"date, time and timestamp value(s) of {input_csv_data_file} were rewritten into the notation "
+                    f"PostgreSQL reads.")
+            for column_index, (unreadable_count, unreadable_sample) in unreadable_temporal_values.items():
+                ## such a value is migrated as it stands and the target refuses it - said
+                ## here as well, because the reason is usually the date format: a column
+                ## whose values were read in the order stated by data_export.date_format,
+                ## while the export wrote them in another one
+                date_order = column_date_orders.get(column_index, configured_date_order)
+                read_as = f" The dates of the column are read as {self.DATE_ORDER_DESCRIPTIONS[date_order]}." if date_order else ''
+                self.print_log_message('WARNING',
+                    f"config_parser: convert_csv_to_utf8: Table {source_table_name}: {unreadable_count} value(s) of "
+                    f"column {column_names[column_index] or column_index+1}, which holds a "
+                    f"{column_kinds[column_index]}, are not written in a date or time format this migrator knows "
+                    f"(e.g. '{unreadable_sample}') - they are migrated as they were exported and PostgreSQL will "
+                    f"refuse them.{read_as}")
 
             data_source_settings['converted_file_name'] = output_csv_data_file
 

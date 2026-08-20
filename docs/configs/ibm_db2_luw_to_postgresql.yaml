@@ -89,12 +89,12 @@ migration:
   validate_objects: retry
 
 include_tables: all
-exclude_tables:               # >>> ADJUST
+exclude_tables: []            # >>> ADJUST
 include_views: all
 exclude_views:
   - "SYS*"
 include_funcprocs: all
-exclude_funcprocs:
+exclude_funcprocs: []
 
 data_types_substitution:
   # - ["", "", "DECFLOAT", "NUMERIC", '']

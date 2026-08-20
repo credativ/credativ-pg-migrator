@@ -107,11 +107,11 @@ migration:
   validate_objects: retry
 
 include_tables: all
-exclude_tables:               # >>> ADJUST
+exclude_tables: []            # >>> ADJUST
 include_views: all
-exclude_views:
+exclude_views: []
 include_funcprocs: all
-exclude_funcprocs:
+exclude_funcprocs: []
 
 # A CPYTOIMPF delivery is rarely homogeneous - one file has a header, another
 # is still in EBCDIC. Override per table here.

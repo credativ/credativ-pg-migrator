@@ -179,12 +179,35 @@ migration:
 #   - ["remotedb:dbo.customers", "public.customers"]
 #   - ["OTHERSRV.otherdb.dbo.", "public."]
 
+# ---------------------------------------------------------------------------
+# CHOOSING WHICH OBJECTS ARE MIGRATED
+# The six options below all behave the same way:
+#   - "all", an empty list, or leaving the key out selects everything,
+#   - exclude_* is applied after include_* and wins over it,
+#   - a pattern must match the WHOLE name, and matching ignores case.
+#
+# pattern_syntax says how the patterns are written. It applies to all six.
+#   glob  (default) - shell wildcards:  SYS*   TMP_?   [ab]*
+#   regex           - Python regular expressions:  BIN\$.*   ^tmp_.+$
+#   like            - SQL LIKE:  SYS%   TMP__   (\ escapes % and _)
+# The same text can mean different things in different syntaxes - "log_.*"
+# excludes log_2024 as a regex, and nothing at all as a glob - so a pattern
+# which looks as if it were written in another syntax is reported at startup.
+# ---------------------------------------------------------------------------
+pattern_syntax: glob
+
 include_tables: all
-exclude_tables:
+exclude_tables: []
 include_views: all
-exclude_views:
+exclude_views: []
 include_funcprocs: all
-exclude_funcprocs:
+exclude_funcprocs: []
+
+# The same selection written as regular expressions instead:
+# pattern_syntax: regex
+# exclude_tables:
+#   - "BIN\\$.*"          # Oracle recycle bin
+#   - "tmp_.+"
 
 # Per-table overrides. Anything you set globally in "migration" can be
 # overridden here for the tables matching table_name (a name or a regex).

@@ -106,11 +106,11 @@ migration:
     - unaccent
 
 include_tables: all           # "all" or a list of names / regular expressions
-exclude_tables:               # >>> ADJUST - e.g. - "audit_.*"
+exclude_tables: []            # >>> ADJUST - e.g. - "audit_.*"
 include_views: all
-exclude_views:
+exclude_views: []
 include_funcprocs: all
-exclude_funcprocs:
+exclude_funcprocs: []
 
 # Optional independent verification of the migrated data. Remove the block if
 # you do not want it - it reads both databases again and costs time.

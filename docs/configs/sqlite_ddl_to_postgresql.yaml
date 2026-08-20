@@ -106,11 +106,11 @@ migration:
 
 include_tables: all
 exclude_tables:
-  - "sqlite_.*"                 # >>> ADJUST - see sqlite_to_postgresql.yaml
+  - "sqlite_*"                 # >>> ADJUST - see sqlite_to_postgresql.yaml
 include_funcprocs: all
-exclude_funcprocs:
+exclude_funcprocs: []
 include_views: all
-exclude_views:
+exclude_views: []
 
 table_settings:
   # - table_name: "big_events"

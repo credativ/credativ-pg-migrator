@@ -1117,13 +1117,19 @@ class PostgreSQLConnector(DatabaseConnector):
                     # must be used as it is - quoting it again would break embedded quotes
                     default_is_string_literal = re.fullmatch(r"'(?:[^']|'')*'", column_default) is not None
                     source_db_type = self.config_parser.get_source_db_type()
+                    # The default has to match the type the column is really created with:
+                    # a column altered above (NUMERIC(1,0) mapped to BOOLEAN by
+                    # migration.map_numeric_1_to_boolean, an identity widened to BIGINT)
+                    # would otherwise get the default of the type it no longer has -
+                    # 'column ... is of type boolean but default expression is of type integer'.
+                    effective_data_type = altered_data_type.upper() if altered_data_type else column_data_type
                     if default_is_expression or default_is_string_literal:
                         create_column_sql += f""" DEFAULT {column_default}"""
-                    elif 'CHAR' in column_data_type or column_data_type in ('TEXT'):
+                    elif 'CHAR' in effective_data_type or effective_data_type in ('TEXT'):
                         # here we must quote the default value
                         escaped_default = column_default.replace("'", "''")
                         create_column_sql += f""" DEFAULT '{escaped_default}'"""
-                    elif column_data_type in ('BOOLEAN', 'BOOL') or (source_db_type != 'postgresql' and column_data_type == 'BIT'):
+                    elif effective_data_type in ('BOOLEAN', 'BOOL') or (source_db_type != 'postgresql' and effective_data_type == 'BIT'):
                         clean_default = column_default.lower().strip()
                         if clean_default in ('0', '(0)', 'false', "b'0'"):
                             create_column_sql += """ DEFAULT FALSE"""
@@ -1134,7 +1140,7 @@ class PostgreSQLConnector(DatabaseConnector):
                                 create_column_sql += f""" DEFAULT {column_default}::BOOLEAN"""
                             else:
                                 create_column_sql += f""" DEFAULT {column_default}"""
-                    elif column_data_type in ('BYTEA'):
+                    elif effective_data_type in ('BYTEA'):
                         create_column_sql += f""" DEFAULT '{column_default}'::BYTEA"""
                     else:
                         create_column_sql += f" DEFAULT {column_default}"
@@ -1452,10 +1458,12 @@ class PostgreSQLConnector(DatabaseConnector):
                 expression = self.convert_expression_identifiers(col, target_columns)
                 expression = expression.replace(r"\'", "'").replace(r'\"', '"')
                 if self.config_parser.get_source_db_type() != 'postgresql':
-                    # Remove charset introducers of MySQL / MariaDB (_utf8'text')
-                    # In PostgreSQL such a pattern is part of a quoted identifier
-                    # (e.g. "natural_numeric") and must be kept.
-                    expression = re.sub(r'(?i)_[a-zA-Z0-9_]+(\'|")', r'\1', expression)
+                    # Remove the charset introducer of MySQL / MariaDB (_utf8'text'). It
+                    # introduces a string literal, so only a single quote can follow it,
+                    # and it never follows an identifier character or a double quote:
+                    # the tail of a quoted name ("unit_price", "natural_numeric") is not
+                    # an introducer and used to be cut away with the rest of the name.
+                    expression = re.sub(r'(?i)(?<![A-Za-z0-9_"])_[a-zA-Z0-9]+(\')', r'\1', expression)
                 expression = re.sub(r'(?i)\b(?:CHARACTER\s+SET|CHARSET)\s+[a-zA-Z0-9_]+', '', expression)
                 if self.config_parser.get_source_db_type() == 'postgresql':
                     # PostgreSQL collations are migrated with the schema - keep them in the
@@ -1974,10 +1982,12 @@ class PostgreSQLConnector(DatabaseConnector):
                     f'ALTER TABLE "{target_schema_name}"."{target_table_name}" ADD CONSTRAINT "{constraint_name}_tab_{target_table_name}" '
                     f'FOREIGN KEY ({constraint_columns}) REFERENCES "{target_schema_name}"."{referenced_table_name}" ({referenced_columns})'
                 )
-                if delete_rule == 'CASCADE':
-                    create_constraint_query += " ON DELETE CASCADE"
-                if update_rule == 'CASCADE':
-                    create_constraint_query += " ON UPDATE CASCADE"
+                delete_action = self.normalize_referential_action(delete_rule)
+                if delete_action:
+                    create_constraint_query += f" ON DELETE {delete_action}"
+                update_action = self.normalize_referential_action(update_rule)
+                if update_action:
+                    create_constraint_query += f" ON UPDATE {update_action}"
                 # A comment of the constraint is not part of ALTER TABLE ... ADD CONSTRAINT in
                 # PostgreSQL, it is set by the comments migration with COMMENT ON CONSTRAINT.
             elif constraint_type == 'CHECK':
@@ -1994,6 +2004,17 @@ class PostgreSQLConnector(DatabaseConnector):
         else:
             create_constraint_query = f"""ALTER TABLE "{target_schema_name}"."{target_table_name}" ADD CONSTRAINT "{constraint_name}" {constraint_sql}"""
         return create_constraint_query
+
+    ## NO ACTION is the PostgreSQL default and is left out of the generated SQL.
+    ## Anything not recognized is ignored the same way, so a source connector
+    ## reporting a rule in its own notation cannot produce invalid SQL.
+    SUPPORTED_REFERENTIAL_ACTIONS = ('CASCADE', 'SET NULL', 'SET DEFAULT', 'RESTRICT')
+
+    def normalize_referential_action(self, rule):
+        if not rule:
+            return ''
+        action = ' '.join(str(rule).upper().replace('_', ' ').split())
+        return action if action in self.SUPPORTED_REFERENTIAL_ACTIONS else ''
 
     def get_aliases(self, settings):
         return {}
@@ -3008,13 +3029,15 @@ class PostgreSQLConnector(DatabaseConnector):
             for row in cursor.fetchall():
                 sequence_details = self.get_sequence_details(table_schema, row[0])
 
-                # The sequence has to continue behind the data which was just loaded. The source
-                # database does not always know its next value (with DDL connectivity there is no
-                # source database at all), so it is derived from the migrated rows themselves.
-                set_sequence_sql = row[3] or (
-                    f"""SELECT setval('"{table_schema}"."{row[0]}"', """
-                    f"""COALESCE((SELECT MAX("{row[2]}") FROM "{table_schema}"."{table_name}"), 0) + 1, false);"""
-                )
+                # The sequence has to continue behind the data which was just loaded. Without a
+                # value from the source - with DDL connectivity there is no source database at
+                # all - it is derived from the migrated rows alone.
+                set_sequence_sql = row[3] or self.get_set_sequence_sql({
+                    'target_schema_name': table_schema,
+                    'target_table_name': table_name,
+                    'target_column_name': row[2],
+                    'target_sequence_name': row[0],
+                })
 
                 sequence_data[order_num] = {
                     'name': row[0],
@@ -3030,6 +3053,41 @@ class PostgreSQLConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"postgresql_connector: fetch_table_sequences: Error executing sequence query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             return {}
+
+    def get_set_sequence_sql(self, settings):
+        """
+        The statement which sets the sequence of a table so that it continues behind its data.
+
+        Two values can say where the sequence has to continue and they do not always agree:
+        the next value the source reported for its identity column, and the data which is
+        really in the target. The source was preferred, which set the sequence below the data
+        whenever the two came from different points in time - the source was reloaded, the
+        identity block of Sybase ASE was burnt back after a crash, the data arrived from an
+        older snapshot or from files - and the first INSERT of the application then failed with
+        a duplicate key. The greater of the two is used, so the sequence can never fall behind
+        the rows which are there; the gaps a source reserves above its data are kept as well.
+
+        Without a value from the source the statement is the one derived from the data alone.
+        """
+        target_schema_name = settings['target_schema_name']
+        target_table_name = settings['target_table_name']
+        target_column_name = settings['target_column_name']
+        target_sequence_name = settings['target_sequence_name']
+        try:
+            next_identity = int(settings['source_next_identity']) if settings.get('source_next_identity') is not None else None
+        except (TypeError, ValueError):
+            self.config_parser.print_log_message('WARNING',
+                f"postgresql_connector: get_set_sequence_sql: The next identity value reported for "
+                f'"{target_table_name}"."{target_column_name}" is not a number ({settings.get("source_next_identity")!r}) '
+                "- the sequence is set from the data in the target.")
+            next_identity = None
+
+        behind_the_data = (f'COALESCE((SELECT MAX("{target_column_name}") '
+                           f'FROM "{target_schema_name}"."{target_table_name}"), 0) + 1')
+        new_value = behind_the_data if next_identity is None else f'GREATEST({next_identity}, {behind_the_data})'
+        ## setval() takes a bigint, and the column of a sequence is not always an integer type -
+        ## a NUMERIC one would end as 'function setval(unknown, numeric, boolean) does not exist'
+        return f"""SELECT setval('"{target_schema_name}"."{target_sequence_name}"', ({new_value})::bigint, false);"""
 
     def get_table_next_identity(self, table_schema: str, table_name: str):
         try:
@@ -3582,7 +3640,17 @@ class PostgreSQLConnector(DatabaseConnector):
             if domain_check_sql:
                 # Ensure PostgreSQL standalone domain constraints rely on VALUE instead of column names
                 domain_check_sql = re.sub(r'(?i)(CHECK\s*\(\s*)([a-zA-Z_]\w*)(\s+|[<>=!])', r'\g<1>VALUE\g<3>', domain_check_sql)
-                
+
+                # A source which delivers the bare condition of its domain - a Sybase ASE rule
+                # is stored as 'create rule r_flag as @val in (0, 1)' - needs the CHECK clause
+                # around it, otherwise the statement ends as 'AS SMALLINT VALUE in (0, 1)'.
+                # The clause has to be recognized at the beginning of the condition and not
+                # by the word CHECK anywhere in it - in "VALUE in ('CHECK', 'CASH')" that word
+                # is data, and the condition would have been left without its clause.
+                already_a_check_clause = re.match(r'(?is)\s*(CONSTRAINT\s+("[^"]+"|\w+)\s+)?CHECK\s*\(', domain_check_sql)
+                if not already_a_check_clause:
+                    domain_check_sql = f"CHECK ({domain_check_sql})"
+
                 # pg_get_constraintdef already allows CHECK (...).
                 # If multiple constraints were aggregated, they might look like CHECK (...) CHECK (...)
                 # We just append them.
@@ -4137,6 +4205,91 @@ class PostgreSQLConnector(DatabaseConnector):
         exists = cursor.fetchone()[0]
         cursor.close()
         return exists
+
+    ## The integer types share an operator family, so a foreign key between SMALLINT,
+    ## INTEGER and BIGINT is accepted; NUMERIC belongs to another one, and a key mixing it
+    ## with an integer type cannot be implemented at all.
+    FK_COMPARABLE_INTEGER_TYPES = ('int2', 'int4', 'int8')
+    FK_ALIGNABLE_NUMERIC_TYPES = FK_COMPARABLE_INTEGER_TYPES + ('numeric',)
+
+    def align_foreign_key_column_types(self, settings):
+        """
+        Make the columns of a foreign key comparable before it is created.
+
+        A column of the referenced table can end up with another data type than the column
+        referencing it - a source identity column is created as BIGINT whatever its own type
+        was, while the column referencing it keeps the type of the source, and PostgreSQL
+        then refuses the key with 'Key columns "x" and "x" are of incompatible types:
+        numeric and bigint'. The referencing column is altered to the type of the referenced
+        one, which is the column of the primary key and must not be touched.
+
+        Reads the types from the catalog of the target, so it repairs the key whatever the
+        reason for the difference is. Returns the list of the columns it altered.
+        """
+        referencing_columns = settings['constraint_columns']
+        referenced_columns = settings['referenced_columns']
+        if not referencing_columns or not referenced_columns:
+            return []
+
+        referencing_types = self.fetch_column_types(settings['target_schema_name'], settings['target_table_name'])
+        referenced_types = self.fetch_column_types(settings['referenced_schema_name'], settings['referenced_table_name'])
+
+        altered_columns = []
+        for referencing_column, referenced_column in zip(referencing_columns, referenced_columns):
+            referencing_type = referencing_types.get(referencing_column.lower())
+            referenced_type = referenced_types.get(referenced_column.lower())
+            if not referencing_type or not referenced_type:
+                continue
+            if referencing_type['type_name'] == referenced_type['type_name']:
+                continue
+            if (referencing_type['type_name'] in self.FK_COMPARABLE_INTEGER_TYPES
+                    and referenced_type['type_name'] in self.FK_COMPARABLE_INTEGER_TYPES):
+                continue
+            if not (referencing_type['type_name'] in self.FK_ALIGNABLE_NUMERIC_TYPES
+                    and referenced_type['type_name'] in self.FK_ALIGNABLE_NUMERIC_TYPES):
+                self.config_parser.print_log_message('WARNING',
+                    f"postgresql_connector: align_foreign_key_column_types: Column "
+                    f'"{settings["target_table_name"]}"."{referencing_column}" ({referencing_type["full_type"]}) and the '
+                    f'column "{settings["referenced_table_name"]}"."{referenced_column}" ({referenced_type["full_type"]}) '
+                    "it references have data types which cannot be aligned automatically - the foreign key is created as it is.")
+                continue
+
+            alter_column_sql = (f'ALTER TABLE "{settings["target_schema_name"]}"."{settings["target_table_name"]}" '
+                                f'ALTER COLUMN "{referencing_column}" TYPE {referenced_type["full_type"]}')
+            self.config_parser.print_log_message('INFO',
+                f'postgresql_connector: align_foreign_key_column_types: Column "{settings["target_table_name"]}"."{referencing_column}" '
+                f'({referencing_type["full_type"]}) references "{settings["referenced_table_name"]}"."{referenced_column}" '
+                f'({referenced_type["full_type"]}) - altering it to the type of the referenced column, '
+                "otherwise the foreign key cannot be implemented.")
+            self.execute_query(alter_column_sql)
+            altered_columns.append({
+                'target_column': referencing_column,
+                'original_data_type': referencing_type['full_type'],
+                'altered_data_type': referenced_type['full_type'],
+                'reason': (f'FOREIGN KEY to {settings["referenced_table_name"]}.{referenced_column} '
+                           f'({referenced_type["full_type"]})'),
+            })
+        return altered_columns
+
+    def fetch_column_types(self, target_schema_name, target_table_name):
+        """
+        The data types of the columns of a table of the target, keyed by the column name in
+        lower case: {'category_id': {'type_name': 'int8', 'full_type': 'bigint'}}.
+        """
+        query = """
+            SELECT lower(a.attname), t.typname, pg_catalog.format_type(a.atttypid, a.atttypmod)
+            FROM pg_catalog.pg_attribute a
+            JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
+            WHERE lower(n.nspname) = lower(%s)
+              AND lower(c.relname) = lower(%s)
+              AND a.attnum > 0
+              AND NOT a.attisdropped
+        """
+        with self.connection.cursor() as cursor:
+            cursor.execute(query, (target_schema_name, target_table_name))
+            return {row[0]: {'type_name': row[1], 'full_type': row[2]} for row in cursor.fetchall()}
 
     def target_view_exists(self, target_schema_name, target_view_name):
         """True if a view or materialized view with this name exists in the target schema.

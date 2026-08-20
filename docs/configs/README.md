@@ -67,7 +67,16 @@ DDL text dumps plus unloaded data files. There is no `host`, `port`,
 | File | Purpose |
 |---|---|
 | [advanced_options.yaml](advanced_options.yaml) | the options for large, long-running or partial migrations: pre/post SQL scripts, partial data migration, target partitioning, creating the target partitioned, splitting huge data files, scheduled pause/stop, remote-object rewriting. Runnable as it is (everything advanced is commented out) — but meant as a source of **blocks to paste** into the example for your engine. They work with any source. |
-| [config_all_options_reference.yaml](config_all_options_reference.yaml) | **not runnable.** Every option that exists, with all mutually exclusive alternatives next to each other. Look options up here; do not use it as a template. |
+| [data_export_files.yaml](data_export_files.yaml) | reading the table DATA from export files instead of over the connection. Shows the three export formats — CSV, UNL and SQL — as what they are: alternatives, one live and two commented. Complete and runnable. |
+
+> Looking for the exhaustive list of options? It is no longer a `.yaml` file.
+> **[../config_reference.md](../config_reference.md)** documents every option with its
+> type, allowed values, default and the engines it applies to. It is generated from
+> `credativ_pg_migrator/config.schema.json`, which the migrator also validates
+> your configuration against at startup — so it cannot fall behind the code.
+> A single YAML file could never say "these keys are alternatives", "this one is
+> required" or "this one is only for Oracle", which is why the old
+> `config_all_options_reference.yaml` had to hold contradictory settings side by side.
 
 ---
 
@@ -134,7 +143,7 @@ for every source.
 | `names_case_handling` | oracle, ibm_db2_*, mssql, sybase_ase |
 | `varchar_to_text_length`, `char_to_text_length` | oracle and all engine examples |
 | `packages_as` | oracle |
-| `numeric_1_boolean_columns`, `map_numeric_1_to_boolean` | oracle, mysql |
+| `numeric_1_boolean_columns`, `map_numeric_1_to_boolean` | oracle, mysql, sqlite (also governs a column declared `BOOLEAN`) |
 | `zero_datetime_default`, `zero_datetime_data_value`, `relax_not_null_datetime` | mysql, mariadb |
 | `uuid_default_function`, `required_extensions` | postgresql, oracle, mssql |
 | `use_aliases_as_target_names` | ibm_db2_i (the key decision there), ibm_db2_zos |
@@ -155,21 +164,57 @@ for every source.
 
 ---
 
+## Choosing which objects are migrated
+
+`include_tables` / `exclude_tables`, and the same pairs for views and
+functions/procedures, all behave identically:
+
+- **"all", an empty list, or leaving the key out selects everything.** An empty
+  include list no longer means "nothing" — that used to skip every view and every
+  routine without saying so.
+- **`exclude_*` is applied after `include_*` and wins over it.**
+- **A pattern must match the whole name, and matching ignores case.** `orders`
+  selects `ORDERS`, not `back_orders`.
+
+`pattern_syntax` (top level) says how the patterns are written, for all six at once:
+
+| value | wildcards | example |
+|---|---|---|
+| `glob` (default) | `*` any sequence, `?` one character, `[abc]` a set | `SYS*`, `TMP_?` |
+| `regex` | Python regular expressions | `BIN\$.*`, `^tmp_.+$` |
+| `like` | SQL LIKE: `%` any sequence, `_` one character, `\` escapes | `SYS%`, `TMP__` |
+
+The default is `glob` because that is what the migrator has always applied — a
+configuration written before this setting existed keeps its meaning.
+
+**The same text can mean different things in different syntaxes.** `log_.*`
+excludes `log_2024` as a regular expression and nothing at all as a glob, because
+a glob `.` is a literal dot. A pattern that looks as though it were written in
+another syntax is therefore reported at startup, naming the option and the
+pattern — it is valid in its own right and would otherwise just silently match
+nothing. A pattern that cannot be compiled at all stops the run.
+
+At the end of each phase the log states how many objects were selected and how
+many were left out, by which option.
+
 ## Known gaps in the option set
 
-Checked against the code, not against the reference file:
+Options that exist in the configuration language but do nothing yet. They are
+marked **not implemented** in [../config_reference.md](../config_reference.md)
+as well, so the two lists cannot disagree.
 
 - **`target_lob_storage`** (storing LOB values as files instead of in the
-  database) is documented in `config_all_options_reference.yaml` but is read by
-  no code. It has no effect and is therefore not used in any example.
+  database) is read by no code. It has no effect and is therefore not used in
+  any example.
 - **`mapping.forced_column_mappings`** is only echoed into the mapping report;
   it is not applied to the column matching.
 - **`scheduled_actions.timer_hours`** is not implemented — only `datetime` is
   evaluated.
-- The reference file documents target partitioning as `partitioning:` with
-  `partitioning_type:`. The code reads **`target_partitioning:`** with
-  **`partition_by:`** and **`partitioning_columns:`**, which is what
-  `advanced_options.yaml` uses.
+- **`data_migration_limitation`** takes exactly three elements per entry. A
+  fourth one — a row-count threshold — is not implemented and raises
+  `ValueError` at startup.
+- **`target_partitioning.date_range: day`** is accepted but creates no
+  partitions; only `year`, `month` and `week` do.
 
 ## How complete is the migration for my engine?
 

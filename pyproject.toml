@@ -23,6 +23,7 @@ classifiers = [
 ]
 dependencies = [
     "jaydebeapi",
+    "jsonschema",
     "pandas",
     "psycopg2",
     "pyodbc",
@@ -30,6 +31,9 @@ dependencies = [
     "sqlglot",
     "tabulate",
 ]
+
+[tool.setuptools.package-data]
+credativ_pg_migrator = ["config.schema.json"]
 
 [project.urls]
 Homepage = "https://github.com/credativ/credativ-pg-migrator"

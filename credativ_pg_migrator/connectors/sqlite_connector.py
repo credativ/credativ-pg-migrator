@@ -25,9 +25,10 @@ SQLite is a file based, dynamically typed database. Two properties shape this co
    generated column expressions and AUTOINCREMENT markers out of the stored DDL.
 
 2. Column types are only "declared types" with a type affinity - a column declared TEXT
-   may well contain integers. The declared type is used to choose the PostgreSQL type,
-   and the values themselves are coerced during the data migration to whatever the target
-   column actually expects.
+   may well contain integers, and one declared INTEGER may contain the text 'N/A'. The
+   PostgreSQL type is therefore chosen from the declared type together with the storage
+   classes the column really holds (see _widened_types_by_stored_values), and the values
+   themselves are coerced during the data migration to whatever the target column expects.
 
 SQLite has no schemas. The 'main' database is used as the schema; a name configured in
 the config file is honoured only when it matches an attached database.
@@ -77,6 +78,8 @@ class SQLiteConnector(DatabaseConnector):
         self.source_db_config = self.config_parser.get_source_config()
         # Cache of parsed CREATE TABLE statements, keyed by (schema, table)
         self._ddl_cache = {}
+        # Cache of the type conflicts found in the stored values, keyed by (schema, table)
+        self._stored_values_cache = {}
         # The connectivity has to be resolved here and not only in connect(): with
         # connectivity 'ddl' the planner skips the connection check and the pre-migration
         # analysis entirely and goes straight to parse_ddl_files(), so an unusable value
@@ -273,15 +276,14 @@ class SQLiteConnector(DatabaseConnector):
             raise ValueError(
                 f"sqlite_connector: the DDL script(s) under '{self.ddl_path}' produced no database "
                 f"objects. Check that the files contain SQLite CREATE statements"
-                + (f" - {failed_statements} statement(s) could not be executed, run with --log-level=WARNING to see them." if failed_statements else "."))
+                + (f" - {failed_statements} statement(s) could not be executed; each one is logged at WARNING." if failed_statements else "."))
 
         os.replace(build_path, self._ddl_database_path)
         self.config_parser.print_log_message('INFO', f"sqlite_connector: _build_ddl_database: Staging database created from DDL: {summary}")
         if failed_statements:
-            # Reported at INFO because a skipped CREATE statement means a missing object -
-            # the per statement detail is logged at WARNING, which this tool ranks as more
-            # verbose than INFO and therefore does not show by default.
-            self.config_parser.print_log_message('INFO', f"sqlite_connector: _build_ddl_database: ATTENTION: {failed_statements} statement(s) of the DDL script(s) could not be executed and were SKIPPED - the objects they create are missing from the migration. Run with --log-level=WARNING to see each skipped statement.")
+            # A skipped CREATE statement means a missing object, so this is a warning -
+            # shown by the default log level, with each skipped statement logged beside it.
+            self.config_parser.print_log_message('WARNING', f"sqlite_connector: _build_ddl_database: ATTENTION: {failed_statements} statement(s) of the DDL script(s) could not be executed and were SKIPPED - the objects they create are missing from the migration. Each skipped statement is logged separately.")
         return self._ddl_database_path
 
     def parse_ddl_files(self, settings):
@@ -862,6 +864,10 @@ class SQLiteConnector(DatabaseConnector):
         except Exception as e:
             self.config_parser.print_log_message('DEBUG', f"sqlite_connector: _transpile: sqlglot could not translate {description}: {e}")
         # When sqlglot cannot parse the input, the SQLite quoting survives untouched
+        return self._finalize_sql(converted)
+
+    def _finalize_sql(self, converted):
+        """ The last steps every translated fragment goes through. """
         converted = self._normalize_quoting(converted)
         return self.apply_sql_functions_mapping(converted, {'target_db_type': 'postgresql'})
 
@@ -1020,73 +1026,9 @@ class SQLiteConnector(DatabaseConnector):
     def fetch_table_columns(self, settings) -> dict:
         table_schema = settings['table_schema']
         table_name = settings['table_name']
-        columns = {}
         try:
             self.connect()
-            parsed_ddl = self._parse_table_ddl(table_schema, table_name)
-            rows, has_hidden = self._table_columns_pragma(table_schema, table_name)
-
-            primary_key_columns = [row for row in rows if row[5]]
-            single_column_pk = len(primary_key_columns) == 1
-
-            for row in rows:
-                column_id = row[0]
-                column_name = str(row[1])
-                declared_type = row[2] or ''
-                not_null = bool(row[3])
-                default_value = row[4]
-                primary_key_position = row[5]
-                hidden = row[6] if has_hidden and len(row) > 6 else 0
-
-                base_type, character_maximum_length, numeric_precision, numeric_scale = self._parse_declared_type(declared_type)
-                column_details = parsed_ddl['columns'].get(column_name.lower(), {})
-
-                # An INTEGER PRIMARY KEY is an alias of the rowid: SQLite fills it in
-                # automatically, which is exactly what a PostgreSQL identity column does.
-                # The alias only exists for the declared type INTEGER on a rowid table.
-                is_rowid_alias = (
-                    primary_key_position == 1
-                    and single_column_pk
-                    and base_type == 'INTEGER'
-                    and not parsed_ddl['without_rowid']
-                )
-                is_identity = 'YES' if (is_rowid_alias or column_details.get('autoincrement')) else 'NO'
-
-                generated_kind = column_details.get('generated_kind', '')
-                if not generated_kind and hidden in (2, 3):
-                    generated_kind = 'VIRTUAL' if hidden == 2 else 'STORED'
-                generation_expression = column_details.get('generation_expression', '')
-
-                columns[column_id + 1] = {
-                    'column_name': column_name,
-                    'data_type': base_type,
-                    'column_type': declared_type,
-                    'basic_data_type': '',
-                    'basic_character_maximum_length': '',
-                    'basic_numeric_precision': '',
-                    'basic_numeric_scale': '',
-                    'basic_column_type': '',
-                    'character_maximum_length': character_maximum_length,
-                    'numeric_precision': numeric_precision,
-                    'numeric_scale': numeric_scale,
-                    'is_nullable': 'NO' if (not_null or is_rowid_alias) else 'YES',
-                    'column_default_name': '',
-                    'column_default_value': '' if default_value is None else str(default_value),
-                    'is_identity': is_identity,
-                    'is_generated_stored': 'YES' if generated_kind == 'STORED' else 'NO',
-                    'is_generated_virtual': 'YES' if generated_kind == 'VIRTUAL' else 'NO',
-                    'generation_expression': generation_expression,
-                    'stripped_generation_expression': self._transpile(generation_expression, f'generated column {table_name}.{column_name}') if generation_expression else '',
-                    'column_comment': '',
-                    'udt_schema': '',
-                    'udt_name': '',
-                    'domain_schema': '',
-                    'domain_name': '',
-                    # hidden = 1 marks a hidden column of a virtual table - it carries no
-                    # data of its own and must not become a column of the target table.
-                    'is_hidden_column': 'YES' if hidden == 1 else 'NO',
-                }
-
+            columns = self._table_columns(table_schema, table_name, settings.get('target_db_type'))
             self.disconnect()
             return columns
         except Exception as e:
@@ -1094,6 +1036,126 @@ class SQLiteConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', traceback.format_exc())
             self.disconnect()
             raise
+
+    def _table_columns(self, table_schema, table_name, target_db_type=None) -> dict:
+        """
+        The column list of one table, on an already open connection. Used by
+        fetch_table_columns() and by everything which needs the target type of a column
+        while it is doing something else on the same connection (CHECK constraints).
+        """
+        columns = {}
+        boolean_fallback_columns = set()
+        parsed_ddl = self._parse_table_ddl(table_schema, table_name)
+        rows, has_hidden = self._table_columns_pragma(table_schema, table_name)
+
+        primary_key_columns = [row for row in rows if row[5]]
+        single_column_pk = len(primary_key_columns) == 1
+
+        for row in rows:
+            column_id = row[0]
+            column_name = str(row[1])
+            declared_type = row[2] or ''
+            not_null = bool(row[3])
+            default_value = row[4]
+            primary_key_position = row[5]
+            hidden = row[6] if has_hidden and len(row) > 6 else 0
+
+            base_type, character_maximum_length, numeric_precision, numeric_scale = self._parse_declared_type(declared_type)
+            column_details = parsed_ddl['columns'].get(column_name.lower(), {})
+
+            # SQLite has no boolean type. A column declared BOOLEAN, BOOL or BIT holds the
+            # very same 0/1 integers as the NUMERIC(1,0) column of any other database, and
+            # such a column can just as well carry a small code - which of the two it is
+            # cannot be told from the declaration. The decision is therefore left to the
+            # same configuration which decides it for Oracle NUMBER(1,0):
+            # migration.map_numeric_1_to_boolean, or the allow-list
+            # migration.numeric_1_boolean_columns. Without them the column becomes SMALLINT,
+            # which is lossless and keeps the CHECK constraints, defaults and trigger
+            # conditions the source wrote against 0 and 1 working.
+            if base_type in ('BOOLEAN', 'BOOL', 'BIT') and not self.config_parser.should_map_numeric_1_to_boolean(
+                    self.config_parser.get_target_schema(), table_name, column_name):
+                self.config_parser.print_log_message('DEBUG', f"sqlite_connector: _table_columns: Column {table_schema}.{table_name}.{column_name} is declared {declared_type} - migrated as SMALLINT, because SQLite has no boolean type. Set 'map_numeric_1_to_boolean' or list the column in 'numeric_1_boolean_columns' to migrate it as BOOLEAN.")
+                base_type = 'SMALLINT'
+                character_maximum_length = None
+                numeric_precision = None
+                numeric_scale = None
+                # A column of this kind holding 'true' / 'false' instead of 1 / 0 cannot be
+                # a SMALLINT at all - it becomes BOOLEAN, which is the only type able to
+                # hold those values without turning them into text (see the probe below).
+                boolean_fallback_columns.add(column_id + 1)
+
+            # An INTEGER PRIMARY KEY is an alias of the rowid: SQLite fills it in
+            # automatically, which is exactly what a PostgreSQL identity column does.
+            # The alias only exists for the declared type INTEGER on a rowid table.
+            is_rowid_alias = (
+                primary_key_position == 1
+                and single_column_pk
+                and base_type == 'INTEGER'
+                and not parsed_ddl['without_rowid']
+            )
+            is_identity = 'YES' if (is_rowid_alias or column_details.get('autoincrement')) else 'NO'
+
+            generated_kind = column_details.get('generated_kind', '')
+            if not generated_kind and hidden in (2, 3):
+                generated_kind = 'VIRTUAL' if hidden == 2 else 'STORED'
+            generation_expression = column_details.get('generation_expression', '')
+
+            columns[column_id + 1] = {
+                'column_name': column_name,
+                'data_type': base_type,
+                'column_type': declared_type,
+                'basic_data_type': '',
+                'basic_character_maximum_length': '',
+                'basic_numeric_precision': '',
+                'basic_numeric_scale': '',
+                'basic_column_type': '',
+                'character_maximum_length': character_maximum_length,
+                'numeric_precision': numeric_precision,
+                'numeric_scale': numeric_scale,
+                'is_nullable': 'NO' if (not_null or is_rowid_alias) else 'YES',
+                'column_default_name': '',
+                'column_default_value': '' if default_value is None else str(default_value),
+                'is_identity': is_identity,
+                'is_generated_stored': 'YES' if generated_kind == 'STORED' else 'NO',
+                'is_generated_virtual': 'YES' if generated_kind == 'VIRTUAL' else 'NO',
+                'generation_expression': generation_expression,
+                'stripped_generation_expression': self._transpile(generation_expression, f'generated column {table_name}.{column_name}') if generation_expression else '',
+                'column_comment': '',
+                'udt_schema': '',
+                'udt_name': '',
+                'domain_schema': '',
+                'domain_name': '',
+                # hidden = 1 marks a hidden column of a virtual table - it carries no
+                # data of its own and must not become a column of the target table.
+                'is_hidden_column': 'YES' if hidden == 1 else 'NO',
+            }
+
+        # The declared type is only a hint in SQLite - the values really stored decide
+        # whether the type it was mapped to can hold them (see _widened_types_by_stored_values).
+        target_db_type = target_db_type or self.config_parser.get_target_db_type()
+        widened_types = self._widened_types_by_stored_values(table_schema, table_name, columns, target_db_type, boolean_fallback_columns)
+        types_mapping = self.get_types_mapping({'target_db_type': target_db_type}) if widened_types else {}
+        for order_num, (widened_type, reasons) in widened_types.items():
+            column = columns[order_num]
+            declared_type = column['column_type'] or '(no type)'
+            category = self._target_type_category(types_mapping.get(str(column['data_type']).upper(), ''))
+            if widened_type == 'BOOLEAN':
+                self.config_parser.print_log_message('WARNING',
+                    f"sqlite_connector: _table_columns: Column {table_schema}.{table_name}.{column['column_name']} is declared {declared_type} and holds its values as text ('true' / 'false') "
+                    f"- it is migrated as BOOLEAN and not as SMALLINT, which cannot hold them. Set 'map_numeric_1_to_boolean' or "
+                    f"'numeric_1_boolean_columns' to migrate every such column as BOOLEAN.")
+            else:
+                found = ', '.join(self._describe_stored_value_conflict(reason, category, declared_type) for reason in reasons)
+                self.config_parser.print_log_message('WARNING',
+                    f"sqlite_connector: _table_columns: Column {table_schema}.{table_name}.{column['column_name']} is declared {declared_type}, "
+                    f"but holds {found} - it is migrated as {widened_type}, otherwise the data of the whole table would be rejected by the target. "
+                    f"Use 'data_types_substitution' to force another type.")
+            column['data_type'] = widened_type
+            column['character_maximum_length'] = None
+            column['numeric_precision'] = None
+            column['numeric_scale'] = None
+
+        return columns
 
     def get_types_mapping(self, settings):
         target_db_type = settings['target_db_type']
@@ -1198,6 +1260,303 @@ class SQLiteConnector(DatabaseConnector):
     def _is_lob_type(self, declared_type) -> bool:
         upper_type = str(declared_type or '').upper()
         return any(token in upper_type for token in ('BLOB', 'CLOB', 'BINARY', 'IMAGE'))
+
+    ## ---------------------------------------------------------------- type affinity
+
+    # A SQLite column has a declared type and a type affinity, but neither of them is
+    # enforced. The affinity only says how a value is converted when it CAN be converted
+    # without loss - a well formed number written into an INTEGER column becomes an
+    # integer - while everything else is stored exactly as it was given. A column declared
+    # INTEGER therefore really holds the text 'N/A', and handing that to a PostgreSQL
+    # BIGINT column ends the whole batch with
+    # 'invalid input syntax for type bigint: "N/A"'. The declared type alone cannot decide
+    # the target type; the storage classes the column really contains have to decide with it.
+
+    # The text forms _coerce_boolean() understands. A BOOLEAN column holding one of them
+    # stays BOOLEAN, any other text makes it TEXT.
+    _BOOLEAN_TEXT_VALUES = ('1', 't', 'true', 'y', 'yes', 'on', '0', 'f', 'false', 'n', 'no', 'off', '')
+
+    # Value range of the PostgreSQL integer types - a SQLite INTEGER is always 8 bytes,
+    # so a column declared TINYINT can hold a number the target SMALLINT rejects.
+    _INTEGER_RANGES = {
+        'SMALLINT': (-32768, 32767),
+        'INTEGER': (-2147483648, 2147483647),
+    }
+
+    # How many aggregate expressions are sent in one probe query - SQLITE_MAX_COLUMN
+    # defaults to 2000, and a very wide table would otherwise exceed it.
+    _PROBE_CHUNK_SIZE = 400
+
+    @staticmethod
+    def _target_type_category(target_type):
+        """ The kind of value the mapped PostgreSQL type accepts. """
+        upper = str(target_type or '').upper()
+        if upper in ('SMALLINT', 'INTEGER', 'BIGINT'):
+            return 'integer'
+        if upper.startswith('NUMERIC') or upper.startswith('DECIMAL'):
+            return 'numeric'
+        if upper in ('REAL', 'DOUBLE PRECISION', 'FLOAT'):
+            return 'real'
+        if upper in ('BOOLEAN', 'BOOL'):
+            return 'boolean'
+        if upper.startswith('TIMESTAMP'):
+            return 'timestamp'
+        if upper == 'DATE':
+            return 'date'
+        if upper.startswith('TIME'):
+            return 'time'
+        # TEXT, VARCHAR, BYTEA, JSONB, UUID, XML - every storage class can be migrated
+        # into these, the value conversion of the data migration takes care of it.
+        return 'other'
+
+    def _stored_value_checks(self, quoted_column, category, target_type):
+        """
+        The SQL expressions which report - per storage class - whether a column holds a
+        value the target type cannot accept. Each returns 1 when at least one such value
+        exists. They are all evaluated in a single pass over the table.
+        """
+        checks = []
+        # A BLOB never fits a numeric, boolean or date/time column
+        checks.append(('blob', f"typeof({quoted_column}) = 'blob'"))
+
+        if category == 'integer':
+            # Text left in a column with integer affinity is text SQLite could not read as
+            # a number - a well formed integer literal would have been converted on INSERT.
+            checks.append(('text', f"typeof({quoted_column}) = 'text' AND "
+                                   f"(trim({quoted_column}) GLOB '*[^0-9+-]*' OR NOT trim({quoted_column}) GLOB '*[0-9]*')"))
+            # 1.5 in a column declared INTEGER is stored as REAL and rejected by an integer target
+            checks.append(('real', f"typeof({quoted_column}) = 'real' AND {quoted_column} <> cast({quoted_column} AS INTEGER)"))
+            value_range = self._INTEGER_RANGES.get(str(target_type).upper())
+            if value_range:
+                checks.append(('range', f"typeof({quoted_column}) = 'integer' AND "
+                                        f"({quoted_column} < {value_range[0]} OR {quoted_column} > {value_range[1]})"))
+        elif category in ('numeric', 'real'):
+            checks.append(('text', f"typeof({quoted_column}) = 'text' AND "
+                                   f"(trim({quoted_column}) GLOB '*[^0-9eE+.-]*' OR NOT trim({quoted_column}) GLOB '*[0-9]*')"))
+        elif category == 'boolean':
+            checks.append(('text', self._boolean_text_check(quoted_column)))
+        elif category in ('date', 'time', 'timestamp'):
+            # date() / time() / datetime() return NULL for anything they cannot read as a
+            # point in time - exactly the values PostgreSQL would refuse as well.
+            function = {'date': 'date', 'time': 'time', 'timestamp': 'datetime'}[category]
+            checks.append(('text', f"typeof({quoted_column}) = 'text' AND {function}({quoted_column}) IS NULL"))
+        return checks
+
+    def _boolean_text_check(self, quoted_column):
+        """ Reports a text value which _coerce_boolean() would not recognize as a boolean. """
+        values = ', '.join(f"'{value}'" for value in self._BOOLEAN_TEXT_VALUES)
+        return f"typeof({quoted_column}) = 'text' AND lower(trim({quoted_column})) NOT IN ({values})"
+
+    def _widened_types_by_stored_values(self, table_schema, table_name, columns, target_db_type, boolean_fallback_columns=None):
+        """
+        Find the columns whose values do not fit the type their declaration was mapped to
+        and return {order_num: (widened type, reasons)}. The whole table is read once, with
+        one aggregate expression per check, so this costs a single sequential scan.
+        """
+        cache_key = (str(table_schema).lower(), str(table_name).lower())
+        if cache_key in self._stored_values_cache:
+            return self._stored_values_cache[cache_key]
+
+        widened = {}
+        boolean_fallback_columns = boolean_fallback_columns or set()
+        try:
+            types_mapping = self.get_types_mapping({'target_db_type': target_db_type})
+        except Exception:
+            # Only PostgreSQL is supported as a target, but the mapping must never be the
+            # reason the column list cannot be read.
+            self._stored_values_cache[cache_key] = widened
+            return widened
+
+        probes = []
+        categories = {}
+        for order_num, column in columns.items():
+            if column.get('is_hidden_column') == 'YES':
+                continue
+            # An INTEGER PRIMARY KEY / AUTOINCREMENT column is the rowid, SQLite itself
+            # guarantees it holds nothing but integers.
+            if column.get('is_identity') == 'YES':
+                continue
+            declared_type = str(column.get('data_type') or '').upper()
+            target_type = types_mapping.get(declared_type, '')
+            category = self._target_type_category(target_type)
+            if category == 'other':
+                continue
+            categories[order_num] = category
+            quoted_column = self._quote_ident(column['column_name'])
+            checks = self._stored_value_checks(quoted_column, category, target_type)
+            if order_num in boolean_fallback_columns:
+                # A column declared BOOLEAN which the configuration turns into SMALLINT is
+                # additionally tested for boolean words, to tell 'true' from 'N/A'.
+                checks.append(('boolean_text', self._boolean_text_check(quoted_column)))
+            for reason, expression in checks:
+                probes.append((order_num, reason, expression))
+
+        if not probes:
+            self._stored_values_cache[cache_key] = widened
+            return widened
+
+        conflicts = {}
+        qualified_name = self._qualified_name(table_schema, table_name)
+        try:
+            cursor = self.connection.cursor()
+            for offset in range(0, len(probes), self._PROBE_CHUNK_SIZE):
+                chunk = probes[offset:offset + self._PROBE_CHUNK_SIZE]
+                expressions = ', '.join(f"max({expression})" for _, _, expression in chunk)
+                cursor.execute(f"SELECT {expressions} FROM {qualified_name}")
+                row = cursor.fetchone()
+                for (order_num, reason, _), found in zip(chunk, row or []):
+                    if found:
+                        conflicts.setdefault(order_num, []).append(reason)
+            cursor.close()
+        except sqlite3.Error as e:
+            # Without the probe the declared types are used as before - the migration is
+            # not stopped by it, but the reason a later INSERT may fail has to be visible.
+            self.config_parser.print_log_message('WARNING', f"sqlite_connector: _table_columns: Could not check the stored values of {table_schema}.{table_name} against the declared column types ({e}) - the declared types are used unchanged.")
+            self._stored_values_cache[cache_key] = widened
+            return widened
+
+        for order_num, reasons in conflicts.items():
+            if (order_num in boolean_fallback_columns and 'text' in reasons
+                    and 'boolean_text' not in reasons and 'blob' not in reasons):
+                # The text in the column is 'true' / 'false' / 'yes' / 'no' - the column
+                # really is a flag, it is only not written as 0 and 1.
+                widened[order_num] = ('BOOLEAN', reasons)
+                continue
+            if 'boolean_text' in reasons:
+                reasons = [reason for reason in reasons if reason != 'text']
+            if 'blob' in reasons or 'text' in reasons or 'boolean_text' in reasons:
+                # TEXT holds every storage class SQLite knows
+                new_type = 'TEXT'
+            elif 'real' in reasons:
+                # NUMERIC keeps both the integers and the fractional values exactly
+                new_type = 'NUMERIC'
+            elif 'range' in reasons:
+                new_type = 'BIGINT'
+            else:
+                continue
+            widened[order_num] = (new_type, reasons)
+
+        self._stored_values_cache[cache_key] = widened
+        return widened
+
+    def _describe_stored_value_conflict(self, reason, category, declared_type):
+        if reason == 'blob':
+            return 'values stored as BLOB'
+        if reason == 'real':
+            return 'values stored as REAL, which an integer column cannot hold'
+        if reason == 'range':
+            return f'integer values outside the range of the target type of {declared_type}'
+        if reason == 'boolean_text':
+            return 'text values which are neither a number nor a boolean'
+        if category == 'boolean':
+            return 'text values which are not a boolean'
+        if category in ('date', 'time', 'timestamp'):
+            return 'text values which are not a valid date or time'
+        return 'text values which are not a number'
+
+
+    ## ---------------------------------------------------------------- CHECK constraints
+
+    def _target_column_types(self, table_schema, table_name):
+        """
+        The PostgreSQL type every column of the table is created with, keyed by the lower
+        cased column name. That is the mapping of the declared type, corrected by the
+        values really stored (see _widened_types_by_stored_values) and by the narrow
+        numeric rule of the target DDL builder, which turns a NUMERIC(1,0) column into
+        BOOLEAN or SMALLINT depending on the configuration - the same decision is repeated
+        here, with the same configuration helper, because a CHECK constraint has to know
+        the type of the column it is written against.
+        """
+        target_types = {}
+        try:
+            columns = self._table_columns(table_schema, table_name)
+            types_mapping = self.get_types_mapping({'target_db_type': self.config_parser.get_target_db_type()})
+        except Exception as e:
+            self.config_parser.print_log_message('DEBUG', f"sqlite_connector: _target_column_types: Could not resolve the target types of {table_schema}.{table_name}: {e}")
+            return target_types
+
+        for column in columns.values():
+            data_type = str(column.get('data_type') or '').upper()
+            target_type = str(types_mapping.get(data_type, data_type)).upper()
+            if target_type in ('NUMBER', 'NUMERIC') and column.get('numeric_precision') == 1 and column.get('numeric_scale') == 0:
+                target_type = 'BOOLEAN' if self.config_parser.should_map_numeric_1_to_boolean(
+                    self.config_parser.get_target_schema(), table_name, column['column_name']) else 'SMALLINT'
+            target_types[str(column['column_name']).lower()] = target_type
+        return target_types
+
+    def _adapt_condition_to_target_types(self, tree, target_types):
+        """
+        Rewrite the literals of a condition to the types the target columns really have.
+        SQLite writes a flag as 0 and 1 even when the column is declared BOOLEAN, so
+        'eu_member IN (0, 1)' reaches a PostgreSQL BOOLEAN column as
+        'operator does not exist: boolean = integer'.
+
+        Returns the list of the reasons the condition cannot be used at all - it is empty
+        when the condition was either adapted or needed no adaptation.
+        """
+        problems = []
+        comparisons = (sqlglot.exp.EQ, sqlglot.exp.NEQ, sqlglot.exp.GT, sqlglot.exp.GTE,
+                       sqlglot.exp.LT, sqlglot.exp.LTE)
+
+        def adapt(column_node, literal_nodes):
+            target_type = target_types.get(str(column_node.name).lower())
+            if not target_type or not literal_nodes:
+                return
+            if target_type in ('BOOLEAN', 'BOOL'):
+                for literal in literal_nodes:
+                    value = str(literal.name).strip().lower()
+                    if value in ('0', 'false', 'f', 'n', 'no', 'off'):
+                        literal.replace(sqlglot.exp.false())
+                    elif value in ('1', 'true', 't', 'y', 'yes', 'on'):
+                        literal.replace(sqlglot.exp.true())
+                    else:
+                        problems.append(f"column {column_node.name} is migrated as BOOLEAN and cannot be compared with {literal.sql()}")
+            elif target_type in ('TEXT', 'VARCHAR', 'CHAR', 'BYTEA'):
+                # A column which had to be widened to TEXT because of the values it holds
+                # cannot be compared with a number any more - PostgreSQL has no operator
+                # for it, and quoting the number would compare it as a string.
+                for literal in literal_nodes:
+                    if not literal.is_string:
+                        problems.append(f"column {column_node.name} is migrated as {target_type} and cannot be compared with the number {literal.sql()}")
+
+        for node in list(tree.find_all(*comparisons)):
+            left, right = node.this, node.expression
+            if isinstance(left, sqlglot.exp.Column) and isinstance(right, sqlglot.exp.Literal):
+                adapt(left, [right])
+            elif isinstance(right, sqlglot.exp.Column) and isinstance(left, sqlglot.exp.Literal):
+                adapt(right, [left])
+
+        for node in list(tree.find_all(sqlglot.exp.In)):
+            if isinstance(node.this, sqlglot.exp.Column):
+                literals = [item for item in (node.args.get('expressions') or []) if isinstance(item, sqlglot.exp.Literal)]
+                adapt(node.this, literals)
+
+        for node in list(tree.find_all(sqlglot.exp.Between)):
+            if isinstance(node.this, sqlglot.exp.Column):
+                bounds = [node.args.get('low'), node.args.get('high')]
+                adapt(node.this, [bound for bound in bounds if isinstance(bound, sqlglot.exp.Literal)])
+
+        return problems
+
+    def _convert_check_expression(self, check_sql, target_types, description):
+        """
+        Translate a CHECK expression to PostgreSQL and adapt its literals to the types the
+        target columns really have. Returns None when the expression cannot be used on the
+        target at all - the constraint is then skipped instead of failing the migration.
+        """
+        try:
+            tree = sqlglot.parse_one(check_sql, read='sqlite')
+        except Exception as e:
+            # Without a parse tree the expression can only be handed over as it is,
+            # exactly as before - a type mismatch in it surfaces when it is created.
+            self.config_parser.print_log_message('DEBUG', f"sqlite_connector: _convert_check_expression: sqlglot could not parse {description}: {e}")
+            return self._transpile(check_sql, description)
+
+        problems = self._adapt_condition_to_target_types(tree, target_types)
+        if problems:
+            self.config_parser.print_log_message('WARNING', f"sqlite_connector: fetch_constraints: The {description} ({check_sql}) is not migrated: {'; '.join(problems)}. The values of the source stay as they are - recreate the constraint by hand if the target has to enforce it.")
+            return None
+        return self._finalize_sql(tree.sql(dialect='postgres'))
 
     ## ---------------------------------------------------------------- indexes
 
@@ -1385,8 +1744,12 @@ class SQLiteConnector(DatabaseConnector):
 
             # CHECK constraints are not exposed by any PRAGMA - they come from the DDL
             parsed_ddl = self._parse_table_ddl(source_table_schema, source_table_name)
+            # The literals of a CHECK have to match the types the target columns really
+            # get - SQLite writes a flag as 0 / 1 even in a column declared BOOLEAN.
+            target_types = self._target_column_types(source_table_schema, source_table_name) if parsed_ddl['checks'] else {}
             for check in parsed_ddl['checks']:
-                converted_check = self._transpile(check['sql'], f"check constraint of {source_table_name}")
+                converted_check = self._convert_check_expression(
+                    check['sql'], target_types, f"check constraint {check['name']} of {source_table_name}")
                 if not converted_check or not converted_check.strip():
                     continue
                 constraints[order_num] = {
@@ -1835,8 +2198,14 @@ class SQLiteConnector(DatabaseConnector):
             return self._coerce_datetime(value)
 
         if isinstance(value, bytes):
-            # A BLOB value in a non-binary target column - keep it readable
-            return value.decode('utf-8', errors='replace')
+            # A BLOB value in a non-binary target column. Text which was merely stored as a
+            # BLOB is decoded; real binary content is written as the SQLite blob literal
+            # X'..' instead, because decoding it with replacement characters destroys it
+            # without anybody noticing.
+            try:
+                return value.decode('utf-8')
+            except UnicodeDecodeError:
+                return f"X'{value.hex().upper()}'"
 
         if 'CHAR' in target_type or target_type in ('TEXT', 'JSONB', 'JSON', 'XML', 'UUID'):
             if not self.config_parser.should_migrate_lob_values() and self._is_lob_type(declared_type):

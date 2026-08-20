@@ -1480,9 +1480,10 @@ class IbmDb2ZosConnector(DatabaseConnector):
             body = self.replace_outside_string_literals(body, schema_pattern, f'"{target_schema_name}".')
             when_clause = self.replace_outside_string_literals(when_clause, schema_pattern, f'"{target_schema_name}".')
 
-        # VARCHAR(<expression>) is a conversion function in DB2 and a data type in PostgreSQL -
-        # the identifiers of the expression are already quoted at this point (OLD."order_id")
-        body = re.sub(r'(?i)\bVARCHAR\s*\(\s*(COUNT\s*\([^()]*\)|[a-zA-Z0-9_."]+\s*[+*/|-]\s*[^()]+|[a-zA-Z0-9_."]+\.[a-zA-Z0-9_."]+|[a-zA-Z_][a-zA-Z0-9_]*\([^()]*\))\s*\)', r'CAST(\1 AS VARCHAR)', body)
+        # DB2 casting scalar functions - VARCHAR(expr), INTEGER(expr), DECIMAL(expr, p, s) ...
+        # have no counterparts in PostgreSQL and must be rewritten into CAST expressions
+        body = self.convert_db2_cast_functions(body)
+        when_clause = self.convert_db2_cast_functions(when_clause)
 
         # Replace CURRENT DATE / TIMESTAMP
         body = re.sub(r'\bCURRENT\s+DATE\b', 'CURRENT_DATE', body, flags=re.IGNORECASE)

@@ -177,6 +177,10 @@ IBM DB2 is supported via two fundamentally different connectors, heavily dependi
 - **Migrated**: tables and data (from CSV), primary keys, indexes (including expression-based ones), foreign keys with their `ON DELETE` / `ON UPDATE` rules, CHECK constraints, identity columns, sequences, aliases, views (including `WITH CHECK OPTION` views, recursive CTEs, `LISTAGG`, `TABLE (SELECT ...)` and materialized query tables), functions and procedures (SQL routines converted to PL/pgSQL), triggers and DB2 global variables (mapped to PostgreSQL session settings).
 - **Not migrated**: table and column comments — `COMMENT ON` / `LABEL ON` statements are parsed out of the DDL and stored in the protocol tables, but they are not yet returned as comments, so none reaches the target. Generated/computed columns are not handled. External routines (COBOL, Assembler) are reported and skipped, because their load module is not part of the DDL.
 - **Not available offline**: pre-migration analysis (there is no live source to measure) and the random-sample / LOB-size validation checks. Row counts and table checksums do work.
+- **Dates and timestamps in the CSV files**: DB2 writes a timestamp as `2022-01-11-12.00.00.000000` and a
+  `TIMESTAMP WITH TIME ZONE` — which exists on z/OS and nowhere else — with the offset behind it
+  (`2022-01-11-12.00.00.000000 +01:00`). PostgreSQL reads neither of them; both are rewritten during the
+  conversion of the file (section 4.2.4).
 
 #### 4.2.3 DB2 for i (IBM i / AS/400)
 - **Mode**: DDL Parsing and File-Based Integration (Offline Connectivity), like z/OS
@@ -185,6 +189,58 @@ IBM DB2 is supported via two fundamentally different connectors, heavily dependi
 - **Migrated**: tables and data, primary keys, indexes, foreign keys with their referential rules, CHECK constraints, identity columns, sequences, aliases, views, triggers and global variables.
 - **Not migrated**: functions and procedures (the routine code converter exists, but `fetch_funcproc_names` is a placeholder, so nothing is fetched), table/column comments (parsed but not surfaced — same as z/OS), and generated/computed columns.
 - **Not available offline**: pre-migration analysis and all validation checks.
+- **Dates and timestamps in the CSV files**: an unload written with `CPYTOIMPF` carries the dates and times
+  in the format of the job (`DATFMT`, `DATSEP`, `TIMFMT`, `TIMSEP`), so a date can arrive as `01/04/22` and a
+  time as `06.00.00` — see section 4.2.4, including `data_export.date_format` for the case in which the file
+  itself does not say what the order of the parts is.
+
+#### 4.2.4 Dates, times and timestamps of DB2 CSV exports
+
+Both offline DB2 connectors read their data from CSV files written on the source, and the values in them
+follow the notation of DB2, which PostgreSQL refuses (`invalid input syntax for type timestamp:
+"01/04/22-06.00.00"`). Every CSV file is therefore converted before it is loaded, and the date, time and
+timestamp columns of the table — the connector knows their types from the DDL — are rewritten:
+
+| written by DB2 | migrated as |
+| --- | --- |
+| `2022-01-11-12.00.00.000000` | `2022-01-11 12:00:00.000000` |
+| `2022-01-11-12.00.00.000000 +01:00` (z/OS `TIMESTAMP WITH TIME ZONE`) | `2022-01-11 12:00:00.000000+01:00` |
+| `01/04/22-06.00.00` (DB2 for i, `DATFMT(*MDY) DATSEP('/')`) | `2022-01-04 06:00:00` |
+| `01.04.2022`, `04/01/2022`, `20220104` | `2022-04-01`, `2022-04-01`, `2022-01-04` |
+| `22/123` (`DATFMT(*JUL)`) | `2022-05-03` |
+| `06.00.00`, `060000`, `06:00 PM` | `06:00:00`, `06:00:00`, `18:00:00` |
+
+A timestamp with more than six fractional digits — `TIMESTAMP(9)` and `TIMESTAMP(12)` exist on DB2 —
+is passed on as it was written; PostgreSQL stores microseconds and rounds the rest away.
+
+**The order of the parts of a date.** A file exported with `DATFMT(*MDY)`, `*DMY` or `*YMD` carries a
+two-digit year and no statement of which part is which: `01/04/22` is the 4th of January, the 1st of April
+or the 22nd of April, and reading it the wrong way migrates a different date *without any error*. The
+migrator therefore reads the file once and drops every order which cannot write one of the values of the
+column — `01/13/22` can only be `*MDY`, `13/01/22` only `*DMY` — and logs which order it decided on and
+which value decided it. This costs one extra pass over the file, and only for a file which really contains
+such a date; a file written with ISO dates never pays for it.
+
+If more than one order fits **every** value of a column, the migration of that table stops with a message
+naming the column and the values, instead of guessing. State the format of the export and run it again:
+
+```yaml
+source:
+  data_export:
+    # *MDY / *USA, *DMY / *EUR, *YMD / *ISO / *JIS - the DATFMT of the export.
+    # With or without the leading '*'. Applies to every date of every file.
+    date_format: "*MDY"
+
+table_settings:
+  - table_name: "INVENTORY_MOVEMENTS"
+    data_export:
+      date_format: "MDY"     # for this table alone
+```
+
+A two-digit year is expanded the way DB2 for i does it: `40`–`99` is 1940–1999, `00`–`39` is 2000–2039.
+A value which cannot be read as a date or a time at all is migrated exactly as it was exported, counted and
+reported as a warning — PostgreSQL then refuses it, which is the honest outcome; nothing is invented here.
+
 
 ### 4.3 Oracle
 - **Mode**: Native Connection
@@ -253,7 +309,7 @@ See more on the “Connection to Informix” wiki page:
     - libraries: a colon‑separated classpath with your JAR files, e.g.:
 	/usr/share/java/jdbc-4.50.10.1.jar:/usr/share/java/bson-3.8.0.jar
 
-Host, port, database name, and credentials are specified in other fields of the same source‑DB section (see `docs/configs/config_all_options_reference.yaml` for the exact parameter names). Informix also supports ODBC connectivity via `pyodbc`.
+Host, port, database name, and credentials are specified in other fields of the same source‑DB section (see `docs/config_reference.md` for the exact parameter names). Informix also supports ODBC connectivity via `pyodbc`.
 
 **File-based Import (UNL):** For environments where direct connectivity is limited, the Informix connector supports offline file-based ingest using native `.unl` export files via the `data_export` configuration.
 
@@ -281,16 +337,153 @@ See more at the “Connection to Sybase ASE” wiki page:
   - Under an odbc block:
     - driver: "FreeTDS"
 
-Other ODBC parameters such as DSN or connection string are configured alongside the driver (see `docs/configs/config_all_options_reference.yaml` for the exact parameter names). Sybase ASE also supports JDBC connectivity via `jaydebeapi`.
+Other ODBC parameters such as DSN or connection string are configured alongside the driver (see `docs/config_reference.md` for the exact parameter names). Sybase ASE also supports JDBC connectivity via `jaydebeapi`.
 
 **Current status (Sybase ASE as source):** the richest connector after PostgreSQL for schema objects. Besides tables, data, primary keys, indexes, foreign keys and CHECK constraints it is the **only** connector implementing:
 - **Named default objects** (`CREATE DEFAULT ... AS ...`, bound to several columns by name, note [4] in `FEATURE_MATRIX.md`). PostgreSQL has no such object, so the underlying default expression is attached directly to each target column.
 - **Rules / domains** (note [3]) — externally defined checks bound to a column or data type, migrated as PostgreSQL domains or CHECK constraints depending on `migrate_domains_as`.
+- **Procedure groups** (`create procedure p_report;1`, `create procedure p_report;2`) — several procedures sharing one name, told apart by a number, which the catalog keeps as *one* object holding all their CREATE statements. PostgreSQL has no such thing, so every member is migrated as a routine of its own: the member `;1`, which `exec p_report` calls, keeps the name of the group, every other one gets its number appended (`p_report_2`). Reported as a `WARNING` naming the members, because a caller writing `exec p_report;2` has to name the routine of that member instead.
 - User-defined types, and **hidden computed columns** that Sybase creates for function-based indexes (note [5]) — the index is rewritten to use the underlying expression instead of the internal `sybfi*` column.
+- **Computed columns** (`AS <expression> MATERIALIZED`) become PostgreSQL generated columns — `MATERIALIZED` maps to `STORED`, a computed column which is not materialized to `VIRTUAL` (PostgreSQL 18+, `STORED` with a `WARNING` on an older target). The expression is translated with it: `CONVERT(<type>, <expression>)` becomes `CAST(<expression> AS <type>)` with the type of the target, `$` amounts become plain numbers, and the function mapping is applied (`isnull` → `coalesce`, …). The columns are left out of the data migration, because PostgreSQL computes them itself and refuses a supplied value. `CONVERT` with a third argument — the *style* number, which formats a date or a number — has no equivalent in a `CAST` and is **not** converted: it is reported as a `WARNING` and has to be completed by hand, rather than silently producing differently formatted values.
 
 Functions, procedures and triggers are converted (T-SQL → PL/pgSQL, via the shared T-SQL parser), as are views.
 
+**Data types worth knowing about (Sybase ASE):** the `TIMESTAMP` of Sybase is **not** a point in time — it is the row version of the row, a `VARBINARY(8)` the server writes on every change (the `ROWVERSION` of MS SQL), and it is migrated as `BYTEA`. PostgreSQL does not maintain such a column; the values of the source are copied, they are not updated afterwards. `MONEY` / `SMALLMONEY` become `NUMERIC(19,4)` / `NUMERIC(10,4)`, `BIGTIME` becomes `TIME` (it holds a time of the day, not a point in time) and `BIGDATETIME` becomes `TIMESTAMP`.
+
 **Known limitations (Sybase ASE):** foreign-key `ON DELETE` actions, table/column comments and standalone sequences have no Sybase counterpart or are not migrated. Note that older ASE versions do not support `LIMIT ... OFFSET`, so the migrator always drops and reloads unfinished tables when resuming after a crash for this source (it cannot skip already-loaded rows reliably).
+
+#### 4.6.1 Cases which need manual adjustment (Sybase ASE)
+
+Functions, procedures and triggers are converted statement by statement, and most of T-SQL has a
+counterpart in PL/pgSQL. What follows is the list of constructs which have **no** faithful
+counterpart. Each one is converted to something PostgreSQL accepts, so that the object can be
+created and the rest of it reviewed, and each one is marked where it stands — as a `TODO` comment
+in the generated code, as a `WARNING` in the log, or both. The generated SQL of every object is
+stored in the migration database (`migration.funcprocs`, `migration.triggers`) together with the
+error the target reported, so these places can be found again after a run.
+
+**Error handling and status codes**
+
+- **`@@error`** becomes the variable `locvar_sybase_error`, which starts at 0 and is never written.
+  PostgreSQL raises an exception where Sybase ASE sets a status, so a statement which fails does
+  not reach the test behind it: `if @@error <> 0 ... ` is dead code after the conversion. Rewrite
+  it as an `EXCEPTION WHEN OTHERS THEN` block around the statement. Reported as a `WARNING`.
+- **`GOTO` and its labels** become `/* TODO: GOTO ... - unsupported in PL/pgSQL */` comments;
+  PL/pgSQL has no `GOTO`. The usual pattern is a jump to an error exit (`goto do_rollback`), which
+  becomes unreachable code — the same rewrite as above replaces it.
+- **`RETURN <status>` together with an output parameter.** A procedure of Sybase answers with both
+  a status code and its `OUTPUT` parameters. A function of PostgreSQL answers with one value, and
+  the conversion gives it the output parameters (`INOUT`), so a `RETURN 0` / `RETURN -1` in the
+  body returns the status *instead of* them. Decide which of the two the callers need: keep the
+  status and read the value from a table, or drop the `RETURN` and keep the parameter.
+- **`RAISERROR`** becomes `RAISE EXCEPTION`. All of its forms are read: the number alone
+  (`raiserror 20002, @sku`), the number with a format string, a message held in a variable and the
+  parenthesized form of MS SQL (`RAISERROR('...', 16, 1, @v)`, whose severity and state have no
+  counterpart and are dropped). The `%1!` placeholders of Sybase and the `%s` / `%d` of MS SQL
+  become the `%` of PostgreSQL — numbered placeholders also **reorder the arguments** (`%2! %1!`
+  really does swap them) — and a literal percent sign is kept as `%%`.
+  A `RAISERROR` which only names a message **number** carries no text at all: the text lives in
+  `sysusermessages`, which the migrator reads and uses (`raiserror 20002, @sku` becomes
+  `RAISE EXCEPTION 'Product % does not exist (error 20002 of the source)', locvar_sku`). When the
+  message is not in the catalog, the exception reports the number and the arguments and the place
+  is logged as a `WARNING`.
+  The **error number is written into the message text**, since PostgreSQL identifies an error by
+  `SQLSTATE` and not by a number. Code which reacts to a particular error number has to be given an
+  `ERRCODE` and a matching handler.
+- **`ROLLBACK TRIGGER [WITH RAISERROR <n> "<message>"]`** — the way a trigger of Sybase refuses the
+  statement which fired it — becomes a `RAISE EXCEPTION` carrying that message, which is exactly
+  what it does in PostgreSQL: the exception of a trigger function undoes the statement. The message
+  is read whether it stands on the same line or on the next one. A `ROLLBACK TRIGGER` **without** a
+  message becomes a `RAISE EXCEPTION` naming the construct and is reported as a `WARNING`:
+  PostgreSQL cannot undo only the work of the trigger and let the statement stand. Note the
+  difference in scope — `ROLLBACK TRIGGER` of Sybase rolls the whole transaction back, while the
+  exception aborts the statement and leaves the transaction to its caller.
+
+**Options and parameters of the routine**
+
+- **`WITH RECOMPILE` and the other options** written between the parameters and the body are
+  dropped. PostgreSQL decides by itself when it replans a statement, so `RECOMPILE` has no
+  counterpart at all; any other option (`EXECUTE AS`, `ENCRYPTION`) is reported as a `WARNING`,
+  because it can change with whose rights the routine runs (`SECURITY DEFINER`).
+- **`OUTPUT` / `OUT` parameters** are written as `INOUT` in front of the name, which is where
+  PostgreSQL expects the mode; a Sybase output parameter carries its incoming value into the
+  routine, which is what `INOUT` means. A routine which returns a status code *and* has output
+  parameters gets the additional output parameter `locvar_sybase_status` for the status, and
+  `RETURNS record`.
+
+**Cursors**
+
+- The **query of a cursor** is read as a whole, however it is written — `declare c cursor for` with
+  the `select` on the next line, a query over several lines, a `UNION` of two of them. It is
+  converted like every other statement of the routine (names quoted, `#temp` tables, functions of
+  the source), so the `DECLARE` section of the target carries the finished query.
+- A trailing **`FOR READ ONLY` / `FOR UPDATE [OF …]`** is dropped: a cursor of PostgreSQL is read
+  only, and an update through one is written as `WHERE CURRENT OF` without declaring anything here.
+- **`SET ROWCOUNT n`** becomes a `LIMIT` on the statements behind it, whether the number is written
+  out or held in a variable (`set rowcount @top_n` → `LIMIT locvar_top_n`); `SET ROWCOUNT 0` ends it.
+
+**Transactions**
+
+- **`BEGIN TRANSACTION` and `SAVE TRANSACTION`** become comments, and **`COMMIT`/`ROLLBACK`
+  remain** in the code, where PostgreSQL refuses them at run time with `cannot begin/end
+  transactions in PL/pgSQL`. A function runs inside the transaction of its caller and cannot
+  control it. Either move the transaction control to the caller, or turn the routine into a
+  PostgreSQL `PROCEDURE`, which may commit, and call it with `CALL`.
+- **`@@trancount`** becomes the variable `global_trancount`, which is 1 — a routine always runs
+  inside a transaction here. The regular `if @@trancount = 0 begin transaction` therefore does
+  nothing, which is correct, while `if @@trancount > 0 save transaction` needs a savepoint written
+  by hand.
+
+**Values PostgreSQL computes differently**
+
+- **`@@identity`** becomes `lastval()`. That is the value the routine wants as long as the column
+  it read is an identity or `serial` column of PostgreSQL and nothing else in the session drew
+  from a sequence in between. Where that is not certain, write the INSERT as
+  `INSERT ... RETURNING <column> INTO <variable>` instead.
+- **`SELECT @variable = <column> FROM <table>` over more than one row.** Sybase assigns the value
+  of the last row it reads; PostgreSQL raises `query returned more than one row`. Add the
+  `ORDER BY ... LIMIT 1` which says what "last" means, wherever the query is not by key.
+- **`object_name(@@procid)`** — the name of the running routine — becomes that name as a literal.
+  A bare **`@@procid`** does not: PostgreSQL has no id of the routine it is running.
+  **`@@servername`** reads the `cluster_name` setting, which is empty unless it was configured.
+- **Any other global variable** (`@@transtate`, `@@dbts`, `@@procid` on its own, …) is left as it
+  stands and the object will be refused with `syntax error at or near "@"`. The variables which are
+  converted are `@@rowcount`, `@@sqlstatus`, `@@error`, `@@identity`, `@@trancount`,
+  `object_name(@@procid)`, `@@spid`, `@@servername`, `@@version` and `@@nestlevel`; every other one
+  is named in a `WARNING`.
+
+**Triggers: one statement of Sybase against one row of PostgreSQL**
+
+A trigger of Sybase ASE fires **once per statement** and reads all rows of that statement out of
+the tables `inserted` and `deleted`. A trigger of PostgreSQL fires **once per row** and has the two
+rows as the records `NEW` and `OLD`. Statements which can be expressed that way are converted -
+the pseudo table leaves its FROM clause, its columns become fields of the record, an aggregate
+over its single row becomes the value itself and the condition which selected its row is kept - but
+the difference cannot be argued away:
+
+- **A statement which needs the whole set** — a join with `inserted`/`deleted`, a `GROUP BY` over
+  it, both pseudo tables in one FROM clause — is replaced by a statement which does nothing. Every
+  one of them is listed in an `INCOMPLETE CONVERSION` comment at the head of the trigger function
+  and reported as a `WARNING`. Such a trigger has to be written by hand, usually as a statement
+  level trigger (`FOR EACH STATEMENT`) reading a transition table (`REFERENCING NEW TABLE AS ...`),
+  which is the real counterpart of the pseudo tables.
+- **`count(*)` over a pseudo table becomes 1**, and `exists (select ... from inserted)` becomes the
+  condition of that subquery alone. A trigger which checked *how many* rows a statement changed
+  cannot ask that question per row; the count is reported as a `WARNING`.
+- **A cursor over `inserted` or `deleted`** is not converted. The pseudo table stays in the cursor
+  query, the trigger function will be refused by PostgreSQL, and a `WARNING` names it.
+- **A correlated subquery reading the outer pseudo table** leaves the correlated column
+  unqualified, because it cannot be told apart from a column of the subquery's own tables. The
+  object fails to create with `column "..." does not exist`.
+- **`@@rowcount` in a trigger is 1**, for the same reason.
+- **Side effects per statement become side effects per row.** A trigger writing one audit row per
+  statement writes one per changed row after the conversion. This is not reported — the code is
+  valid either way — and has to be judged per trigger.
+
+**Anything the parser could not read** is kept as it was written and marked
+`/* TODO: not processed line - check syntax */`. Such a line is usually a construct of Sybase which
+has no counterpart at all; it is left in place on purpose, so that the object fails to create and
+the place is not overlooked.
 
 ### 4.7 SQLite
 
@@ -361,9 +554,9 @@ file. Consequences worth knowing:
   run — it is useful for inspecting what the scripts actually produced.
 - The scripts are first executed in one go; if that fails, they are replayed **statement by
   statement** so that one bad statement does not cost you every object in the file. Skipped
-  statements are counted and reported at `INFO` (`ATTENTION: n statement(s) ... were SKIPPED`), with
-  each individual statement logged at `WARNING`. Because this tool ranks `WARNING` as *more* verbose
-  than `INFO`, run with `--log-level=WARNING` to see them.
+  statements are counted and reported at `WARNING` (`ATTENTION: n statement(s) ... were SKIPPED`),
+  with each individual statement logged at `WARNING` as well. Both are shown by the default
+  log level.
 - **If the scripts contain `INSERT` statements** (i.e. a full `.dump`), that data lands in the
   staging database and is migrated from there — no `data_export` block is needed. When a CSV data
   source *is* configured for a table, the CSV takes precedence, exactly as for the other DDL based
@@ -377,7 +570,7 @@ Two properties of SQLite shape this connector and explain most of its behavior:
 
 **1. There is no data dictionary.** SQLite exposes columns, indexes and foreign keys through `PRAGMA` statements, but a number of things exist *only* inside the original `CREATE` statements kept in `sqlite_master`: CHECK constraints, generated-column expressions, the `AUTOINCREMENT` marker, the expressions of a functional index, and the `WHERE` condition of a partial index. The connector therefore contains a small **DDL parser** that reads those statements back. The parser is quote- and parenthesis-aware, so commas inside string defaults (`DEFAULT 'a,b'`), nested function calls and all four identifier quoting styles SQLite accepts (`"name"`, `` `name` ``, `[name]`, bare) are handled correctly, and `--` / `/* */` comments are stripped first.
 
-**2. SQLite is dynamically typed.** A column has a *declared type* and a *type affinity*, but any row may store any storage class — a column declared `TEXT` can hold an integer, and a column declared `DATE` can hold an ISO string, a Unix timestamp or a Julian day number. The connector uses the **declared type to choose the PostgreSQL column type**, and then **coerces every value to what the target column actually expects** while the data is migrated (see 4.7.6). A column declared with no type at all is migrated as `TEXT`.
+**2. SQLite is dynamically typed.** A column has a *declared type* and a *type affinity*, but neither is enforced — any row may store any storage class. The affinity only decides how a value is converted when it *can* be converted without loss (a well-formed number written into an `INTEGER` column becomes an integer); everything else is stored exactly as it was given, so a column declared `INTEGER` really does hold the text `'N/A'`, and a column declared `DATE` can hold an ISO string, a Unix timestamp or a Julian day number. The connector therefore chooses the PostgreSQL column type from the **declared type together with the storage classes the column really contains** (see 4.7.5a), and then **coerces every value to what the target column actually expects** while the data is migrated (see 4.7.6). A column declared with no type at all is migrated as `TEXT`.
 
 #### 4.7.4 Current status (SQLite as source)
 
@@ -386,7 +579,7 @@ Two properties of SQLite shape this connector and explain most of its behavior:
 - **Identity columns**: an `INTEGER PRIMARY KEY` (the rowid alias, which SQLite fills in automatically) and any `AUTOINCREMENT` column are migrated as PostgreSQL identity columns (`GENERATED BY DEFAULT AS IDENTITY`). The rowid alias is only recognized for the declared type `INTEGER` on a rowid table — that is exactly the rule SQLite itself applies, so a column declared `INT` or a key on a `WITHOUT ROWID` table is correctly *not* treated as an identity. After the data load the identity is advanced past the migrated rows; the source position is read from `sqlite_sequence` when the column is `AUTOINCREMENT`, otherwise it is derived from the data.
 - **Secondary indexes**, including **UNIQUE** indexes and **functional/expression indexes**. The expressions of a functional index are read from the `CREATE INDEX` statement (the PRAGMA reports `NULL` for them) and translated to PostgreSQL. Auto-generated index names (`sqlite_autoindex_<table>_<n>`, created by a `UNIQUE` table constraint) are replaced with readable `uq_<n>` names.
 - **Foreign keys**, including `ON DELETE` / `ON UPDATE` actions. A short form such as `REFERENCES parent` without a column list is resolved against the parent's primary key. Note that SQLite genuinely creates two foreign keys when a table declares both a column-level `REFERENCES` and a matching table-level `FOREIGN KEY` clause; the connector reports both, faithfully reproducing the source.
-- **CHECK constraints**, both table-level (named via `CONSTRAINT x CHECK (...)`) and column-level, parsed from the DDL and translated to PostgreSQL. Constraints SQLite does not name itself get a generated name that is reduced to plain characters and shortened, so it survives PostgreSQL's 63-byte identifier limit without colliding.
+- **CHECK constraints**, both table-level (named via `CONSTRAINT x CHECK (...)`) and column-level, parsed from the DDL and translated to PostgreSQL. Constraints SQLite does not name itself get a generated name that is reduced to plain characters and shortened, so it survives PostgreSQL's 63-byte identifier limit without colliding. The literals of the condition are adapted to the type the target column really gets: `0` / `1` against a column migrated as `BOOLEAN` become `FALSE` / `TRUE`. A condition that cannot exist on the target at all — a number compared with a column that had to be migrated as `TEXT` (4.7.5a), or a value other than 0/1 compared with a `BOOLEAN` column — is **not** migrated; the constraint is skipped with a `WARNING` naming it, instead of failing the migration with `operator does not exist`.
 - **Generated columns**, both `STORED` and `VIRTUAL`. PostgreSQL only has stored generated columns, so both kinds become `GENERATED ALWAYS AS (...) STORED`. Their expressions are translated to PostgreSQL, and the columns are excluded from the data `INSERT` — PostgreSQL computes them itself and rejects supplied values. Note that PostgreSQL 12+ is required; the migrator's pre-migration capability check enforces this.
 - **Default values**: literals are taken over unchanged, `CURRENT_TIMESTAMP` / `CURRENT_DATE` / `CURRENT_TIME` are preserved, the parentheses SQLite wraps expression defaults in are removed, a blob literal `X'AABB'` becomes `'\xaabb'::bytea`, and any remaining expression is translated to PostgreSQL. `NULL` defaults are dropped.
 - **Views** are migrated. The defining `SELECT` is isolated from the stored `CREATE VIEW` statement and transpiled to PostgreSQL with `sqlglot` (`ifnull`→`coalesce`, `substr`→`substring`, `instr`→`strpos`, and so on). Because SQLite statements reference tables without any schema qualification, the names of migrated tables and views in the query are rewritten to `"target_schema"."name"`, so the view does not depend on the target `search_path`.
@@ -414,12 +607,36 @@ SQLite accepts *any* declared type, so the mapping deliberately covers the type 
 | `DATE` | `DATE` | |
 | `DATETIME`, `TIMESTAMP`, `SMALLDATETIME` | `TIMESTAMP` | |
 | `TIME` | `TIME` | |
-| `BOOLEAN`, `BOOL`, `BIT` | `BOOLEAN` | |
+| `BOOLEAN`, `BOOL`, `BIT` | `SMALLINT` / `BOOLEAN` | SQLite has no boolean type — see the note below the table |
 | `JSON` | `JSONB` | |
 | `UUID`, `GUID`, `UNIQUEIDENTIFIER` | `UUID` | |
 | *(no declared type)* | `TEXT` | |
 
+A column **declared** `BOOLEAN`, `BOOL` or `BIT` is not a boolean column — SQLite has no boolean type and stores the same `0` and `1` there that a `NUMERIC(1,0)` column of any other database holds, and such a column can just as well carry a small code. Which of the two it is cannot be told from the declaration, so the decision is left to the same configuration that decides it for Oracle `NUMBER(1,0)`: `migration.map_numeric_1_to_boolean` (all such columns) or the allow-list `migration.numeric_1_boolean_columns` (named columns). **Without them the column is migrated as `SMALLINT`**, which is lossless and keeps the `CHECK` constraints, defaults and trigger conditions the source wrote against `0` and `1` working. The one exception is decided by the data: a column that really holds `'true'` / `'false'` as text becomes `BOOLEAN` even without the setting, because `SMALLINT` cannot hold those values (reported as a `WARNING`).
+
+Whenever a column *does* become `BOOLEAN`, the `0` / `1` literals of its `CHECK` constraints are rewritten to `FALSE` / `TRUE` — `CHECK (eu_member IN (0, 1))` would otherwise reach the target as `operator does not exist: boolean = integer` — and a `DEFAULT 0` / `DEFAULT 1` becomes `DEFAULT FALSE` / `DEFAULT TRUE`.
+
 Any of these can be overridden per table/column with the usual `data_types_substitution` rules.
+
+#### 4.7.5a Type selection from the stored values
+
+Because the declared type is not a guarantee, choosing the target type from it alone produces a table the data does not fit into — `VALUES (4, 'unconvertible', 'N/A', …)` into a `BIGINT` column ends the **whole batch** with `invalid input syntax for type bigint: "N/A"`. Before the target table is created, the connector therefore reads the table **once** and checks, per column, whether the values really stored can be represented in the type the declaration was mapped to. A column that fails the check is **widened**, and the reason is reported as a `WARNING` naming the table, the column and what was found:
+
+| Declared type maps to | What is looked for | Migrated as |
+|---|---|---|
+| `SMALLINT` / `INTEGER` / `BIGINT` | text which is not an integer literal | `TEXT` |
+| `SMALLINT` / `INTEGER` / `BIGINT` | a value stored as `REAL` with a fractional part (PostgreSQL would silently *round* it into an integer column) | `NUMERIC` |
+| `SMALLINT` / `INTEGER` | an integer outside the range of the target type (a `TINYINT` column of SQLite holds 8-byte integers) | `BIGINT` |
+| `NUMERIC` / `REAL` / `DOUBLE PRECISION` | text which is not a number | `TEXT` |
+| `BOOLEAN` | text which is not one of the recognized boolean words | `TEXT` |
+| `DATE` / `TIME` / `TIMESTAMP` | text which SQLite's own `date()` / `time()` / `datetime()` cannot read as a point in time | `TEXT` |
+| any of the above | a value stored as `BLOB` | `TEXT` |
+
+The check is deliberately conservative: text which *is* a well-formed number stays in a numeric column, `0`/`1` and `true`/`yes`/`on`/… stay in a `BOOLEAN` column, and ISO dates stay in a `DATE` column, so a database whose data matches its declarations is migrated exactly as before. A `BLOB` column is never widened — every storage class can be stored in `BYTEA` without loss.
+
+Widening is the honest outcome, not a repair: the value is migrated as it stands instead of being rounded, truncated or invented. A date written in a format SQLite cannot read (`'05/01/2024'`, which is the 4th of January or the 1st of April depending on the convention) is migrated as text for exactly that reason — the migrator does not guess which one it is. Use `data_types_substitution` to force a different type for such a column, and convert the values on the target afterwards.
+
+The check costs one sequential scan of each table, evaluated as a single query with one aggregate expression per test. Columns whose target is `TEXT`, `VARCHAR`, `CHAR` or `BYTEA` need no test at all, identity columns (the SQLite rowid) are skipped, and empty tables are never widened.
 
 #### 4.7.6 Value conversion during data migration
 
@@ -430,8 +647,8 @@ Because the declared type is not a guarantee, values are converted on the way ou
 | `BOOLEAN` | `0`/`1` and the usual text forms (`t`/`true`/`yes`/`on`, `f`/`false`/`no`/`off`) become a Python `bool`; `NULL` stays `NULL` |
 | `TIMESTAMP` / `DATE` / `TIME` | ISO text is passed through for PostgreSQL to parse; an `INTEGER` is interpreted as a **Unix timestamp** and a `REAL` as a **Julian day number**, both converted to a `datetime` |
 | `BYTEA` | `BLOB` values are passed through as bytes; text is encoded as UTF-8 |
-| `TEXT` / `VARCHAR` / `CHAR` / `JSONB` / `UUID` | non-string storage classes (e.g. an integer stored in a `TEXT` column) are stringified; a `BLOB` is decoded with replacement characters |
-| numeric types | passed through unchanged; a value stored as text is handed to PostgreSQL, which casts it |
+| `TEXT` / `VARCHAR` / `CHAR` / `JSONB` / `UUID` | non-string storage classes (e.g. an integer stored in a `TEXT` column) are stringified; a `BLOB` which is valid UTF-8 is decoded, one which is not is written as the SQLite blob literal `X'00FF…'` — decoding real binary content with replacement characters would destroy it silently |
+| numeric types | passed through unchanged; a value stored as text is handed to PostgreSQL, which casts it (a column holding text which is *not* a number is not migrated as a numeric type in the first place — see 4.7.5a) |
 
 When `migration.migrate_lob_values` is `false`, `BLOB`-backed columns are migrated as `NULL`.
 
@@ -443,6 +660,7 @@ When `migration.migrate_lob_values` is `false`, `BLOB`-backed columns are migrat
 - **No comments**: SQLite stores no table or column comments, so nothing is migrated.
 - **`COLLATE` clauses are dropped.** SQLite's collations (`NOCASE`, `RTRIM`, `BINARY`) do not correspond to PostgreSQL collations. In particular a `NOCASE` unique index becomes case-*sensitive* on the target, which can allow rows the source would have rejected — consider a `CITEXT` column or an expression index on `lower(...)` where this matters.
 - **View, trigger and expression conversion is best-effort.** Translation is done by `sqlglot` plus a SQLite-specific function mapping. Constructs without a clean equivalent should be reviewed: `strftime()` and the other date/time functions have only partial counterparts, `group_concat()` differs from `string_agg()` in its argument handling, `last_insert_rowid()` is mapped to `lastval()`, and `changes()` has no equivalent. When `sqlglot` cannot parse a fragment, the original text is kept and a `DEBUG` message is logged, so the resulting object may fail to create. Every generated statement is stored in the migration database, so failures can be inspected and fixed there.
+- **Trigger and view bodies are not adapted to a `BOOLEAN` column.** The literal rewriting described above is done for `CHECK` constraints only. When a column is opted in to `BOOLEAN` (`map_numeric_1_to_boolean` / `numeric_1_boolean_columns`) and a trigger or view compares it with `0` or `1`, that statement has to be corrected by hand — the body may reference other tables, whose columns of the same name can have a different type, so rewriting it blindly would be a guess. The default mapping (`SMALLINT`) is not affected.
 - **Trigger bodies** are limited to what SQLite itself allows (`INSERT`/`UPDATE`/`DELETE`/`SELECT` plus `RAISE`), which maps cleanly, but a trigger whose header cannot be parsed is skipped with a `WARNING` and must be migrated manually.
 - **Table sizes** are only available when the SQLite library was compiled with `SQLITE_ENABLE_DBSTAT_VTAB` (the `dbstat` virtual table). Otherwise the pre-migration analysis reports a size of `0`; row counts are always accurate, but note that they are obtained with a real `count(*)` per table, since SQLite keeps no row estimates.
 - **File-based ingest**: supported through `connectivity: "ddl"` (section 4.7.2) — objects from SQL scripts, data from CSV via `data_export`, or from the scripts themselves when they are a full dump. The Informix `UNL` format and the `big_files_split` parallel chunking are not implemented for SQLite.
@@ -491,12 +709,12 @@ carries numbered notes for the engine-specific caveats.
 ### 5.1 General characteristics
 
 - The config file is a YAML document.
-- Every existing configuration setting is documented by example in `docs/configs/config_all_options_reference.yaml`. That file is a **reference, not a template**: it lists all options at once, including ones that exclude each other — all three connectivity sub-blocks (`jdbc`, `odbc`, `ddl`) although `connectivity` selects one, options belonging to different source engines side by side, the `mapping` block while `workflow` is `standard` — so it cannot be used as a configuration file as it is.
+- Every existing configuration setting is documented in `docs/config_reference.md`, with its type, allowed values, default and the source engines it applies to. That file is generated from `credativ_pg_migrator/config.schema.json` and cannot drift from it. The schema is also what the migrator validates your configuration against when it starts: a wrong value **stops the run there**, before anything is migrated, and an unknown key is reported as a warning. `--ignore-config-schema-errors` runs anyway.
 
 - Ready-to-use examples for every supported source database and workflow are in [configs/](configs/) - see [configs/README.md](configs/README.md). Taking the example for your engine is the fastest way to start: every line that must be changed is marked `>>> ADJUST`.
 
 The usual workflow is:
-- Copy the example matching your source from `docs/configs/` to a new file, e.g. my_migration.yaml (or start from scratch and copy the sections you need out of `docs/configs/config_all_options_reference.yaml`).
+- Copy the example matching your source from `docs/configs/` to a new file, e.g. my_migration.yaml. Every file there is a complete, valid configuration; look individual options up in `docs/config_reference.md`.
 - Edit what you need:
   - connection details
   - schemas / objects to include or exclude
@@ -535,7 +753,7 @@ The usual workflow is:
 - Default value mappings
   - Rules replacing vendor‑specific default expressions with PostgreSQL equivalents (e.g. legacy date functions).
 
-Use `docs/configs/config_all_options_reference.yaml` as the authoritative reference for the exact field names and their meanings – it is maintained along with the code and kept up to date. It documents every option that exists and is therefore not usable as a configuration file on its own.
+Use `docs/config_reference.md` as the authoritative reference for the exact field names and their meanings – it is generated from `credativ_pg_migrator/config.schema.json`, the same schema the migrator validates against, so it cannot fall behind the code.
 
 ### 5.3 Advanced Configuration
 
@@ -576,11 +794,27 @@ Parameters:
 - --log-file
   - Path to the log file. The log is also printed to the console by default.
 - --log-level
-  - Logging verbosity for the CLI output and log file. The tool supports at least:
-    - INFO – high‑level progress and important messages
-    - DEBUG – detailed internal operations
-	- DEBUG2 – very verbose, low‑level details (may produce large logs)
-	- DEBUG3 – maximum verbosity, for deep troubleshooting
+  - Lowest severity written to the CLI output and the log file. Each level shows itself
+    and everything more severe, so the levels run from quietest to noisiest:
+    - ERROR – only what failed
+    - WARNING – ERROR, plus what could not be converted or was skipped
+    - INFO – **the default**: ERROR, WARNING, and high‑level progress
+    - DEBUG – all of the above, plus detailed internal operations
+    - DEBUG2 – very verbose, low‑level details (may produce large logs)
+    - DEBUG3 – maximum verbosity, for deep troubleshooting
+  - Note: before 0.16.1 the levels were an inclusion ladder starting at INFO, so
+    `--log-level=INFO` showed INFO alone and warnings stayed hidden unless the run was
+    started with `--log-level=WARNING`. Warnings are now shown by default, and
+    `--log-level=WARNING` is now *quieter* than INFO rather than noisier.
+- --ignore-config-schema-errors
+  - Continue even when the configuration does not match the configuration schema
+    (`credativ_pg_migrator/config.schema.json`). By default a setting the migrator cannot
+    carry out - a wrong type, a value outside the allowed set, a list of the wrong length,
+    a missing required block - is reported and **stops the run before anything is
+    migrated**. An *unknown* key never stops the run; it is reported as a warning, so a
+    configuration written for a later version stays usable, while a misspelling is still
+    named. Use this flag for the case where the schema is wrong and the configuration is
+    right, and please report it.
     - --dry-run
       - Run the tool in dry-run mode (no changes to target).
     - --resume
@@ -605,7 +839,7 @@ Start with DEBUG, should be sufficient for most use cases. Deeper levels are onl
   - Test connectivity independently (e.g. using isql for ODBC or a DB client).
 
 - Prepare the YAML configuration
-  - Start from `docs/configs/config_all_options_reference.yaml` and copy the sections you need.
+  - Start from the example for your source database in `docs/configs/` and look options up in `docs/config_reference.md`.
   - Fill in connection details for source, target, and migration DBs.
   - Define schemas/tables to migrate.
   - Configure any necessary type/default mappings and data filters.
@@ -729,7 +963,7 @@ Checklist:
   - For Sybase ASE, double‑check FreeTDS and unixODBC configuration (odbcinst -j, odbcinst.ini, odbc.ini).
   - For Informix, ensure the JAR paths in the libraries setting are correct and readable.
   - For SQLite there is no driver at all. A failure here means the file itself: the migrator stops with `SQLite database file not found` when `database` does not point at an existing file — remember that a relative path is resolved against the directory of the **config file**, not the current working directory. A `WARNING` about opening the file read-write instead of read-only means a leftover journal/WAL had to be recovered; verify that the file is not in use by a running application. `file is not a database` means the file is not SQLite (or is encrypted — SQLCipher and other encrypted variants are not supported).
-  - Also for SQLite: the valid `connectivity` values are `"native"` (a database file, the default) and `"ddl"` (SQL script files). Anything else is rejected at start-up with an explanatory message. With `"ddl"`, a missing `ddl: path:` block, a path matching no file, and scripts that produce no objects at all are each reported with their own message; if objects *are* created but some statements failed, look for `ATTENTION: n statement(s) ... were SKIPPED` in the log and re-run with `--log-level=WARNING` to see which ones.
+  - Also for SQLite: the valid `connectivity` values are `"native"` (a database file, the default) and `"ddl"` (SQL script files). Anything else is rejected at start-up with an explanatory message. With `"ddl"`, a missing `ddl: path:` block, a path matching no file, and scripts that produce no objects at all are each reported with their own message; if objects *are* created but some statements failed, look for `ATTENTION: n statement(s) ... were SKIPPED` in the log - it and each skipped statement are logged at `WARNING`, which the default log level shows.
 - Check YAML formatting
   - YAML is whitespace‑sensitive; wrong indentation or quoting can cause subtle errors.
   - Validate your config with a YAML linter if you suspect a formatting issue.

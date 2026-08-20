@@ -35,6 +35,72 @@ anonymization:
         salt: "my_secret_salt"
 ```
 
+## Rule Validation
+
+The whole `anonymization` section is validated at startup, before a single row is read. The run
+is aborted with a fatal error when a rule cannot be used:
+
+* the `method` is missing, empty, or not a string,
+* the `method` is not registered (a typo, or a name that was never implemented),
+* `params` is not a mapping,
+* `table_pattern` or `column_pattern` is not a valid regular expression,
+* `tables` / `regex_mappings` do not have the expected structure.
+
+All problems are collected and reported together, with the list of known method names:
+
+```text
+Invalid 'anonymization' configuration - the run is stopped because the listed columns would keep
+their original values while the migration reports success:
+  - anonymization.tables.customers.email: unknown anonymization method 'faker_emial' - known
+    methods are: consistent_integer_mask, custom_german_bank, custom_iban, ...
+```
+
+An unusable rule is never skipped at runtime. Skipping it would copy the original personal data
+into a target database that everybody afterwards treats as anonymized, while the migration
+reports success.
+
+The same principle applies to the reporting: the workers count the values they really replaced
+per table, column and method into the protocol table `<migration>_anonymization_stats`, and the
+summary reports from those counts. A rule which matched a column but replaced nothing, and a
+configured rule which matched no migrated column at all, are both listed as warnings in the
+summary - see the example output below.
+
+## Values Not Fitting Into the Target Column
+
+A string value can be longer than the target column - the target column may be narrower than the
+data of the source, or the anonymization method may produce longer output than the original
+value. What happens then is configured, never silent:
+
+```yaml
+anonymization:
+  # error (default) | fit | find_fitting_value
+  on_value_too_long: find_fitting_value
+  # only for find_fitting_value - how many times the method may be called for one value
+  find_fitting_value_attempts: 10
+```
+
+* **`error`** (default) - the table fails and the migration stops, naming the table, the column,
+  the length of the value and the length of the column. Cutting the value would destroy data and
+  hide the real problem; a checksum validation of the target would fail later, or - worse - the
+  cut would be uniform enough that it would not.
+* **`fit`** - the value is cut to the length of the column. Every cut is counted per column,
+  written to `<migration>_anonymization_stats` (`values_truncated`), reported the first time it
+  happens for a column while the copy runs, and listed as a warning of the summary.
+* **`find_fitting_value`** - the anonymization method is called again, up to
+  `find_fitting_value_attempts` times, until it returns a value which fits. The number of values
+  which had to be regenerated is recorded (`values_refitted`) and reported in the summary. If the
+  method returns the same value every time - `deterministic_hash_mask`, `static_mask` and every
+  other deterministic method do - it is recognized at the first repetition and the run stops
+  instead of trying again. When the attempts are exhausted, the run stops as well.
+
+The setting applies to the columns copied unchanged too. Such a column cannot be regenerated, so
+`find_fitting_value` reports it as an error naming the column - widen the target column, or use
+`fit` to cut those values knowingly.
+
+The value itself never appears in a message or in the protocol tables - it is the personal data
+this workflow exists to protect. A `postgres_anon_native` value is not measured at all: it is a
+function call for the target server, not the value the target will store.
+
 ## Available Anonymization Methods
 
 The following methods are pre-registered and ready for use in your configuration files.
@@ -166,16 +232,18 @@ public.movie_countries              |         103,011 |            2.94
 
 [ ANONYMIZATION WORKFLOW RESULTS ]
 --------------------------------------------------------------------------------
-Anonymized 6 columns in 3 tables.
+Anonymization rules configured: 6
+Columns matched by a rule: 6 in 3 tables
+Values really replaced: 571477 in 3 columns
 
 Top Tables with Most Anonymized Columns:
-1. public.movies (4 columns anonymized)
-   Column Name | Data Type | Method
-   ------------+-----------+---------------------
-   budget      | numeric   | numeric_noise
-   homepage    | text      | partial_mask
-   name        | text      | deterministic_hash_mask
-   revenue     | numeric   | consistent_integer_mask
+1. public.movies (4 columns matched by a rule, 277249 values replaced)
+   Column Name | Data Type | Method                   | Values replaced
+   ------------+-----------+--------------------------+----------------
+   budget      | numeric   | numeric_noise            |               0
+   homepage    | text      | partial_mask             |               0
+   name        | text      | deterministic_hash_mask  |          277249
+   revenue     | numeric   | consistent_integer_mask  |               0
 
    Examples (Original => Anonymized):
    Row 1 (PK: id=5):
@@ -204,10 +272,10 @@ Top Tables with Most Anonymized Columns:
      - name: 'Smoking in the Girls' Room' => '8722945cea77f7e2216b2376dbb793...'
      - revenue: 'None' => 'None'
 
-2. public.people (1 columns anonymized)
-   Column Name | Data Type | Method
-   ------------+-----------+---------------------
-   name        | text      | faker_name
+2. public.people (1 columns matched by a rule, 294184 values replaced)
+   Column Name | Data Type | Method                   | Values replaced
+   ------------+-----------+--------------------------+----------------
+   name        | text      | faker_name               |          294184
 
    Examples (Original => Anonymized):
    Row 1 (PK: id=1):
@@ -221,10 +289,10 @@ Top Tables with Most Anonymized Columns:
    Row 5 (PK: id=16):
      - name: 'Tamara Smart' => 'Anna Lorch'
 
-3. public.trailers (1 columns anonymized)
-   Column Name | Data Type | Method
-   ------------+-----------+---------------------
-   key         | text      | static_mask
+3. public.trailers (1 columns matched by a rule, 44 values replaced)
+   Column Name | Data Type | Method                   | Values replaced
+   ------------+-----------+--------------------------+----------------
+   key         | text      | static_mask              |              44
 
    Examples (Original => Anonymized):
    Row 1 (PK: id=400):
@@ -237,5 +305,13 @@ Top Tables with Most Anonymized Columns:
      - key: 'FQRgJTEw_OA' => 'YYYYYYYYYYY'
    Row 5 (PK: id=406):
      - key: 'atbuBxDO1Go' => 'YYYYYYYYYYY'
+
+WARNING: 3 rules replaced no value - the data of these columns was copied unchanged:
+   - public.movies.budget (numeric_noise) - no value replaced, every copied value was NULL
+   - public.movies.homepage (partial_mask) - no value replaced, every copied value was NULL
+   - public.movies.revenue (consistent_integer_mask) - no value replaced, every copied value was NULL
+
+WARNING: 1 configured rules matched no migrated column - check the table and column names:
+   - anonymization.tables.public.people.nmae
 ================================================================================
 ```

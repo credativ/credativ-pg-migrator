@@ -476,21 +476,15 @@ class Orchestrator:
                     sequence_name = sequence_details['name']
                     column_name = sequence_details['column_name']
                     sequence_sql = sequence_details['set_sequence_sql']
-                    self.migrator_tables.insert_sequence({
-                        'sequence_id': sequence_id,
-                        'target_schema_name': target_schema_name,
-                        'target_table_name': target_table_name,
-                        'target_column_name': column_name,
-                        'target_sequence_name': sequence_name,
-                        'target_sequence_sql': sequence_sql
-                    })
+                    self.migrator_tables.insert_sequence(
+                        self.sequence_protocol_settings(table_data, sequence_details, sequence_sql, None))
                     self.config_parser.print_log_message( 'DEBUG', f"orchestrator: mapping_data_worker: Worker {worker_id}: Setting sequence with SQL: {sequence_sql}")
                     try:
                         worker_target_connection.execute_query(sequence_sql)
                         self.config_parser.print_log_message('INFO', f"orchestrator: mapping_data_worker: Worker {worker_id}: Sequence ({order_num}) {sequence_name} set successfully for table {target_table_name}.")
                         seq_curr_val = worker_target_connection.get_sequence_current_value(sequence_id)
                         self.config_parser.print_log_message('INFO', f"orchestrator: mapping_data_worker: Worker {worker_id}: Current value of sequence {sequence_name} is {seq_curr_val}.")
-                        self.migrator_tables.update_sequence_status({'sequence_id': sequence_id, 'success': True, 'message': 'migrated OK'})
+                        self.migrator_tables.update_sequence_status({'sequence_id': sequence_id, 'success': True, 'message': 'migrated OK', 'target_sequence_last_value': seq_curr_val})
                     except Exception as e:
                         self.migrator_tables.update_sequence_status({'sequence_id': sequence_id, 'success': False, 'message': f'ERROR: {e}'})
                         self.migrator_tables.update_table_status({'row_id': table_data['id'], 'success': False, 'message': f'ERROR: {e}'})
@@ -682,9 +676,13 @@ class Orchestrator:
                             self.config_parser.print_log_message('INFO', msg)
                             self.migrator_tables.update_user_defined_type_status({'row_id': type_data['id'], 'success': True, 'message': 'skipped (exists)'})
                         else:
+                            # Not an error of the migration: the domain of the target was
+                            # created by an earlier run or by hand, and it is the existing
+                            # one which the columns are created with. Reported so that the
+                            # difference is visible, but nothing is overwritten.
                             msg = f"Domain {type_data['target_type_name']} already exists but with different underlying type: {existing_type} (expected: {target_basic_type}). Normalized: {norm_existing} vs {norm_target}. Skipping creation."
-                            self.config_parser.print_log_message('ERROR', msg)
-                            self.migrator_tables.update_user_defined_type_status({'row_id': type_data['id'], 'success': False, 'message': f'ERROR: {msg}'})
+                            self.config_parser.print_log_message('WARNING', msg)
+                            self.migrator_tables.update_user_defined_type_status({'row_id': type_data['id'], 'success': False, 'message': f'WARNING: {msg}'})
                     else:
                         self.target_connection.execute_query(type_data['target_type_sql'])
                         self.migrator_tables.update_user_defined_type_status({'row_id': type_data['id'], 'success': True, 'message': 'migrated OK'})
@@ -906,6 +904,99 @@ class Orchestrator:
 
         self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'constraints migration', 'success': True, 'message': 'finished OK'})
 
+    def find_source_column(self, table_data, target_column_name):
+        """
+        The description of the column of the source which the named column of the target stands
+        for, or None. The name in the target went through the case handling of the
+        configuration, so the names are compared without regard to case first and through that
+        handling afterwards.
+        """
+        target_column_name = target_column_name or ''
+        source_columns = (table_data.get('source_columns') or {}).values()
+        for column_info in source_columns:
+            if (column_info.get('column_name') or '').lower() == target_column_name.lower():
+                return column_info
+        for column_info in source_columns:
+            if self.config_parser.convert_names_case(column_info.get('column_name') or '') == target_column_name:
+                return column_info
+        return None
+
+    def is_identity_column(self, column_info):
+        """ True when the connector of the source reported this column as an identity column. """
+        return bool(column_info) and column_info.get('is_identity') in ('YES', True)
+
+    def table_identity_columns(self, table_data):
+        """
+        The names of the columns which the connector of the source reported as identity columns
+        of this table - the next identity value of the source describes those and no other.
+        Empty for a source which does not report an identity column of its own kind, a serial
+        column of PostgreSQL for instance.
+        """
+        return [column_info.get('column_name')
+                for column_info in (table_data.get('source_columns') or {}).values()
+                if self.is_identity_column(column_info)]
+
+    def sequence_protocol_settings(self, table_data, sequence_details, sequence_sql, next_identity):
+        """
+        The description of a sequence of a table for the sequences protocol table.
+
+        A sequence of the target which belongs to a table comes from an identity column of the
+        source - the legacy databases have no sequence objects of their own - and the protocol
+        has to say so: which column of the source it stands for, whether that column really is
+        an identity column, what data type it has there and which next value the source
+        reported. The columns of the source are matched to the column of the sequence by name,
+        because the name in the target went through the case handling of the configuration.
+        """
+        target_column_name = (sequence_details.get('column_name') or '')
+        source_column = self.find_source_column(table_data, target_column_name)
+
+        target_column = None
+        for column_info in (table_data.get('target_columns') or {}).values():
+            if self.config_parser.convert_names_case(column_info.get('column_name') or '') == target_column_name:
+                target_column = column_info
+                break
+
+        return {
+            'sequence_id': sequence_details['id'],
+            'source_schema_name': table_data.get('source_schema_name'),
+            'source_table_name': table_data.get('source_table_name'),
+            'source_column_name': source_column.get('column_name') if source_column else None,
+            'source_column_data_type': (source_column.get('column_type') or source_column.get('data_type')) if source_column else None,
+            'source_is_identity': self.is_identity_column(source_column) if source_column else None,
+            'source_next_identity': next_identity,
+            'target_schema_name': table_data.get('target_schema_name'),
+            'target_table_name': table_data.get('target_table_name'),
+            'target_column_name': target_column_name,
+            'target_column_data_type': target_column.get('data_type') if target_column else None,
+            'target_sequence_name': sequence_details['name'],
+            'target_sequence_sql': sequence_sql,
+        }
+
+    def fetch_source_next_identity(self, table_data, worker_id):
+        """
+        The next identity value of a table of the source, read with a connection of its own.
+
+        The data migration reads this value with the connection it already has; this is the way
+        for a table whose data was not migrated at all, where the source is not connected - the
+        sequence of its identity column has to be set as well. A source which cannot answer -
+        no connection at all with DDL connectivity, a table without an identity column - leaves
+        the sequence to be set from the rows which are in the target.
+        """
+        source_connection = None
+        try:
+            source_connection = self.load_connector('source')
+            source_connection.connect()
+            return source_connection.get_table_next_identity(table_data['source_schema_name'], table_data['source_table_name'])
+        except Exception as e:
+            self.config_parser.print_log_message('WARNING', f"orchestrator: table_worker: Worker {worker_id}: Next identity value of {table_data['source_schema_name']}.{table_data['source_table_name']} could not be read from the source ({e}) - the sequence is set from the data in the target.")
+            return None
+        finally:
+            if source_connection is not None:
+                try:
+                    source_connection.disconnect()
+                except Exception:
+                    pass
+
     def table_worker(self, table_data, settings):
         worker_id = uuid.uuid4()
         part_name = 'start'
@@ -914,6 +1005,8 @@ class Orchestrator:
         rows_migrated = 0
         worker_start_time = time.time()
         worker_end_time = None
+        next_identity = None
+        source_next_identity_read = False
         try:
             # target_schema_name = self.config_parser.convert_names_case(table_data['target_schema_name'])
             target_schema_name = table_data['target_schema_name'] ## target schema is used as defined in the config file, no case conversion
@@ -1448,47 +1541,81 @@ class Orchestrator:
                         table_settings['chunk_number'] += 1
 
                 next_identity = worker_source_connection.get_table_next_identity(table_data['source_schema_name'], table_data['source_table_name'])
+                source_next_identity_read = True
                 worker_source_connection.disconnect()
-
-                if rows_migrated > 0:
-                    # sequences setting
-                    part_name = 'sequences'
-                    self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Setting sequences for table {target_table_name} in target database.")
-                    sequences = worker_target_connection.fetch_table_sequences(target_schema_name, target_table_name)
-                    if sequences:
-                        for order_num, sequence_details in sequences.items():
-                            sequence_id = sequence_details['id']
-                            sequence_name = sequence_details['name']
-                            column_name = sequence_details['column_name']
-                            sequence_sql = sequence_details['set_sequence_sql']
-                            if next_identity is not None:
-                                sequence_sql = f"SELECT setval('\"{target_schema_name}\".\"{sequence_name}\"', {next_identity}, false);"
-
-                            self.migrator_tables.insert_sequence({
-                                'sequence_id': sequence_id,
-                                'target_schema_name': target_schema_name,
-                                'target_table_name': target_table_name,
-                                'target_column_name': column_name,
-                                'target_sequence_name': sequence_name,
-                                'target_sequence_sql': sequence_sql
-                            })
-                            self.config_parser.print_log_message( 'DEBUG', f"orchestrator: table_worker: Worker {worker_id}: Setting sequence with SQL: {sequence_sql}")
-                            try:
-                                worker_target_connection.execute_query(sequence_sql)
-                                self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Sequence ({order_num}) {sequence_name} set successfully for table {target_table_name}.")
-                                seq_curr_val = worker_target_connection.get_sequence_current_value(sequence_id)
-                                self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Current value of sequence {sequence_name} is {seq_curr_val}.")
-                                self.migrator_tables.update_sequence_status({'sequence_id': sequence_id, 'success': True, 'message': 'migrated OK'})
-                            except Exception as e:
-                                self.migrator_tables.update_sequence_status({'sequence_id': sequence_id, 'success': False, 'message': f'ERROR: {e}'})
-                                self.migrator_tables.update_table_status({'row_id': table_data['id'], 'success': False, 'message': f'ERROR: {e}'})
-                                self.config_parser.print_log_message('ERROR', f"orchestrator: table_worker: Worker {worker_id}: Error setting sequence {sequence_name} for table {target_table_name}: {e}")
-                    else:
-                        self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: No sequences found for table {target_table_name}.")
-                else:
-                    self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: No data found for table {target_table_name} - skipping sequences.")
             else:
                 self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Skipping data migration for table {target_table_name} based on configuration")
+
+            ## The sequence of an identity column is set whatever happened with the data. It
+            ## used to be set only when rows were migrated in this run, so a table which got
+            ## none - data migration switched off for it, an empty source table, everything
+            ## filtered out by data_migration_limitation - kept its sequence at 1 and the first
+            ## insert of the application collided with the keys already in the table. The value
+            ## comes from the source, which knows it regardless of any data being copied.
+            part_name = 'sequences'
+            sequences = worker_target_connection.fetch_table_sequences(target_schema_name, target_table_name)
+            if sequences:
+                self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Setting sequences for table {target_table_name} in target database.")
+                if next_identity is None and not source_next_identity_read:
+                    next_identity = self.fetch_source_next_identity(table_data, worker_id)
+                ## The next identity value describes one column of the table, and a table can own
+                ## more than one sequence - a column with a sequence as its default next to an
+                ## identity column. The value used to be applied to every sequence of the table,
+                ## which set the sequence of another column to the position of the identity
+                ## column. It goes to the sequence of the identity column alone now; the others
+                ## are set from their own data. Which column that is comes from the connector of
+                ## the source, which reports it per column.
+                table_identity_columns = self.table_identity_columns(table_data)
+                if table_identity_columns:
+                    self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Identity column(s) of {table_data['source_schema_name']}.{table_data['source_table_name']}: {', '.join(table_identity_columns)} - next value in the source: {next_identity}.")
+                elif next_identity is not None and len(sequences) > 1:
+                    ## nothing can attribute the value to one of them
+                    self.config_parser.print_log_message('WARNING', f"orchestrator: table_worker: Worker {worker_id}: The source reported the next identity value {next_identity} for {table_data['source_schema_name']}.{table_data['source_table_name']}, but no column of it is reported as an identity column and the table owns {len(sequences)} sequences - all of them are set from the data of the target alone.")
+
+                for order_num, sequence_details in sequences.items():
+                    sequence_id = sequence_details['id']
+                    sequence_name = sequence_details['name']
+                    column_name = sequence_details['column_name']
+                    source_column = self.find_source_column(table_data, column_name)
+                    if table_identity_columns:
+                        ## the value belongs to the identity column, whichever sequence it is
+                        use_next_identity = self.is_identity_column(source_column)
+                    else:
+                        ## a source which does not report an identity column at all - a PostgreSQL
+                        ## serial column is not one - still reports the next value of its sequence,
+                        ## and with a single sequence there is nothing else it could describe
+                        use_next_identity = len(sequences) == 1
+                    sequence_next_identity = next_identity if use_next_identity else None
+                    if next_identity is not None and not use_next_identity:
+                        self.config_parser.print_log_message('DEBUG', f"orchestrator: table_worker: Worker {worker_id}: Sequence {sequence_name} of column {column_name} does not belong to an identity column - it is set from the data of the target alone.")
+
+                    ## the sequence continues behind the greater of the two - the value the source
+                    ## reported and the data which really is in the target
+                    sequence_sql = worker_target_connection.get_set_sequence_sql({
+                        'target_schema_name': target_schema_name,
+                        'target_table_name': target_table_name,
+                        'target_column_name': column_name,
+                        'target_sequence_name': sequence_name,
+                        'source_next_identity': sequence_next_identity,
+                    })
+
+                    self.migrator_tables.insert_sequence(
+                        self.sequence_protocol_settings(table_data, sequence_details, sequence_sql, sequence_next_identity))
+                    self.config_parser.print_log_message( 'DEBUG', f"orchestrator: table_worker: Worker {worker_id}: Setting sequence with SQL: {sequence_sql}")
+                    try:
+                        worker_target_connection.execute_query(sequence_sql)
+                        self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Sequence ({order_num}) {sequence_name} set successfully for table {target_table_name}.")
+                        seq_curr_val = worker_target_connection.get_sequence_current_value(sequence_id)
+                        self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Current value of sequence {sequence_name} is {seq_curr_val}.")
+                        self.migrator_tables.update_sequence_status({'sequence_id': sequence_id, 'success': True, 'message': 'migrated OK', 'target_sequence_last_value': seq_curr_val})
+                    except Exception as e:
+                        self.migrator_tables.update_sequence_status({'sequence_id': sequence_id, 'success': False, 'message': f'ERROR: {e}'})
+                        self.migrator_tables.update_table_status({'row_id': table_data['id'], 'success': False, 'message': f'ERROR: {e}'})
+                        self.config_parser.print_log_message('ERROR', f"orchestrator: table_worker: Worker {worker_id}: Error setting sequence {sequence_name} for table {target_table_name}: {e}")
+            else:
+                ## a table without a sequence of its own is the normal case, so this is not
+                ## reported as an event of the migration - every table passes here now
+                self.config_parser.print_log_message('DEBUG', f"orchestrator: table_worker: Worker {worker_id}: No sequences found for table {target_table_name}.")
 
             worker_end_time = time.time()
             elapsed_time = worker_end_time - worker_start_time
@@ -1793,6 +1920,14 @@ class Orchestrator:
             self.handle_error(e, f"index_worker {worker_id} {index_name}")
             return False
 
+    def split_constraint_columns(self, columns):
+        """
+        The column list of a constraint as the protocol tables keep it ('"a", "b"'), as a
+        list of the column names in the spelling the target really uses.
+        """
+        return [self.config_parser.convert_names_case(column.replace('"', '').strip())
+                for column in (columns or '').split(',') if column.strip()]
+
     def constraint_worker(self, constraint_data, target_db_type):
         worker_id = uuid.uuid4()
         try:
@@ -1840,6 +1975,40 @@ class Orchestrator:
                         self.config_parser.print_log_message('ERROR', f"orchestrator: constraint_worker: Worker {worker_id}: Referenced table {referenced_target_table['target_schema_name']}.{referenced_target_table_name_to_check} for constraint {constraint_name} does not exist - skipping constraint creation.")
                         self.migrator_tables.update_constraint_status({'row_id': constraint_data['id'], 'success': False, 'message': f"ERROR: referenced table {referenced_target_table['target_schema_name']}.{referenced_target_table_name_to_check} does not exist"})
                         return False
+
+                    ## A column of the referenced table can carry another data type than the
+                    ## column referencing it - an identity column of the source is created as
+                    ## BIGINT whatever its own type was, and the referencing column keeps the
+                    ## type of the source. The columns are aligned by the type the target
+                    ## really has, which also covers a table not created in this run and a
+                    ## difference the bookkeeping of the alterations did not catch.
+                    if constraint_data['constraint_type'] == 'FOREIGN KEY':
+                        try:
+                            for altered_column in worker_target_connection.align_foreign_key_column_types({
+                                'target_schema_name': target_schema_name,
+                                'target_table_name': target_table_name_to_check,
+                                'constraint_columns': self.split_constraint_columns(constraint_data['constraint_columns']),
+                                'referenced_schema_name': referenced_target_table['target_schema_name'],
+                                'referenced_table_name': referenced_target_table_name_to_check,
+                                'referenced_columns': self.split_constraint_columns(constraint_data['referenced_columns']),
+                            }):
+                                self.migrator_tables.insert_target_column_alteration({
+                                    'target_schema_name': target_schema_name,
+                                    'target_table_name': target_table_name_to_check,
+                                    'target_column': altered_column['target_column'],
+                                    'reason': altered_column['reason'],
+                                    'original_data_type': altered_column['original_data_type'],
+                                    'altered_data_type': altered_column['altered_data_type'],
+                                })
+                        except Exception as e:
+                            ## the column cannot be altered - a value outside the range of the
+                            ## target type, an index or a view depending on it. The foreign key
+                            ## would fail as well, so it is reported here, where the reason is
+                            ## still known, instead of being retried five times.
+                            self.config_parser.print_log_message('ERROR', f"orchestrator: constraint_worker: Worker {worker_id}: Columns of constraint {constraint_name} could not be aligned with the referenced table: {e}")
+                            self.migrator_tables.update_constraint_status({'row_id': constraint_data['id'], 'success': False, 'message': f'ERROR: columns could not be aligned with the referenced table: {e}'})
+                            worker_target_connection.disconnect()
+                            return False
 
 
                 self.config_parser.print_log_message( 'DEBUG', f"orchestrator: constraint_worker: Worker {worker_id}: Creating constraint with SQL: {create_constraint_sql}")
@@ -1906,12 +2075,8 @@ class Orchestrator:
             if funcproc_names:
                 for order_num, funcproc_data in funcproc_names.items():
                     self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_funcprocs: Processing func/proc {order_num}/{len(funcproc_names)}: {funcproc_data['name']}")
-                    if include_funcprocs == ['.*'] or '.*' in include_funcprocs:
-                        pass
-                    elif not any(fnmatch.fnmatch(funcproc_data['name'], pattern) for pattern in include_funcprocs):
-                        continue
-                    if any(fnmatch.fnmatch(funcproc_data['name'], pattern) for pattern in exclude_funcprocs):
-                        self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_funcprocs: Func/proc {funcproc_data['name']} is excluded from migration.")
+                    if not self.config_parser.report_object_selection(
+                            'funcproc', funcproc_data['name'], 'orchestrator: stdwf_migrate_funcprocs'):
                         continue
 
                     funcproc_id = funcproc_data['id']
@@ -2015,6 +2180,7 @@ class Orchestrator:
                         except:
                             pass
 
+                self.config_parser.log_object_selection_summary('funcproc', 'orchestrator: stdwf_migrate_funcprocs')
                 self.config_parser.print_log_message('INFO', "orchestrator: run_migrate_funcprocs: Functions and procedures migrated successfully.")
             else:
                 self.config_parser.print_log_message('INFO', "orchestrator: run_migrate_funcprocs: No functions or procedures found to migrate.")
@@ -2039,6 +2205,23 @@ class Orchestrator:
                             self.config_parser.print_log_message( 'DEBUG', f"orchestrator: run_migrate_triggers: Trigger details: {trigger_detail}")
 
                             converted_code = trigger_detail['trigger_target_sql']
+
+                            ## Part of this trigger could not be converted and was left in the
+                            ## code as Sybase ASE wrote it. Creating it would put a trigger into
+                            ## the target which does less than the trigger of the source did,
+                            ## and the migration would report it as migrated - so it is not
+                            ## created and is reported as failed. The code stays in the protocol
+                            ## table, where it is waiting to be completed by hand.
+                            if trigger_detail.get('requires_manual_adjustment'):
+                                details = trigger_detail.get('manual_adjustment_details') or 'see the stored code'
+                                self.config_parser.print_log_message('ERROR',
+                                    f"orchestrator: run_migrate_triggers: Trigger {trigger_detail['trigger_name']} "
+                                    f"was NOT created - it could not be converted completely and has to be "
+                                    f"migrated by hand: {details}")
+                                self.migrator_tables.update_trigger_status({
+                                    'row_id': trigger_detail['id'], 'success': False,
+                                    'message': f'ERROR: manual adjustment required: {details}'})
+                                continue
 
                             self.config_parser.print_log_message( 'DEBUG', "orchestrator: run_migrate_triggers: Checking for remote objects substitution in triggers...")
                             rows = self.migrator_tables.get_records_remote_objects_substitution()
@@ -2118,9 +2301,16 @@ class Orchestrator:
                 ('funcproc', 'Functions/Procedures', self.migrator_tables.fetch_all_funcprocs, self.migrator_tables.decode_funcproc_row,
                  lambda d: {'id': d['id'], 'schema': d['target_schema_name'], 'name': d['target_funcproc_name'],
                             'table': None, 'ddl': d['target_funcproc_sql'], 'label': d['target_funcproc_name']}),
+                ## The DDL of a trigger which needs manual adjustment is stored for the reader
+                ## and must never be executed, so it is not offered to the retry: 'ddl' is left
+                ## empty, which also keeps the trigger out of the valid/invalid counts - it was
+                ## already reported as failed by the migration itself.
                 ('trigger', 'Triggers', self.migrator_tables.fetch_all_triggers, self.migrator_tables.decode_trigger_row,
                  lambda d: {'id': d['id'], 'schema': d['target_schema_name'], 'name': d['trigger_name'],
-                            'table': d['target_table_name'], 'ddl': d['trigger_target_sql'], 'label': d['trigger_name']}),
+                            'table': d['target_table_name'],
+                            'ddl': None if d.get('requires_manual_adjustment') else d['trigger_target_sql'],
+                            'manual': d.get('requires_manual_adjustment'),
+                            'label': d['trigger_name']}),
             ]
 
             for object_type, group_label, fetch_fn, decode_fn, to_obj in object_groups:
@@ -2209,6 +2399,11 @@ class Orchestrator:
             final_valid = False
             if not message:
                 message = 'not found in target'
+        elif obj.get('manual'):
+            ## converted only in part - reported as failed by the migration, and the stored code
+            ## is there to be completed by hand, never to be executed
+            final_valid = False
+            message = 'not created - manual adjustment required'
         else:
             # Nothing was ever created for this object (no converted DDL) - do not count it.
             final_valid = None

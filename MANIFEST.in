@@ -1,4 +1,6 @@
 include docs/configs/*.yaml
+include credativ_pg_migrator/config.schema.json
+include docs/config_reference.md
 include docs/configs/README.md
 include *.md
 include COPYING

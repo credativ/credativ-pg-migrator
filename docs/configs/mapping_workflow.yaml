@@ -132,7 +132,7 @@ table_settings:
   #   data_conflict_action: "replace"
 
 include_tables: all
-exclude_tables:               # >>> ADJUST
+exclude_tables: []            # >>> ADJUST
 
 # Independent verification after the load. target_copy is optional and lets you
 # compare against a THIRD database (e.g. a reference restore) instead of the

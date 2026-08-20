@@ -1,0 +1,1793 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/credativ/credativ-pg-migrator/docs/config.schema.json",
+  "title": "credativ-pg-migrator configuration",
+  "description": "The complete configuration language of credativ-pg-migrator. This schema is the single source of truth: docs/config_reference.md is generated from it, tests/test_config_docs.py checks the sample configs against it, and config_parser validates the user configuration with it at startup.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "source",
+    "target",
+    "migrator"
+  ],
+  "properties": {
+    "workflow": {
+      "type": "string",
+      "enum": [
+        "standard",
+        "mapping",
+        "anonymization"
+      ],
+      "default": "standard",
+      "description": "Which workflow the run executes. 'standard' reads the source objects, converts and creates them on the target and copies the data. 'mapping' maps existing target objects onto existing source objects and copies only data. 'anonymization' is a standalone data-masking copy."
+    },
+    "pattern_syntax": {
+      "default": "glob",
+      "description": "The syntax the patterns of include_tables / exclude_tables and the same pairs for views and functions/procedures are written in. It applies to all six alike.\n  glob  (default) - shell wildcards: * is any sequence, ? is one character, [abc] a set. This is what the migrator has always applied, so a configuration written before this setting existed keeps its meaning.\n  regex - Python regular expressions, e.g. 'BIN\\\\$.*'.\n  like  - SQL LIKE: % is any sequence, _ is one character, a backslash escapes either.\nIn every syntax a pattern must match the WHOLE object name and matching ignores case. A pattern which looks as if it were written in one of the other syntaxes is reported at startup, because such a pattern is valid in its own right and simply matches nothing. The value is read case-insensitively.",
+      "anyOf": [
+        {
+          "title": "standard values",
+          "description": "The values to use. 'glob', 'regex', 'like'.",
+          "enum": [
+            "glob",
+            "regex",
+            "like"
+          ]
+        },
+        {
+          "title": "accepted aliases",
+          "description": "Synonyms accepted for compatibility, each read as the standard value it stands for. Prefer the standard value.",
+          "enum": [
+            "fnmatch",
+            "re",
+            "regexp",
+            "regular_expression",
+            "shell",
+            "sql",
+            "sql_like",
+            "wildcard",
+            "wildcards"
+          ]
+        }
+      ],
+      "x-standard-values": [
+        "glob",
+        "regex",
+        "like"
+      ],
+      "x-aliases": {
+        "fnmatch": "glob",
+        "shell": "glob",
+        "wildcard": "glob",
+        "wildcards": "glob",
+        "sql": "like",
+        "sql_like": "like",
+        "re": "regex",
+        "regexp": "regex",
+        "regular_expression": "regex"
+      }
+    },
+    "pre_migration_analysis": {
+      "type": "object",
+      "description": "Read-only survey of the source database, printed before the migration starts.",
+      "additionalProperties": false,
+      "properties": {
+        "top_n_tables": {
+          "type": "object",
+          "description": "How many tables to list in each ranking. 0 skips the ranking; a large number lists all tables.",
+          "additionalProperties": false,
+          "properties": {
+            "by_rows": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "description": "List the N largest tables by row count."
+            },
+            "by_size": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "description": "List the N largest tables by on-disk size."
+            },
+            "by_columns": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "description": "List the N tables with the most columns."
+            },
+            "by_indexes": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "description": "List the N tables with the most indexes."
+            },
+            "by_constraints": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "description": "List the N tables with the most constraints."
+            }
+          }
+        }
+      }
+    },
+    "top_n_tables": {
+      "type": "object",
+      "deprecated": true,
+      "description": "Legacy top-level position of the pre-migration rankings. Only get_top_n_tables() reads it; every individual ranking is read from pre_migration_analysis.top_n_tables. Use that instead.",
+      "x-superseded-by": "pre_migration_analysis.top_n_tables"
+    },
+    "env_variables": {
+      "type": "array",
+      "description": "Environment variables exported before the migration starts, for libraries that need them (driver search paths, locale). Applied in main.py before any connection is opened.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "value"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Name of the environment variable, e.g. LD_LIBRARY_PATH."
+          },
+          "value": {
+            "type": "string",
+            "description": "Value to export."
+          }
+        }
+      }
+    },
+    "migrator": {
+      "type": "object",
+      "description": "PostgreSQL database in which the migrator keeps its own metadata tables. Usually the target database with a separate schema, so the migration protocol lives next to the migrated data.",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "host",
+        "port",
+        "username",
+        "password",
+        "database",
+        "schema"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "postgresql"
+          ],
+          "default": "postgresql",
+          "description": "Only PostgreSQL is supported for the migrator metadata database."
+        },
+        "host": {
+          "type": "string",
+          "description": "Host name or address."
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 5432,
+          "description": "TCP port."
+        },
+        "username": {
+          "type": "string",
+          "description": "Login role."
+        },
+        "password": {
+          "type": "string",
+          "description": "Password for the login role."
+        },
+        "database": {
+          "type": "string",
+          "description": "Database holding the migrator metadata tables."
+        },
+        "schema": {
+          "type": "string",
+          "default": "migration",
+          "description": "Schema for the migrator metadata tables. Created if it does not exist."
+        },
+        "indent": {
+          "type": "string",
+          "description": "String used as one indentation level when the migrator formats generated PL/pgSQL. Defaults to the value of MigratorConstants.get_default_indent()."
+        },
+        "sslmode": {
+          "type": "string",
+          "enum": [
+            "disable",
+            "allow",
+            "prefer",
+            "require",
+            "verify-ca",
+            "verify-full"
+          ],
+          "default": "prefer",
+          "description": "sslmode of the PostgreSQL connection URI."
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "description": "The database being migrated away from.",
+      "additionalProperties": false,
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "informix",
+            "sybase_ase",
+            "mssql",
+            "ibm_db2_luw",
+            "ibm_db2_zos",
+            "ibm_db2_i",
+            "mysql",
+            "mariadb",
+            "sql_anywhere",
+            "postgresql",
+            "oracle",
+            "sqlite"
+          ],
+          "description": "Source database engine. Selects the connector and with it which of the engine-specific options below apply."
+        },
+        "host": {
+          "type": "string",
+          "description": "Host name or address. Not used when type is sqlite."
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "description": "TCP port. Not used when type is sqlite."
+        },
+        "username": {
+          "type": "string",
+          "description": "Login name. Not used when type is sqlite."
+        },
+        "password": {
+          "type": "string",
+          "description": "Password. Not used when type is sqlite."
+        },
+        "database": {
+          "type": "string",
+          "description": "Database name. For sqlite this is the path to the database file - a relative path is resolved against the directory of the config file."
+        },
+        "server": {
+          "type": "string",
+          "description": "INFORMIXSERVER name. Informix needs both database and server - the server name cannot be derived from host and port, and is read by direct indexing, so an Informix source without it fails to build its connection string.",
+          "x-applies-to-engines": [
+            "informix"
+          ]
+        },
+        "schema": {
+          "type": "string",
+          "default": "public",
+          "description": "Source schema. For sqlite the only valid values are 'main' and the name of an attached database. Synonym of 'owner' - set one, not both."
+        },
+        "owner": {
+          "type": "string",
+          "description": "Synonym of 'schema', for engines that call it the owner. Read only when 'schema' is absent."
+        },
+        "version": {
+          "type": "string",
+          "description": "Source server version. Normally detected at connect time and written back; set it only to override the detection."
+        },
+        "connectivity": {
+          "type": "string",
+          "enum": [
+            "jdbc",
+            "odbc",
+            "native",
+            "ddl"
+          ],
+          "description": "How the source is reached. 'native' needs no further sub-block. 'jdbc' and 'odbc' take the sub-block of the same name. 'ddl' reads the objects from script files instead of a live database."
+        },
+        "connection_string_options": {
+          "type": "string",
+          "description": "Extra options appended to the connection string, as 'key1=value1;key2=value2'. Currently used only by MS SQL Server over JDBC. Repeated semicolons are cleaned up.",
+          "x-applies-to-engines": [
+            "mssql"
+          ]
+        },
+        "jdbc": {
+          "type": "object",
+          "description": "JDBC driver for connectivity: jdbc.",
+          "additionalProperties": false,
+          "properties": {
+            "driver": {
+              "type": "string",
+              "description": "Fully qualified driver class, e.g. com.sybase.jdbc4.jdbc.SybDriver."
+            },
+            "libraries": {
+              "type": "string",
+              "description": "Path to the driver jar, or several separated by the platform path separator."
+            }
+          }
+        },
+        "odbc": {
+          "type": "object",
+          "description": "ODBC driver for connectivity: odbc.",
+          "additionalProperties": false,
+          "properties": {
+            "driver": {
+              "type": "string",
+              "description": "ODBC driver name as registered with the driver manager, e.g. FreeTDS."
+            },
+            "libraries": {
+              "type": "string",
+              "description": "Path to the driver shared object."
+            }
+          }
+        },
+        "ddl": {
+          "type": "object",
+          "description": "Script files for connectivity: ddl.",
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "A directory, a directory with a file mask, or one file. Relative paths are resolved against the directory of the config file. No placeholders are supported here."
+            }
+          }
+        },
+        "system_catalog": {
+          "type": "string",
+          "default": "NONE",
+          "description": "Which system catalog the connector queries. IBM DB2 LUW: SYSCAT or SYSIBM (SYSIBM simulates the information_schema). MS SQL Server: SYS or INFORMATION_SCHEMA. Upper-cased when read.",
+          "x-applies-to-engines": [
+            "ibm_db2_luw",
+            "ibm_db2_zos",
+            "ibm_db2_i",
+            "mssql"
+          ]
+        },
+        "db_locale": {
+          "type": "string",
+          "default": "en_US.utf8",
+          "description": "Database locale used for date and time formatting.",
+          "x-applies-to-engines": [
+            "informix"
+          ]
+        },
+        "client_locale": {
+          "type": "string",
+          "default": "en_US.utf8",
+          "description": "Client locale announced to the source server.",
+          "x-applies-to-engines": [
+            "informix"
+          ]
+        },
+        "oracle_thick_mode": {
+          "type": "boolean",
+          "default": false,
+          "description": "false connects in Thin mode, needing no Oracle Client. true requires the Oracle Client libraries to be installed (Thick mode).",
+          "x-applies-to-engines": [
+            "oracle"
+          ]
+        },
+        "zero_datetime_default": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Per-source fallback for migration.zero_datetime_default. Read only when migration.zero_datetime_default is absent.",
+          "x-superseded-by": "migration.zero_datetime_default"
+        },
+        "data_export": {
+          "$ref": "#/$defs/dataExport"
+        },
+        "sslmode": {
+          "type": "string",
+          "enum": [
+            "disable",
+            "allow",
+            "prefer",
+            "require",
+            "verify-ca",
+            "verify-full"
+          ],
+          "default": "prefer",
+          "description": "sslmode of the PostgreSQL connection URI.",
+          "x-applies-to-engines": [
+            "postgresql"
+          ]
+        }
+      }
+    },
+    "target": {
+      "type": "object",
+      "description": "The PostgreSQL database being migrated into.",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "host",
+        "port",
+        "username",
+        "password",
+        "database",
+        "schema"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "postgresql"
+          ],
+          "default": "postgresql",
+          "description": "Only PostgreSQL is supported as a target."
+        },
+        "host": {
+          "type": "string",
+          "description": "Host name or address."
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 5432,
+          "description": "TCP port."
+        },
+        "username": {
+          "type": "string",
+          "description": "Login role. Needs the rights to create the target schema and its objects."
+        },
+        "password": {
+          "type": "string",
+          "description": "Password for the login role."
+        },
+        "database": {
+          "type": "string",
+          "description": "Target database. Must already exist."
+        },
+        "schema": {
+          "type": "string",
+          "default": "public",
+          "description": "Target schema. Synonym of 'owner' - set one, not both."
+        },
+        "owner": {
+          "type": "string",
+          "description": "Synonym of 'schema'. Read only when 'schema' is absent."
+        },
+        "settings": {
+          "type": "object",
+          "description": "PostgreSQL settings applied to every session the migrator opens on the target, as name: value. A name not on the allow-list is ignored.",
+          "additionalProperties": {
+            "type": [
+              "string",
+              "number",
+              "boolean"
+            ]
+          }
+        },
+        "sslmode": {
+          "type": "string",
+          "enum": [
+            "disable",
+            "allow",
+            "prefer",
+            "require",
+            "verify-ca",
+            "verify-full"
+          ],
+          "default": "prefer",
+          "description": "sslmode of the PostgreSQL connection URI."
+        }
+      }
+    },
+    "migration": {
+      "type": "object",
+      "description": "What the migration does and how it does it.",
+      "additionalProperties": false,
+      "properties": {
+        "drop_schema": {
+          "type": "boolean",
+          "default": false,
+          "description": "Drop the target schema with CASCADE before migrating. Destructive."
+        },
+        "drop_tables": {
+          "type": "boolean",
+          "default": false,
+          "description": "Drop each target table before creating it."
+        },
+        "truncate_tables": {
+          "type": "boolean",
+          "default": false,
+          "description": "Truncate each target table before copying data into it."
+        },
+        "create_tables": {
+          "type": "boolean",
+          "default": false,
+          "description": "Create the target tables."
+        },
+        "migrate_data": {
+          "type": "boolean",
+          "default": false,
+          "description": "Copy the table data. Can be overridden per table in table_settings."
+        },
+        "migrate_indexes": {
+          "type": "boolean",
+          "default": false,
+          "description": "Migrate the indexes. Can be overridden per table in table_settings."
+        },
+        "migrate_constraints": {
+          "type": "boolean",
+          "default": false,
+          "description": "Migrate primary, unique, foreign key and check constraints. Can be overridden per table in table_settings."
+        },
+        "migrate_triggers": {
+          "type": "boolean",
+          "default": false,
+          "description": "Migrate the triggers. Can be overridden per table in table_settings."
+        },
+        "migrate_funcprocs": {
+          "type": "boolean",
+          "default": false,
+          "description": "Migrate the functions and procedures. Global only."
+        },
+        "migrate_views": {
+          "type": "boolean",
+          "default": false,
+          "description": "Migrate the views. Global only."
+        },
+        "set_sequences": {
+          "type": "boolean",
+          "default": false,
+          "description": "Set each target sequence to the highest value present in its column after the data is copied."
+        },
+        "migrate_lob_values": {
+          "type": "boolean",
+          "default": true,
+          "description": "Copy the contents of BLOB and CLOB columns. false migrates them as NULL, which is much faster for a structural trial run."
+        },
+        "validate_objects": {
+          "default": "retry",
+          "description": "Final validity pass over views, functions/procedures and triggers, run at the very end of a standard migration. An object whose creation failed because a dependency did not exist yet can become creatable once the whole schema is present. 'retry' re-runs the stored DDL of objects that are still missing, then verifies and records validity; 'check' only verifies; 'off' skips the pass. true is accepted as 'retry', false and null as 'off'. Read case-insensitively.",
+          "anyOf": [
+            {
+              "title": "standard values",
+              "description": "The values to use. 'retry', 'check', 'off'.",
+              "enum": [
+                "retry",
+                "check",
+                "off"
+              ]
+            },
+            {
+              "title": "accepted aliases",
+              "description": "Synonyms accepted for compatibility, each read as the standard value it stands for. Prefer the standard value. true is read as 'retry', false and null as 'off'.",
+              "enum": [
+                "check_only",
+                "false",
+                "no",
+                "none",
+                "on",
+                "skip",
+                "true",
+                "verify",
+                "yes",
+                true,
+                false,
+                null
+              ]
+            }
+          ],
+          "x-standard-values": [
+            "retry",
+            "check",
+            "off"
+          ],
+          "x-aliases": {
+            "check_only": "check",
+            "verify": "check",
+            "false": "off",
+            "no": "off",
+            "none": "off",
+            "skip": "off",
+            "on": "retry",
+            "true": "retry",
+            "yes": "retry"
+          }
+        },
+        "on_error": {
+          "type": "string",
+          "enum": [
+            "stop",
+            "continue"
+          ],
+          "default": "stop",
+          "description": "Whether a failed object or table stops the migration or is recorded and skipped."
+        },
+        "parallel_workers": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1,
+          "description": "Number of tables migrated concurrently."
+        },
+        "batch_size": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 100000,
+          "description": "Rows read from the source and written to the target in one round trip."
+        },
+        "chunk_size": {
+          "type": "integer",
+          "default": -1,
+          "description": "Rows per independently logged and restartable chunk, for tables too large to copy in one pass. Must be larger than batch_size - a smaller value disables chunking with a warning. -1 disables chunking. Good values are 10x to 20x batch_size."
+        },
+        "names_case_handling": {
+          "type": "string",
+          "enum": [
+            "lower",
+            "upper",
+            "keep"
+          ],
+          "default": "keep",
+          "description": "Whether object names are lower-cased, upper-cased or kept as the source spells them. Validated at startup - any other value stops the run. Read case-insensitively."
+        },
+        "use_aliases_as_target_names": {
+          "type": "boolean",
+          "default": false,
+          "description": "When the source maps aliases onto tables, name the target table after the alias instead of the underlying table."
+        },
+        "varchar_to_text_length": {
+          "type": "integer",
+          "default": -1,
+          "description": "Convert VARCHAR to TEXT when its declared length reaches this value. 0 converts every VARCHAR; -1 keeps every VARCHAR as it is."
+        },
+        "char_to_text_length": {
+          "type": "integer",
+          "default": -1,
+          "description": "The same for CHAR and NCHAR. 0 converts every CHAR; -1 keeps them."
+        },
+        "zero_datetime_default": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": "remove",
+          "description": "What to do with an all-zero MySQL/MariaDB date or datetime DEFAULT ('0000-00-00', '0000-00-00 00:00:00'), which PostgreSQL cannot store. 'remove', null or '' drops the default clause; any other value is used as the replacement default, e.g. '1970-01-01' or 'CURRENT_TIMESTAMP'.",
+          "x-applies-to-engines": [
+            "mysql",
+            "mariadb"
+          ]
+        },
+        "zero_datetime_value": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "description": "Replacement for all-zero date and datetime *values* in the data, which arrive as NULL. null keeps them NULL; a value such as '1970-01-01' is written instead.",
+          "x-applies-to-engines": [
+            "mysql",
+            "mariadb"
+          ]
+        },
+        "relax_not_null_datetime": {
+          "type": "boolean",
+          "default": true,
+          "description": "Drop NOT NULL from target date and datetime columns so that rows carrying an all-zero date, which MySQL allowed in a NOT NULL column, can be stored as NULL instead of failing the copy.",
+          "x-applies-to-engines": [
+            "mysql",
+            "mariadb"
+          ]
+        },
+        "uuid_default_function": {
+          "type": "string",
+          "default": "gen_random_uuid()",
+          "description": "SQL function generating default UUID values on the target, used where the source had a UUID, SYS_GUID or NEWID default. Adapted automatically to the target column type - ::text is appended for a text column and stripped for a uuid column. Common values: gen_random_uuid() (built in), uuidv7() (PostgreSQL 18+), uuid_generate_v4() (uuid-ossp)."
+        },
+        "required_extensions": {
+          "type": [
+            "array",
+            "string"
+          ],
+          "default": [],
+          "description": "PostgreSQL extensions the migration needs. Checked before any object is created, with CREATE EXTENSION IF NOT EXISTS attempted for each; a missing extension that cannot be created stops the run. The extension implied by uuid_default_function is added automatically. A comma-separated string is accepted and split.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "packages_as": {
+          "default": "functions",
+          "description": "How Oracle packages are represented on a target that has none. 'functions' creates one function per routine in the target schema, named <package>_<routine>. 'schemas' creates one schema per package holding the routines under their own names. Calls are rewritten to match in every migrated routine and trigger. Package state - package level variables, constants and cursors - has no equivalent and is not migrated in either mode. Read case-insensitively.",
+          "x-applies-to-engines": [
+            "oracle"
+          ],
+          "anyOf": [
+            {
+              "title": "standard values",
+              "description": "The values to use. 'functions', 'schemas'.",
+              "enum": [
+                "functions",
+                "schemas"
+              ]
+            },
+            {
+              "title": "accepted aliases",
+              "description": "Synonyms accepted for compatibility, each read as the standard value it stands for. Prefer the standard value.",
+              "enum": [
+                "function",
+                "package_schema",
+                "package_schemas",
+                "prefix",
+                "prefixed_functions",
+                "schema"
+              ]
+            }
+          ],
+          "x-standard-values": [
+            "functions",
+            "schemas"
+          ],
+          "x-aliases": {
+            "function": "functions",
+            "prefix": "functions",
+            "prefixed_functions": "functions",
+            "package_schema": "schemas",
+            "package_schemas": "schemas",
+            "schema": "schemas"
+          }
+        },
+        "map_numeric_1_to_boolean": {
+          "type": "boolean",
+          "default": false,
+          "description": "Map every narrow numeric column (precision 1, scale 0) to BOOLEAN, ignoring numeric_1_boolean_columns. Restores the pre-0.16.1 behaviour. Such a column is ambiguous - it carries either a 0/1 flag or a small integer code - so the default maps it to SMALLINT, which is always lossless."
+        },
+        "numeric_1_boolean_columns": {
+          "type": "array",
+          "default": [],
+          "description": "Opt individual narrow numeric columns in to BOOLEAN. Values are coerced on insert (0 to false, anything else truthy to true). Matching is a case-insensitive full-match regex, as in table_settings.",
+          "items": {
+            "oneOf": [
+              {
+                "type": "string",
+                "description": "A column-name regex, matching that column in any table."
+              },
+              {
+                "type": "object",
+                "description": "A schema / table / column regex triple. Every key given must match.",
+                "additionalProperties": false,
+                "properties": {
+                  "schema": {
+                    "type": "string",
+                    "description": "Source schema regex."
+                  },
+                  "table": {
+                    "type": "string",
+                    "description": "Source table regex."
+                  },
+                  "column": {
+                    "type": "string",
+                    "description": "Source column regex."
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "pre_migration_script": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "description": "Path to a SQL script run on the target before the migration starts."
+        },
+        "post_migration_script": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "description": "Path to a SQL script run on the target after the migration finishes."
+        },
+        "scheduled_actions": {
+          "type": "array",
+          "description": "Actions taken at a given wall-clock time, to fit a migration into a maintenance window. An entry without a time is ignored.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Free-text label shown in the log."
+              },
+              "datetime": {
+                "type": "string",
+                "description": "When to act, as 'YYYY.MM.DD HH:MM'."
+              },
+              "timer_hours": {
+                "type": "number",
+                "description": "Hours from the start of the run. Not implemented - use datetime.",
+                "x-implemented": false
+              },
+              "action": {
+                "type": "string",
+                "enum": [
+                  "pause",
+                  "stop",
+                  "continue"
+                ],
+                "description": "What to do at that time."
+              }
+            }
+          }
+        },
+        "target_lob_storage": {
+          "$ref": "#/$defs/targetLobStorage",
+          "x-implemented": false
+        },
+        "mysql_zero_datetime_default": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "deprecated": true,
+          "description": "Former name of zero_datetime_default. Read only when the current name is absent.",
+          "x-superseded-by": "migration.zero_datetime_default"
+        },
+        "zero_datetime_data_value": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "deprecated": true,
+          "description": "Former name of zero_datetime_value. Read only when the current name is absent.",
+          "x-superseded-by": "migration.zero_datetime_value"
+        },
+        "uuid_function": {
+          "type": "string",
+          "deprecated": true,
+          "description": "Former name of uuid_default_function. Read only when the current name is absent.",
+          "x-superseded-by": "migration.uuid_default_function"
+        },
+        "extensions": {
+          "type": [
+            "array",
+            "string"
+          ],
+          "deprecated": true,
+          "description": "Former name of required_extensions. Read only when the current name is absent.",
+          "x-superseded-by": "migration.required_extensions"
+        },
+        "mapping_report_filename": {
+          "type": "string",
+          "deprecated": true,
+          "description": "Former position of mapping.report_filename. Read only when mapping.report_filename is absent.",
+          "x-superseded-by": "mapping.report_filename"
+        }
+      }
+    },
+    "table_settings": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "description": "Per-table overrides of the global settings. An entry applies to every table whose name matches its table_name. A switch is overridden only when the entry really carries it - a table listed here for an unrelated reason keeps the global value rather than silently losing its data, indexes, constraints or triggers. The key may also be left empty, which means the same as an empty list.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "table_name": {
+            "oneOf": [
+              {
+                "type": "string",
+                "description": "One table name or a regex."
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Several names or regexes; the entry applies when any of them matches."
+              }
+            ],
+            "description": "Which tables the entry applies to. Matching is a case-insensitive full-match regex."
+          },
+          "table_schema": {
+            "type": "string",
+            "description": "Source schema of the table. Defaults to the schema of the source connection."
+          },
+          "batch_size": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Overrides migration.batch_size for these tables."
+          },
+          "chunk_size": {
+            "type": "integer",
+            "description": "Overrides migration.chunk_size for these tables."
+          },
+          "migrate_data": {
+            "type": "boolean",
+            "description": "Overrides migration.migrate_data for these tables."
+          },
+          "migrate_indexes": {
+            "type": "boolean",
+            "description": "Overrides migration.migrate_indexes for these tables."
+          },
+          "migrate_constraints": {
+            "type": "boolean",
+            "description": "Overrides migration.migrate_constraints for these tables."
+          },
+          "migrate_triggers": {
+            "type": "boolean",
+            "description": "Overrides migration.migrate_triggers for these tables."
+          },
+          "data_conflict_action": {
+            "type": "string",
+            "enum": [
+              "skip",
+              "replace",
+              "merge_keep_target",
+              "merge_keep_source"
+            ],
+            "description": "What to do when the target table already holds data. 'skip' leaves it alone; 'replace' truncates and re-copies; 'merge_keep_target' copies only rows whose primary key is absent from the target; 'merge_keep_source' copies everything, overwriting rows that collide."
+          },
+          "data_export": {
+            "$ref": "#/$defs/tableDataExport"
+          },
+          "target_lob_storage": {
+            "$ref": "#/$defs/targetLobStorage",
+            "x-implemented": false
+          }
+        }
+      }
+    },
+    "include_tables": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "all"
+          ],
+          "description": "Every object of this kind."
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Names or patterns."
+        },
+        {
+          "type": "null",
+          "description": "The key left empty - the same as an empty list."
+        }
+      ],
+      "default": "all",
+      "description": "Which tables to migrate. Absent, empty, null and 'all' all mean every object; so does a pattern which matches everything ('*', '.*', '%'). Patterns are written in the syntax chosen by the top level 'pattern_syntax' (default glob), must match the whole name, and ignore case. exclude_tables is applied afterwards and wins.",
+      "x-pattern-syntax": "pattern_syntax"
+    },
+    "exclude_tables": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "all"
+          ],
+          "description": "Every object of this kind."
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Names or patterns."
+        },
+        {
+          "type": "null",
+          "description": "The key left empty - the same as an empty list."
+        }
+      ],
+      "default": [],
+      "description": "Tables to leave out, applied after include_tables and winning over it. An absent or empty list excludes nothing. Patterns are written in the syntax chosen by the top level 'pattern_syntax' (default glob), must match the whole name, and ignore case. ",
+      "x-pattern-syntax": "pattern_syntax"
+    },
+    "include_views": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "all"
+          ],
+          "description": "Every object of this kind."
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Names or patterns."
+        },
+        {
+          "type": "null",
+          "description": "The key left empty - the same as an empty list."
+        }
+      ],
+      "default": "all",
+      "description": "Which views to migrate. Absent, empty, null and 'all' all mean every object; so does a pattern which matches everything ('*', '.*', '%'). Patterns are written in the syntax chosen by the top level 'pattern_syntax' (default glob), must match the whole name, and ignore case. exclude_views is applied afterwards and wins.",
+      "x-pattern-syntax": "pattern_syntax"
+    },
+    "exclude_views": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "all"
+          ],
+          "description": "Every object of this kind."
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Names or patterns."
+        },
+        {
+          "type": "null",
+          "description": "The key left empty - the same as an empty list."
+        }
+      ],
+      "default": [],
+      "description": "Views to leave out, applied after include_views and winning over it. An absent or empty list excludes nothing. Patterns are written in the syntax chosen by the top level 'pattern_syntax' (default glob), must match the whole name, and ignore case. ",
+      "x-pattern-syntax": "pattern_syntax"
+    },
+    "include_funcprocs": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "all"
+          ],
+          "description": "Every object of this kind."
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Names or patterns."
+        },
+        {
+          "type": "null",
+          "description": "The key left empty - the same as an empty list."
+        }
+      ],
+      "default": "all",
+      "description": "Which functions and procedures to migrate. Absent, empty, null and 'all' all mean every object; so does a pattern which matches everything ('*', '.*', '%'). Patterns are written in the syntax chosen by the top level 'pattern_syntax' (default glob), must match the whole name, and ignore case. exclude_funcprocs is applied afterwards and wins.",
+      "x-pattern-syntax": "pattern_syntax"
+    },
+    "exclude_funcprocs": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "all"
+          ],
+          "description": "Every object of this kind."
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Names or patterns."
+        },
+        {
+          "type": "null",
+          "description": "The key left empty - the same as an empty list."
+        }
+      ],
+      "default": [],
+      "description": "Functions and procedures to leave out, applied after include_funcprocs and winning over it. An absent or empty list excludes nothing. Patterns are written in the syntax chosen by the top level 'pattern_syntax' (default glob), must match the whole name, and ignore case. ",
+      "x-pattern-syntax": "pattern_syntax"
+    },
+    "tables": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "default": [],
+      "description": "Explicit table list used by get_tables_config(). Rarely set - include_tables is the normal way to choose tables. The key may also be left empty, which means the same as an empty list."
+    },
+    "data_types_substitution": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "description": "Replaces the data type the migrator would choose. Each entry is [table_name, column_name, source_data_type, target_data_type, comment]. table_name, column_name and source_data_type are individually optional - leave them '' - but at least one must be given, normally column_name or source_data_type. The source type is matched as an exact value, then as a LIKE pattern, then as a regex; matching is case-insensitive and a regex wins over LIKE. The target type is mandatory and is written out exactly as given, length included. The key may also be left empty, which means the same as an empty list.",
+      "items": {
+        "type": "array",
+        "minItems": 5,
+        "maxItems": 5,
+        "items": {
+          "type": "string"
+        },
+        "description": "[table_name, column_name, source_data_type, target_data_type, comment]"
+      }
+    },
+    "default_values_substitution": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "description": "Replaces the DEFAULT clause of a column. Each entry is [column_name, source_column_data_type, source_default_value, target_default_value]. The replacement is written into the DDL as it stands, so a string literal inside it uses single apostrophes; doubling them is needed only inside a YAML value quoted with apostrophes, which YAML undoes again. A value readable only with halved apostrophes is corrected with a warning. The key may also be left empty, which means the same as an empty list.",
+      "items": {
+        "type": "array",
+        "minItems": 4,
+        "maxItems": 4,
+        "items": {
+          "type": "string"
+        },
+        "description": "[column_name, source_column_data_type, source_default_value, target_default_value]"
+      }
+    },
+    "remote_objects_substitution": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "description": "Rewrites references to objects living in another database, which PostgreSQL cannot express. Each entry is [source_object, target_object] and is applied as a plain search and replace over the converted code. The key may also be left empty, which means the same as an empty list.",
+      "items": {
+        "type": "array",
+        "minItems": 2,
+        "maxItems": 2,
+        "items": {
+          "type": "string"
+        },
+        "description": "[source_object, target_object]"
+      }
+    },
+    "data_migration_limitation": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "description": "Copies only part of a table. Each entry is exactly [table_name_or_pattern, condition, column_name_or_pattern] - the condition is used only for tables that match the pattern and really have the column. The condition is written without WHERE and may contain the placeholders {source_schema} and {source_table_name}. The key may also be left empty, which means the same as an empty list.",
+      "items": {
+        "type": "array",
+        "minItems": 3,
+        "maxItems": 3,
+        "items": {
+          "type": "string"
+        },
+        "description": "[table_name_or_pattern, condition, column_name_or_pattern]"
+      },
+      "x-arity-note": "Exactly three elements. migrator_tables.py:307 unpacks three and the protocol table has three columns, so a fourth element - a row-count threshold - raises ValueError. The threshold is not implemented."
+    },
+    "target_partitioning": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "description": "Creates the target table partitioned, whether or not the source table was. One entry per table. The key may also be left empty, which means the same as an empty list.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "type": "string",
+            "description": "Free-text label. Not read by the migrator - it is a note for whoever reads the configuration.",
+            "x-implemented": false
+          },
+          "table_name": {
+            "type": "string",
+            "description": "Table to partition."
+          },
+          "partition_by": {
+            "type": "string",
+            "enum": [
+              "RANGE",
+              "LIST",
+              "HASH"
+            ],
+            "description": "Partitioning method, written straight into PARTITION BY."
+          },
+          "partitioning_columns": {
+            "type": "string",
+            "description": "One or more columns, comma separated."
+          },
+          "date_range": {
+            "type": "string",
+            "enum": [
+              "year",
+              "month",
+              "week",
+              "day"
+            ],
+            "description": "For a RANGE partitioning over a date column: the migrator also creates the partitions covering the range of values found in the source column. Only year, month and week actually create partitions - 'day' is accepted but creates none (planner.py:807)."
+          }
+        }
+      }
+    },
+    "validation": {
+      "type": "object",
+      "description": "Post-migration data-integrity check, run by the --validate switch instead of a migration.",
+      "additionalProperties": false,
+      "properties": {
+        "workers": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 4,
+          "description": "Tables checked concurrently."
+        },
+        "batch_size": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 10000,
+          "description": "Rows per batch when a table checksum is computed in Python."
+        },
+        "check_row_counts": {
+          "type": "boolean",
+          "default": true,
+          "description": "Compare the row counts of the source and target tables."
+        },
+        "check_table_checksums": {
+          "type": "boolean",
+          "default": false,
+          "description": "Compare a hash aggregated over the string form of every row of the whole table."
+        },
+        "check_random_sample": {
+          "type": "boolean",
+          "default": false,
+          "description": "Compare individual rows drawn at random, matched by primary key."
+        },
+        "check_lob_sizes": {
+          "type": "boolean",
+          "default": false,
+          "description": "Compare the byte size of migrated BLOB and CLOB values on the sampled rows."
+        },
+        "random_sample_size": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1000,
+          "description": "Upper bound on the number of rows sampled, used by check_random_sample and check_lob_sizes."
+        },
+        "report_filename": {
+          "type": "string",
+          "description": "File for the detailed tabular report. The console shows only the summary."
+        },
+        "target_copy": {
+          "type": "object",
+          "description": "Connection to an untouched copy of the target database from before the migration. Required when workflow is 'mapping' and data conflicts exist; ignored for the standard workflow.",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "postgresql"
+              ],
+              "default": "postgresql",
+              "description": "Only PostgreSQL is supported."
+            },
+            "host": {
+              "type": "string",
+              "description": "Host name or address."
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535,
+              "default": 5432,
+              "description": "TCP port."
+            },
+            "username": {
+              "type": "string",
+              "description": "Login role."
+            },
+            "password": {
+              "type": "string",
+              "description": "Password."
+            },
+            "database": {
+              "type": "string",
+              "description": "Database holding the untouched copy."
+            },
+            "schema": {
+              "type": "string",
+              "description": "Schema holding the untouched copy."
+            },
+            "sslmode": {
+              "type": "string",
+              "enum": [
+                "disable",
+                "allow",
+                "prefer",
+                "require",
+                "verify-ca",
+                "verify-full"
+              ],
+              "default": "prefer",
+              "description": "sslmode of the PostgreSQL connection URI."
+            }
+          }
+        }
+      }
+    },
+    "mapping": {
+      "type": "object",
+      "description": "Settings of the 'mapping' workflow, which matches existing target objects onto existing source objects and copies only data.",
+      "additionalProperties": false,
+      "properties": {
+        "report_filename": {
+          "type": "string",
+          "description": "File for the detailed tabular mapping report."
+        },
+        "suspend_indexes_constraints": {
+          "type": "boolean",
+          "description": "Drop the indexes and constraints of a target table before copying into it and recreate them afterwards."
+        },
+        "data_conflict_action": {
+          "type": "string",
+          "enum": [
+            "skip",
+            "replace",
+            "merge_keep_target",
+            "merge_keep_source"
+          ],
+          "description": "Global default for what to do when the target table already holds data. table_settings[].data_conflict_action overrides it per table."
+        },
+        "heuristics": {
+          "type": "object",
+          "description": "How names are normalised before source and target objects are matched.",
+          "additionalProperties": false,
+          "properties": {
+            "table_normalization_rules": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "lowercase",
+                  "strip_trailing_numbers"
+                ]
+              },
+              "default": [
+                "lowercase",
+                "strip_trailing_numbers"
+              ],
+              "description": "Normalisations applied to table names before matching."
+            },
+            "column_normalization_rules": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "lowercase",
+                  "strip_trailing_numbers"
+                ]
+              },
+              "default": [
+                "lowercase",
+                "strip_trailing_numbers"
+              ],
+              "description": "Normalisations applied to column names before matching."
+            },
+            "column_prefixes_to_strip": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": [
+                "gov_",
+                "log_"
+              ],
+              "description": "Prefixes removed from column names before matching."
+            }
+          }
+        },
+        "forced_table_mappings": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "default": [],
+          "description": "Explicit table pairs, overriding the heuristics. An entry carries either source and target, or source_regex and target with backreferences.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "source": {
+                "type": "string",
+                "description": "Exact source table name."
+              },
+              "target": {
+                "type": "string",
+                "description": "Exact target table name."
+              },
+              "source_regex": {
+                "type": "string",
+                "description": "Regex matching source table names, e.g. ^legacy_(.*)$."
+              }
+            }
+          }
+        },
+        "forced_column_mappings": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "default": [],
+          "description": "Explicit column pairs, meant to override the heuristics. Not applied to the column matching - the entries are only echoed into the mapping report. Scoped either to one table or to every table matching a regex.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "table": {
+                "type": "string",
+                "description": "Exact table name the rule applies to."
+              },
+              "table_regex": {
+                "type": "string",
+                "description": "Regex of the tables the rule applies to, e.g. .* for every table."
+              },
+              "source_column": {
+                "type": "string",
+                "description": "Column name in the source."
+              },
+              "target_column": {
+                "type": "string",
+                "description": "Column name in the target."
+              }
+            }
+          },
+          "x-implemented": false
+        }
+      }
+    },
+    "anonymization": {
+      "type": "object",
+      "description": "Settings of the 'anonymization' workflow, which copies the data while masking the columns named here. A method name that is not registered stops the run before any data is read.",
+      "additionalProperties": false,
+      "properties": {
+        "on_value_too_long": {
+          "type": "string",
+          "enum": [
+            "error",
+            "fit",
+            "find_fitting_value"
+          ],
+          "default": "error",
+          "description": "What to do when a masked value does not fit the length of the target column. 'error' stops and names the column; 'fit' cuts the value, counted and reported, never silently; 'find_fitting_value' calls the method again until the result fits."
+        },
+        "find_fitting_value_attempts": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 10,
+          "description": "How many times a method is retried under on_value_too_long: find_fitting_value before the run stops."
+        },
+        "tables": {
+          "type": "object",
+          "description": "The columns to mask, as table name -> column name -> rule.",
+          "additionalProperties": {
+            "type": "object",
+            "description": "One source table, as column name -> rule.",
+            "additionalProperties": {
+              "type": "object",
+              "description": "The rule for one column.",
+              "additionalProperties": false,
+              "required": [
+                "method"
+              ],
+              "properties": {
+                "method": {
+                  "type": "string",
+                  "enum": [
+                    "consistent_integer_mask",
+                    "custom_german_bank",
+                    "custom_iban",
+                    "deterministic_hash_mask",
+                    "faker_email",
+                    "faker_name",
+                    "mimesis_address",
+                    "numeric_noise",
+                    "partial_mask",
+                    "postgres_anon_native",
+                    "static_mask"
+                  ],
+                  "description": "Registered anonymization method. The list comes from the method registry - an unknown name is refused at startup."
+                },
+                "params": {
+                  "type": "object",
+                  "description": "Arguments of the method, e.g. salt and out_type for deterministic_hash_mask, prefix_len / suffix_len / mask_str for partial_mask, ratio for numeric_noise, mask_char for static_mask."
+                }
+              }
+            }
+          }
+        },
+        "regex_mappings": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "default": [],
+          "description": "Columns to mask chosen by pattern instead of by name. Each entry masks every column whose table and column name match both regexes. Applied in addition to anonymization.tables; a run needs at least one of the two.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "method"
+            ],
+            "properties": {
+              "table_pattern": {
+                "type": "string",
+                "default": ".*",
+                "description": "Regex over the source table name."
+              },
+              "column_pattern": {
+                "type": "string",
+                "default": ".*",
+                "description": "Regex over the source column name."
+              },
+              "method": {
+                "type": "string",
+                "enum": [
+                  "consistent_integer_mask",
+                  "custom_german_bank",
+                  "custom_iban",
+                  "deterministic_hash_mask",
+                  "faker_email",
+                  "faker_name",
+                  "mimesis_address",
+                  "numeric_noise",
+                  "partial_mask",
+                  "postgres_anon_native",
+                  "static_mask"
+                ],
+                "description": "Registered anonymization method, as in anonymization.tables."
+              },
+              "params": {
+                "type": "object",
+                "description": "Arguments of the method."
+              }
+            }
+          }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "description": "How many rows each ranking of the closing summary shows.",
+      "additionalProperties": false,
+      "properties": {
+        "top_migrated_tables": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 5,
+          "description": "Largest migrated tables."
+        },
+        "top_mismatched_tables": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 5,
+          "description": "Tables whose source and target row counts differ."
+        },
+        "top_longest_batches": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 10,
+          "description": "Slowest batches."
+        },
+        "top_anonymized_tables": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 5,
+          "description": "Tables with the most anonymized values."
+        },
+        "top_anonymized_columns": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 5,
+          "description": "Columns with the most anonymized values."
+        },
+        "show_anonymization_examples": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "Before/after examples printed per anonymized column. 0 prints none. The examples contain real source values - keep it 0 unless the summary is being read by someone entitled to see them."
+        }
+      }
+    }
+  },
+  "$defs": {
+    "dataExport": {
+      "type": "object",
+      "title": "source.data_export",
+      "description": "Read the table data from export files instead of from the source database. Set exactly one format and the file pattern belonging to it; the CSV, UNL and SQL forms are alternatives, not a sequence. When a file is found it is used in place of the source table. For Informix, a table with a CLOB or BLOB column takes a separate import path so the LOB values are handled properly.",
+      "additionalProperties": false,
+      "properties": {
+        "on_missing_data_file": {
+          "type": "string",
+          "enum": [
+            "error",
+            "skip",
+            "source_table_name"
+          ],
+          "default": "source_table_name",
+          "description": "What to do when the data file for a table does not exist. 'error' stops the migration; 'skip' leaves the table out; 'source_table_name' reads that table from the source database instead."
+        },
+        "format": {
+          "type": "string",
+          "enum": [
+            "CSV",
+            "UNL",
+            "SQL"
+          ],
+          "description": "Format of the export files. CSV is fed straight into COPY. UNL is the Informix unload format and is converted to CSV first. SQL is a schema dump carrying DDL - the data itself sits where the source engine puts it (for Informix, UNL files in the same directory), and a live source connection is still required because the data model is not read from the dump."
+        },
+        "file": {
+          "type": "string",
+          "description": "Path of the data files. May contain the placeholders {{source_schema_name}}, {{source_table_name}} and {{source_alias_name}} - those three, and no others. {{source_alias_name}} resolves through the registered aliases of the table, which on IBM i is also its 10-character system name, and is tried when the name built from the table name does not exist. The extension does not have to match the format. For an Informix SQL dump this is one file for the whole database, without placeholders."
+        },
+        "delimiter": {
+          "type": "string",
+          "default": "|",
+          "description": "Field delimiter. Conventionally ',' for CSV and '|' for UNL and for the UNL files belonging to an SQL dump."
+        },
+        "header": {
+          "type": "boolean",
+          "default": false,
+          "description": "The CSV files carry a header line with the column names. CSV files converted from UNL never have one."
+        },
+        "character_set": {
+          "type": "string",
+          "default": "UTF-8",
+          "description": "Character set of the export files. Must be a name the system knows, e.g. ISO-8859-1. A non-UTF-8 set makes conversion_path advisable."
+        },
+        "date_format": {
+          "type": "string",
+          "description": "The order of the parts of a date in the files - the DATFMT the export was taken with. MDY or USA reads 01/04/22 as 4 January, DMY or EUR as 1 April, YMD, ISO or JIS as 22 April. The leading '*' of the Db2 names is accepted ('*MDY'). When absent the order is worked out from the values themselves; a column whose values fit more than one order stops that table with a message naming the column, because reading such a date the wrong way would migrate a different date without any error. A two-digit year is expanded as Db2 for i does it: 40-99 is 1940-1999, 00-39 is 2000-2039."
+        },
+        "conversion_path": {
+          "type": "string",
+          "description": "Directory for the CSV files converted from UNL. Defaults to the directory of the data files."
+        },
+        "clean": {
+          "type": "boolean",
+          "default": false,
+          "description": "Delete the converted CSV files when the migration is finished."
+        },
+        "workers": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 4,
+          "description": "Workers used while reading the export files."
+        },
+        "lob_columns": {
+          "type": "array",
+          "description": "Columns to treat as LOB columns during the import, given as [table_name, column_name] pairs. Needed where the declared type does not say so - the column holds a reference to the file with the value rather than the value itself.",
+          "items": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "items": {
+              "type": "string"
+            },
+            "description": "[table_name, column_name]"
+          }
+        },
+        "big_files_split": {
+          "type": "object",
+          "description": "Split an export file larger than the threshold into chunks processed in parallel. Relevant for UNL files and SQL dumps; importing a large CSV into PostgreSQL is fast enough that splitting does not pay.",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Turn splitting on."
+            },
+            "threshold": {
+              "type": "string",
+              "description": "Size above which a file is split, as a number with a unit: '5GB', '500MB'."
+            },
+            "chunk_size": {
+              "type": "string",
+              "description": "Size of one chunk, same notation. Around '2GB' is a reasonable value."
+            },
+            "workers": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 4,
+              "description": "Workers processing the chunks in parallel."
+            }
+          }
+        }
+      }
+    },
+    "tableDataExport": {
+      "type": "object",
+      "title": "table_settings[].data_export",
+      "description": "Export-file settings for one table, overriding source.data_export. Only the CSV and UNL formats are supported here.",
+      "additionalProperties": false,
+      "properties": {
+        "file": {
+          "type": "string",
+          "description": "Path of the data file for this table. The same placeholders as source.data_export.file."
+        },
+        "format": {
+          "type": "string",
+          "enum": [
+            "CSV",
+            "UNL"
+          ],
+          "description": "Format of that file."
+        },
+        "delimiter": {
+          "type": "string",
+          "description": "Field delimiter for this file."
+        },
+        "header": {
+          "type": "boolean",
+          "default": false,
+          "description": "The file carries a header line. Applies to supplied CSV files only - CSV converted from UNL never has one."
+        },
+        "character_set": {
+          "type": "string",
+          "description": "Character set of this file, overriding source.data_export.character_set."
+        },
+        "date_format": {
+          "type": "string",
+          "description": "Order of the parts of a date in this file. See source.data_export.date_format."
+        },
+        "conversion_path": {
+          "type": "string",
+          "description": "Directory for the CSV converted from this UNL file."
+        },
+        "lob_columns": {
+          "type": "array",
+          "description": "Columns of this table to treat as LOB columns, as [table_name, column_name] pairs.",
+          "items": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "items": {
+              "type": "string"
+            },
+            "description": "[table_name, column_name]"
+          }
+        },
+        "mapping_rules": {
+          "type": "array",
+          "description": "Mapping rules attached to this table, read by get_table_mapping(). Only the first entry is used."
+        },
+        "big_files_split": {
+          "type": "object",
+          "description": "Per-table override of source.data_export.big_files_split. Not implemented - the global setting is used.",
+          "x-implemented": false,
+          "additionalProperties": true
+        }
+      }
+    },
+    "targetLobStorage": {
+      "type": "object",
+      "title": "target_lob_storage",
+      "description": "Where the contents of BLOB and CLOB columns are put on the target. Not implemented - LOB values are always stored in the target database, in bytea or text columns.",
+      "x-implemented": false,
+      "additionalProperties": false,
+      "properties": {
+        "storage": {
+          "type": "string",
+          "enum": [
+            "database",
+            "file"
+          ],
+          "default": "database",
+          "description": "Store the values in the target database, or in files beside it."
+        },
+        "path": {
+          "type": "string",
+          "description": "Directory for the files. Used only with storage: file."
+        },
+        "name": {
+          "type": "string",
+          "description": "Name pattern of one file, e.g. '{{source_schema_name}}.{{source_table_name}}.lob'. Used only with storage: file."
+        }
+      }
+    }
+  }
+}

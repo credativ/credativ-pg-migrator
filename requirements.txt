@@ -5,3 +5,4 @@ pandas
 pyodbc
 tabulate
 sqlglot
+jsonschema

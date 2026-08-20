@@ -19,6 +19,7 @@ import uuid
 import psycopg2
 import traceback
 from credativ_pg_migrator.constants import MigratorConstants
+from credativ_pg_migrator.protocol_comments import COMMON_COLUMN_COMMENTS, build_comments_catalog
 
 
 def remove_nul_characters(value):
@@ -128,6 +129,77 @@ class MigratorTables:
         self.create_table_for_views()
         self.create_ddl_tables()
         self.create_table_for_mapping()
+        self.create_table_for_anonymization_stats()
+        self.apply_comments()
+
+    def quote_comment(self, text):
+        """Quotes a comment for a COMMENT ON statement - such a statement takes no parameters."""
+        quoted = psycopg2.extensions.QuotedString(text)
+        quoted.prepare(self.protocol_connection.connection)
+        return quoted.getquoted().decode('utf-8')
+
+    def apply_comments(self, table_names=None):
+        """
+        Writes the descriptions of the protocol schema into the database itself - COMMENT ON
+        TABLE and COMMENT ON COLUMN for every table the migrator creates there. Everything
+        reading the catalog then has them: the web GUI shows them as the hints of a table and
+        of its columns, and psql shows the same texts with \\dt+ and \\d+, so whoever looks at
+        the metadata of a migration is told what a value means without reading the code.
+        The texts stand in protocol_comments.py. Tables which the run did not create are
+        skipped - the catalog covers the whole schema, while one workflow creates only the
+        tables it needs. A comment which cannot be written is reported and does not stop the
+        migration: the metadata is described by it, not produced by it.
+        """
+        catalog = build_comments_catalog(self.config_parser)
+        if table_names is not None:
+            wanted = set(table_names)
+            catalog = {name: entry for name, entry in catalog.items() if name in wanted}
+
+        existing_columns = {}
+        cursor = self.protocol_connection.connection.cursor()
+        cursor.execute("""
+            SELECT table_name, column_name
+            FROM information_schema.columns
+            WHERE table_schema = %s
+        """, (self.protocol_schema,))
+        for existing_table, existing_column in cursor.fetchall():
+            existing_columns.setdefault(existing_table, set()).add(existing_column)
+        cursor.close()
+
+        commented_tables = 0
+        for table_name, entry in sorted(catalog.items()):
+            table_columns = existing_columns.get(table_name)
+            if table_columns is None:
+                self.config_parser.print_log_message('DEBUG3', f"migrator_tables: apply_comments: table {table_name} does not exist in schema {self.protocol_schema} - skipped")
+                continue
+
+            column_comments = entry.get('columns', {})
+            ## a comment written for a column which is not there means the catalog drifted
+            ## away from the DDL - it is reported instead of being silently dropped
+            for unknown_column in sorted(set(column_comments) - table_columns):
+                self.config_parser.print_log_message('WARNING', f"migrator_tables: apply_comments: table {table_name} has no column {unknown_column} - the comment written for it is not used")
+
+            statements = []
+            if entry.get('comment'):
+                table_comment = self.quote_comment(entry['comment'])
+                statements.append(f'COMMENT ON TABLE "{self.protocol_schema}"."{table_name}" IS {table_comment}')
+            for column_name in sorted(table_columns):
+                comment = column_comments.get(column_name) or COMMON_COLUMN_COMMENTS.get(column_name)
+                if not comment:
+                    self.config_parser.print_log_message('DEBUG3', f"migrator_tables: apply_comments: no comment defined for {table_name}.{column_name}")
+                    continue
+                column_comment = self.quote_comment(comment)
+                statements.append(f'COMMENT ON COLUMN "{self.protocol_schema}"."{table_name}"."{column_name}" IS {column_comment}')
+
+            if not statements:
+                continue
+            try:
+                self.protocol_connection.execute_query(";\n".join(statements))
+                commented_tables += 1
+            except Exception as e:
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: apply_comments: Error writing the comments of table {table_name}: {e}")
+
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: apply_comments: Comments written for {commented_tables} tables in schema {self.protocol_schema}")
 
     def prepare_data_types_substitution(self):
         # Drop table if exists
@@ -155,6 +227,7 @@ class MigratorTables:
             VALUES (%s, %s, %s, %s, %s)
             """, (table_name, column_name, source_type, target_type, comment))
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: prepare_data_types_substitution: Data inserted into table data_types_substitution in schema {self.protocol_schema}")
+        self.apply_comments(['data_types_substitution'])
 
     def check_data_types_substitution(self, settings):
         """
@@ -238,6 +311,7 @@ class MigratorTables:
             VALUES (%s, %s, %s)
             """, (source_table_name, where_limitation, use_when_column_present))
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: prepare_data_migration_limitation: Data inserted into table data_migration_limitation in schema {self.protocol_schema}")
+        self.apply_comments(['data_migration_limitation'])
 
     def get_records_data_migration_limitation(self, source_table_name):
         query = f"""
@@ -279,6 +353,7 @@ class MigratorTables:
             VALUES (%s, %s)
             """, (source_object_name, target_object_name))
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: prepare_remote_objects_substitution: Data inserted into table remote_objects_substitution in schema {self.protocol_schema}")
+        self.apply_comments(['remote_objects_substitution'])
 
     def get_records_remote_objects_substitution(self):
         query = f"""
@@ -317,6 +392,7 @@ class MigratorTables:
                 'target_default_value': target_default_value
             })
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: prepare_default_values_substitution: Data inserted into table default_values_substitution in schema {self.protocol_schema}")
+        self.apply_comments(['default_values_substitution'])
 
     def insert_default_values_substitution(self, settings):
         self.protocol_connection.execute_query(f"""
@@ -1787,13 +1863,17 @@ class MigratorTables:
             raise
 
     def decode_target_column_alteration_row(self, row):
+        ## the columns of the table are id, target_schema_name, target_table_name,
+        ## target_column, reason, original_data_type, altered_data_type - the reason was
+        ## missing here, so the two data types were reported one position too early
         return {
             'id': row[0],
             'target_schema_name': row[1],
             'target_table_name': row[2],
             'target_column': row[3],
-            'original_data_type': row[4],
-            'altered_data_type': row[5]
+            'reason': row[4],
+            'original_data_type': row[5],
+            'altered_data_type': row[6]
         }
 
     def fk_find_dependent_columns_to_alter(self, settings):
@@ -1919,6 +1999,89 @@ class MigratorTables:
         """)
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: create_table_for_batches_stats: Table {table_name} created in schema {self.protocol_schema}.")
 
+    def create_table_for_anonymization_stats(self, drop_existing=True):
+        """
+        Record of the anonymization rules that really fired - one row per table, column and
+        method, with the number of values actually replaced. The summary reports from this
+        table, so a rule which never touched a value cannot be presented as a done job.
+        """
+        table_name = self.config_parser.get_protocol_name_anonymization_stats()
+        if drop_existing:
+            self.protocol_connection.execute_query(self.drop_table_sql.format(protocol_schema=self.protocol_schema, table_name=table_name))
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
+            (id SERIAL PRIMARY KEY,
+            worker_id TEXT,
+            source_schema_name TEXT,
+            source_table_name TEXT,
+            target_schema_name TEXT,
+            target_table_name TEXT,
+            column_name TEXT,
+            method_name TEXT,
+            params TEXT,
+            values_anonymized BIGINT DEFAULT 0,
+            values_truncated BIGINT DEFAULT 0,
+            values_refitted BIGINT DEFAULT 0,
+            table_rows BIGINT DEFAULT 0,
+            inserted_at TIMESTAMP DEFAULT clock_timestamp()
+            )
+        """)
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: create_table_for_anonymization_stats: Table {table_name} created in schema {self.protocol_schema}.")
+
+    def insert_anonymization_stats(self, settings):
+        table_name = self.config_parser.get_protocol_name_anonymization_stats()
+        self.protocol_connection.execute_query(f"""
+            INSERT INTO "{self.protocol_schema}"."{table_name}"
+            (worker_id, source_schema_name, source_table_name, target_schema_name, target_table_name,
+            column_name, method_name, params, values_anonymized, values_truncated, values_refitted, table_rows)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            str(settings.get('worker_id', '')),
+            settings.get('source_schema_name', ''),
+            settings.get('source_table_name', ''),
+            settings.get('target_schema_name', ''),
+            settings.get('target_table_name', ''),
+            settings.get('column_name', ''),
+            settings.get('method_name', ''),
+            str(settings.get('params', '')),
+            settings.get('values_anonymized', 0),
+            settings.get('values_truncated', 0),
+            settings.get('values_refitted', 0),
+            settings.get('table_rows', 0),
+        ))
+
+    def fetch_anonymization_stats(self):
+        """
+        What the anonymization workers really did, as
+        { (target_table_name, column_name): {'method': ..., 'values': ..., 'rows': ...} }.
+        """
+        table_name = self.config_parser.get_protocol_name_anonymization_stats()
+        stats = {}
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(f"""
+                SELECT target_schema_name, target_table_name, column_name, method_name,
+                       sum(values_anonymized), sum(values_truncated), sum(values_refitted), sum(table_rows)
+                FROM "{self.protocol_schema}"."{table_name}"
+                GROUP BY 1, 2, 3, 4
+            """)
+            for row in cursor.fetchall():
+                (target_schema_name, target_table_name, column_name, method_name,
+                 values_anonymized, values_truncated, values_refitted, table_rows) = row
+                stats[(target_table_name, column_name)] = {
+                    'schema': target_schema_name,
+                    'method': method_name,
+                    'values': int(values_anonymized or 0),
+                    'truncated': int(values_truncated or 0),
+                    'refitted': int(values_refitted or 0),
+                    'rows': int(table_rows or 0),
+                }
+            cursor.close()
+        except Exception:
+            self.protocol_connection.connection.rollback()
+            raise
+        return stats
+
     def create_table_for_data_chunks(self):
         try:
             table_name = self.config_parser.get_protocol_name_data_chunks()
@@ -2038,12 +2201,12 @@ class MigratorTables:
             'source_table_rows_limited': row[8],
             'target_table_rows': row[9],
             'chunk_number': row[10],
-            'chunk_size': row[10],
-            'migration_limitation': row[11],
-            'chunk_start': row[12],
-            'chunk_end': row[13],
-            'order_by_clause': row[14],
-            'inserted_rows': row[15],
+            'chunk_size': row[11],
+            'migration_limitation': row[12],
+            'chunk_start': row[13],
+            'chunk_end': row[14],
+            'order_by_clause': row[15],
+            'inserted_rows': row[16],
             'batch_size': row[17],
             'total_batches': row[18],
             'task_started': row[19],
@@ -2678,12 +2841,20 @@ class MigratorTables:
     def create_table_for_sequences(self):
         table_name = self.config_parser.get_protocol_name_sequences()
         self.protocol_connection.execute_query(self.drop_table_sql.format(protocol_schema=self.protocol_schema, table_name=table_name))
+        ## a sequence of the target can come from a sequence of the source or from an identity
+        ## column, which most legacy databases have instead - source_column_data_type,
+        ## source_is_identity and source_next_identity document which of the two it is, with
+        ## what the source declared and reported, and target_sequence_last_value the value the
+        ## sequence really has after it was set
         self.protocol_connection.execute_query(f"""
             CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
             (sequence_id INTEGER,
             source_schema_name TEXT,
             source_table_name TEXT,
             source_column_name TEXT,
+            source_column_data_type TEXT,
+            source_is_identity BOOLEAN,
+            source_next_identity BIGINT,
             source_sequence_name TEXT,
             source_sequence_sql TEXT,
             source_start_value BIGINT,
@@ -2696,8 +2867,10 @@ class MigratorTables:
             target_schema_name TEXT,
             target_table_name TEXT,
             target_column_name TEXT,
+            target_column_data_type TEXT,
             target_sequence_name TEXT,
             target_sequence_sql TEXT,
+            target_sequence_last_value BIGINT,
             target_sequence_comment TEXT,
             task_created TIMESTAMP DEFAULT clock_timestamp(),
             task_started TIMESTAMP,
@@ -2741,6 +2914,10 @@ class MigratorTables:
     def create_table_for_triggers(self):
         table_name = self.config_parser.get_protocol_name_triggers()
         self.protocol_connection.execute_query(self.drop_table_sql.format(protocol_schema=self.protocol_schema, table_name=table_name))
+            # -- The conversion could not express part of the trigger and left it in
+            # -- trigger_target_sql as the source wrote it. Such a trigger is NOT created in the
+            # -- target and is reported as failed - the stored code is there to be completed by
+            # -- hand, not to be executed.
         self.protocol_connection.execute_query(f"""
             CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
             (id SERIAL PRIMARY KEY,
@@ -2764,7 +2941,9 @@ class MigratorTables:
             success BOOLEAN,
             message TEXT,
             final_valid BOOLEAN,
-            final_valid_message TEXT
+            final_valid_message TEXT,
+            requires_manual_adjustment BOOLEAN DEFAULT FALSE,
+            manual_adjustment_details TEXT
             )
         """)
         self.config_parser.print_log_message('DEBUG', f"migrator_tables: create_table_for_triggers: Created protocol table {table_name} for triggers.")
@@ -2869,21 +3048,26 @@ class MigratorTables:
             'source_schema_name': row[1],
             'source_table_name': row[2],
             'source_column_name': row[3],
-            'source_sequence_name': row[4],
-            'source_sequence_sql': row[5],
-            'source_start_value': row[6],
-            'source_increment_by': row[7],
-            'source_minvalue': row[8],
-            'source_maxvalue': row[9],
-            'source_cache': row[10],
-            'source_is_cycled': row[11],
-            'source_sequence_comment': row[12],
-            'target_schema_name': row[13],
-            'target_table_name': row[14],
-            'target_column_name': row[15],
-            'target_sequence_name': row[16],
-            'target_sequence_sql': row[17],
-            'target_sequence_comment': row[18]
+            'source_column_data_type': row[4],
+            'source_is_identity': row[5],
+            'source_next_identity': row[6],
+            'source_sequence_name': row[7],
+            'source_sequence_sql': row[8],
+            'source_start_value': row[9],
+            'source_increment_by': row[10],
+            'source_minvalue': row[11],
+            'source_maxvalue': row[12],
+            'source_cache': row[13],
+            'source_is_cycled': row[14],
+            'source_sequence_comment': row[15],
+            'target_schema_name': row[16],
+            'target_table_name': row[17],
+            'target_column_name': row[18],
+            'target_column_data_type': row[19],
+            'target_sequence_name': row[20],
+            'target_sequence_sql': row[21],
+            'target_sequence_last_value': row[22],
+            'target_sequence_comment': row[23]
         }
 
     def decode_trigger_row(self, row):
@@ -2902,7 +3086,16 @@ class MigratorTables:
             'trigger_row_statement': row[11],
             'trigger_source_sql': row[12],
             'trigger_target_sql': row[13],
-            'trigger_comment': row[14]
+            'trigger_comment': row[14],
+            'task_created': row[15],
+            'task_started': row[16],
+            'task_completed': row[17],
+            'success': row[18],
+            'message': row[19],
+            'final_valid': row[20],
+            'final_valid_message': row[21],
+            'requires_manual_adjustment': bool(row[22]) if len(row) > 22 else False,
+            'manual_adjustment_details': row[23] if len(row) > 23 else None,
         }
 
     def decode_view_row(self, row):
@@ -3418,18 +3611,21 @@ class MigratorTables:
         func_run_id = uuid.uuid4()
         protocol_table_name = self.config_parser.get_protocol_name_sequences()
 
+        ## the next identity value is clamped like the values of a sequence - an identity
+        ## column of Sybase ASE is a NUMERIC of up to 38 digits and can report a value which
+        ## no BIGINT column of the protocol can hold
         clamped, message = self.clamp_bigint_sequence_fields(
-            settings, ('source_start_value', 'source_increment_by', 'source_minvalue', 'source_maxvalue', 'source_cache'))
+            settings, ('source_start_value', 'source_increment_by', 'source_minvalue', 'source_maxvalue', 'source_cache', 'source_next_identity'))
         if message:
-            self.config_parser.print_log_message('WARNING', f"migrator_tables: insert_sequence: ({func_run_id}): sequence {settings.get('source_sequence_name')}: {message}")
+            self.config_parser.print_log_message('WARNING', f"migrator_tables: insert_sequence: ({func_run_id}): sequence {settings.get('source_sequence_name') or settings.get('target_sequence_name')}: {message}")
 
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{protocol_table_name}"
-            (sequence_id, source_schema_name, source_table_name, source_column_name, source_sequence_name, source_sequence_sql, source_start_value, source_increment_by, source_minvalue, source_maxvalue, source_cache, source_is_cycled, source_sequence_comment, target_schema_name, target_table_name, target_column_name, target_sequence_name, target_sequence_sql, target_sequence_comment, message)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (sequence_id, source_schema_name, source_table_name, source_column_name, source_column_data_type, source_is_identity, source_next_identity, source_sequence_name, source_sequence_sql, source_start_value, source_increment_by, source_minvalue, source_maxvalue, source_cache, source_is_cycled, source_sequence_comment, target_schema_name, target_table_name, target_column_name, target_column_data_type, target_sequence_name, target_sequence_sql, target_sequence_comment, message)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (settings.get('sequence_id'), settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_column_name'), settings.get('source_sequence_name'), settings.get('source_sequence_sql'), clamped['source_start_value'], clamped['source_increment_by'], clamped['source_minvalue'], clamped['source_maxvalue'], clamped['source_cache'], settings.get('source_is_cycled'), settings.get('source_sequence_comment'), settings.get('target_schema_name'), settings.get('target_table_name'), settings.get('target_column_name'), settings.get('target_sequence_name'), settings.get('target_sequence_sql'), settings.get('target_sequence_comment'), message)
+        params = (settings.get('sequence_id'), settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_column_name'), settings.get('source_column_data_type'), settings.get('source_is_identity'), clamped['source_next_identity'], settings.get('source_sequence_name'), settings.get('source_sequence_sql'), clamped['source_start_value'], clamped['source_increment_by'], clamped['source_minvalue'], clamped['source_maxvalue'], clamped['source_cache'], settings.get('source_is_cycled'), settings.get('source_sequence_comment'), settings.get('target_schema_name'), settings.get('target_table_name'), settings.get('target_column_name'), settings.get('target_column_data_type'), settings.get('target_sequence_name'), settings.get('target_sequence_sql'), settings.get('target_sequence_comment'), message)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -3438,7 +3634,9 @@ class MigratorTables:
 
             sequence_row = self.decode_sequence_row(row)
             self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_sequence: ({func_run_id}): Returned row: {sequence_row}")
-            self.insert_protocol({'object_type': 'sequence', 'object_name': settings.get('source_sequence_name'), 'object_action': 'create', 'object_ddl': settings.get('source_sequence_sql'), 'execution_timestamp': None, 'execution_success': None, 'execution_error_message': None, 'row_type': 'info', 'execution_results': None, 'object_protocol_id': sequence_row['sequence_id']})
+            ## a sequence created for an identity column has no name of its own in the source,
+            ## the name of the sequence in the target names it in the protocol instead
+            self.insert_protocol({'object_type': 'sequence', 'object_name': settings.get('source_sequence_name') or settings.get('target_sequence_name'), 'object_action': 'create', 'object_ddl': settings.get('source_sequence_sql') or settings.get('target_sequence_sql'), 'execution_timestamp': None, 'execution_success': None, 'execution_error_message': None, 'row_type': 'info', 'execution_results': None, 'object_protocol_id': sequence_row['sequence_id']})
             return sequence_row['sequence_id']
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_sequence: ({func_run_id}): Error inserting sequence info {settings.get('source_sequence_name')} into {protocol_table_name}.")
@@ -3451,15 +3649,22 @@ class MigratorTables:
         message = settings.get('message')
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_sequences()
+        ## the value the sequence has after it was set is recorded when the caller read it -
+        ## it documents the result of the statement, not only that it was executed
+        last_value_clamped, last_value_message = self.clamp_bigint_sequence_fields(
+            settings, ('target_sequence_last_value',))
+        if last_value_message:
+            self.config_parser.print_log_message('WARNING', f"migrator_tables: update_sequence_status: ({func_run_id}): sequence {sequence_id}: {last_value_message}")
         query = f"""
             UPDATE "{self.protocol_schema}"."{table_name}"
             SET task_completed = clock_timestamp(),
             success = %s,
-            message = %s
+            message = %s,
+            target_sequence_last_value = COALESCE(%s, target_sequence_last_value)
             WHERE sequence_id = %s
             RETURNING *
         """
-        params = ('TRUE' if success else 'FALSE', message, sequence_id)
+        params = ('TRUE' if success else 'FALSE', message, last_value_clamped['target_sequence_last_value'], sequence_id)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -3484,11 +3689,11 @@ class MigratorTables:
         table_name = self.config_parser.get_protocol_name_triggers()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema_name, source_table_name, source_table_id, target_schema_name, target_table_name, trigger_id, trigger_name, trigger_event, trigger_new, trigger_old, trigger_source_sql, trigger_target_sql, trigger_comment)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (source_schema_name, source_table_name, source_table_id, target_schema_name, target_table_name, trigger_id, trigger_name, trigger_event, trigger_new, trigger_old, trigger_source_sql, trigger_target_sql, trigger_comment, requires_manual_adjustment, manual_adjustment_details)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_table_id'), settings.get('target_schema_name'), settings.get('target_table_name'), settings.get('trigger_id'), settings.get('trigger_name'), settings.get('trigger_event'), settings.get('trigger_new'), settings.get('trigger_old'), settings.get('trigger_source_sql'), settings.get('trigger_target_sql'), settings.get('trigger_comment'))
+        params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_table_id'), settings.get('target_schema_name'), settings.get('target_table_name'), settings.get('trigger_id'), settings.get('trigger_name'), settings.get('trigger_event'), settings.get('trigger_new'), settings.get('trigger_old'), settings.get('trigger_source_sql'), settings.get('trigger_target_sql'), settings.get('trigger_comment'), bool(settings.get('requires_manual_adjustment')), settings.get('manual_adjustment_details'))
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -4144,7 +4349,10 @@ class MigratorTables:
             ('Text Search Objects', self.config_parser.get_protocol_name_text_search(), 'object_type'),
             ('User Defined Types', self.config_parser.get_protocol_name_user_defined_types(), None),
             ('Domains', self.config_parser.get_protocol_name_domains(), 'migrated_as'),
-            ('Sequences', self.config_parser.get_protocol_name_sequences(), None),
+            ## a sequence of the target stands either for an identity column of the source or
+            ## for a sequence object of it - the summary reports how many of each
+            ('Sequences', self.config_parser.get_protocol_name_sequences(),
+             "CASE WHEN source_is_identity IS TRUE THEN 'from identity column' ELSE 'from sequence object' END"),
             ('Tables', self.config_parser.get_protocol_name_tables(), None),
             ('Table Partitions', self.config_parser.get_protocol_name_source_table_partitioning(), None),
             ('Columns', self.config_parser.get_protocol_name_columns(), None),
@@ -4506,37 +4714,66 @@ class MigratorTables:
             anon_tables_data = []
             anon_tables = 0
             anon_columns = 0
+            anon_columns_with_values = 0
+            anon_values = 0
+            # rules which matched a column but replaced no value, and configured rules which
+            # matched no migrated column at all - both mean data was copied unchanged
+            rules_without_effect = []
+            rules_without_column = []
             try:
                 from credativ_pg_migrator.anonymization.routing import MigratorAnonymizer
                 anonymizer = MigratorAnonymizer(self.config_parser.config)
+                # what the workers really did - the configuration alone says nothing about it
+                actual_stats = self.fetch_anonymization_stats()
+                matched_columns = set()
                 if anonymizer.is_active():
                     raw_tables = self.fetch_all_tables()
                     for t_row in raw_tables:
                         table_data = self.decode_table_row(t_row)
-                        if table_data.get('source_table_rows_limited', 0) > 0:
-                            target_schema_name = table_data.get('target_schema_name', '')
-                            target_table_name = table_data['target_table_name']
-                            full_table_name = f"{target_schema_name}.{target_table_name}" if target_schema_name else target_table_name
+                        target_schema_name = table_data.get('target_schema_name', '')
+                        target_table_name = table_data['target_table_name']
+                        full_table_name = f"{target_schema_name}.{target_table_name}" if target_schema_name else target_table_name
+                        # an empty table has nothing to anonymize - its rules are not reported
+                        # as ineffective, but they did match a column of the migration
+                        table_has_rows = table_data.get('source_table_rows_limited', 0) > 0
 
-                            target_columns = table_data.get('target_columns', {})
-                            table_matched = False
-                            table_anon_cols = []
-                            for col_val in target_columns.values():
-                                col_name = col_val.get('column_name') if isinstance(col_val, dict) else col_val
-                                data_type = col_val.get('data_type', 'unknown') if isinstance(col_val, dict) else 'unknown'
-                                method, params = anonymizer.get_method_for_column(target_table_name, col_name)
-                                if method:
-                                    anon_columns += 1
-                                    table_matched = True
-                                    table_anon_cols.append({'name': col_name, 'data_type': data_type, 'method': method, 'params': params})
-                            if table_matched:
-                                anon_tables += 1
-                                anon_tables_data.append({
-                                    'table_name': full_table_name,
-                                    'columns': table_anon_cols
-                                })
+                        target_columns = table_data.get('target_columns', {})
+                        table_anon_cols = []
+                        for col_val in target_columns.values():
+                            col_name = col_val.get('column_name') if isinstance(col_val, dict) else col_val
+                            data_type = col_val.get('data_type', 'unknown') if isinstance(col_val, dict) else 'unknown'
+                            method, params = anonymizer.get_method_for_column(target_table_name, col_name)
+                            if not method:
+                                continue
+                            matched_columns.add((target_table_name, col_name))
+                            if not table_has_rows:
+                                continue
+                            anon_columns += 1
+                            stats_row = actual_stats.get((target_table_name, col_name))
+                            values_anonymized = stats_row['values'] if stats_row else 0
+                            anon_values += values_anonymized
+                            if values_anonymized > 0:
+                                anon_columns_with_values += 1
+                            elif stats_row is None:
+                                rules_without_effect.append(f"{full_table_name}.{col_name} ({method}) - the table was not processed by the anonymization copy")
+                            else:
+                                rules_without_effect.append(f"{full_table_name}.{col_name} ({method}) - no value replaced, every copied value was NULL")
+                            table_anon_cols.append({'name': col_name, 'data_type': data_type, 'method': method, 'params': params, 'values': values_anonymized})
+                        if table_anon_cols:
+                            anon_tables += 1
+                            anon_tables_data.append({
+                                'table_name': full_table_name,
+                                'columns': table_anon_cols
+                            })
 
-                lines.append(f"Anonymized {anon_columns} columns in {anon_tables} tables.")
+                    for cfg_table_name, cfg_table_rules in anonymizer.tables_config.items():
+                        for cfg_column_name in cfg_table_rules.keys():
+                            if (cfg_table_name, cfg_column_name) not in matched_columns:
+                                rules_without_column.append(f"anonymization.tables.{cfg_table_name}.{cfg_column_name}")
+
+                lines.append(f"Anonymization rules configured: {anonymizer.rules_count}")
+                lines.append(f"Columns matched by a rule: {anon_columns} in {anon_tables} tables")
+                lines.append(f"Values really replaced: {anon_values} in {anon_columns_with_values} columns")
 
                 if anon_tables_data:
                     top_anonymized_tables_limit = self.config_parser.get_summary_top_anonymized_tables()
@@ -4549,17 +4786,13 @@ class MigratorTables:
                         if idx > 1:
                             lines.append("")
                         col_count = len(t_data['columns'])
-                        lines.append(f"{idx}. {t_data['table_name']} ({col_count} columns anonymized)")
+                        table_values = sum(c['values'] for c in t_data['columns'])
+                        lines.append(f"{idx}. {t_data['table_name']} ({col_count} columns matched by a rule, {table_values} values replaced)")
 
                         sorted_cols = sorted(t_data['columns'], key=lambda x: x['name'])
                         display_cols = sorted_cols[:top_anonymized_columns_limit]
 
                         if display_cols:
-                            col_len = max([len(c['name']) for c in display_cols] + [11])
-                            type_len = max([len(c['data_type']) for c in display_cols] + [9])
-                            lines.append(f"   { 'Column Name'.ljust(col_len) } | { 'Data Type'.ljust(type_len) } | Method")
-                            lines.append(f"   { '-' * col_len }-+-{ '-' * type_len }-+-{ '-' * 20 }")
-
                             for col_info in display_cols:
                                 method_str = col_info['method']
                                 if col_info.get('params') and 'part' in col_info['params']:
@@ -4567,7 +4800,17 @@ class MigratorTables:
                                 elif col_info.get('params'):
                                     param_str = ", ".join(f"{k}: {v}" for k, v in col_info['params'].items())
                                     method_str += f" ({param_str})"
-                                lines.append(f"   { col_info['name'].ljust(col_len) } | { col_info['data_type'].ljust(type_len) } | { method_str }")
+                                col_info['method_str'] = method_str
+
+                            col_len = max([len(c['name']) for c in display_cols] + [11])
+                            type_len = max([len(c['data_type']) for c in display_cols] + [9])
+                            method_len = max([len(c['method_str']) for c in display_cols] + [20])
+                            values_len = 15
+                            lines.append(f"   { 'Column Name'.ljust(col_len) } | { 'Data Type'.ljust(type_len) } | { 'Method'.ljust(method_len) } | { 'Values replaced'.rjust(values_len) }")
+                            lines.append(f"   { '-' * col_len }-+-{ '-' * type_len }-+-{ '-' * method_len }-+-{ '-' * values_len }")
+
+                            for col_info in display_cols:
+                                lines.append(f"   { col_info['name'].ljust(col_len) } | { col_info['data_type'].ljust(type_len) } | { col_info['method_str'].ljust(method_len) } | { str(col_info['values']).rjust(values_len) }")
 
                         if col_count > top_anonymized_columns_limit:
                             lines.append(f"   - ... and {col_count - top_anonymized_columns_limit} more")
@@ -4575,6 +4818,41 @@ class MigratorTables:
                         show_examples = self.config_parser.get_summary_show_anonymization_examples()
                         if show_examples > 0:
                             self._append_anonymization_examples(lines, t_data['table_name'], display_cols, show_examples)
+
+                if rules_without_effect:
+                    lines.append("")
+                    lines.append(f"WARNING: {len(rules_without_effect)} rules replaced no value - the data of these columns was copied unchanged:")
+                    for rule_description in sorted(rules_without_effect):
+                        lines.append(f"   - {rule_description}")
+
+                if rules_without_column:
+                    lines.append("")
+                    lines.append(f"WARNING: {len(rules_without_column)} configured rules matched no migrated column - check the table and column names:")
+                    for rule_description in sorted(rules_without_column):
+                        lines.append(f"   - {rule_description}")
+
+                # values which did not fit into the target column - see anonymization.on_value_too_long
+                truncated_columns = []
+                refitted_columns = []
+                for (stats_table_name, stats_column_name), stats_row in actual_stats.items():
+                    stats_full_table_name = f"{stats_row['schema']}.{stats_table_name}" if stats_row['schema'] else stats_table_name
+                    stats_method = stats_row['method'] or 'no anonymization rule'
+                    if stats_row['truncated']:
+                        truncated_columns.append(f"{stats_full_table_name}.{stats_column_name} ({stats_method}): {stats_row['truncated']} values cut to the length of the target column")
+                    if stats_row['refitted']:
+                        refitted_columns.append(f"{stats_full_table_name}.{stats_column_name} ({stats_method}): {stats_row['refitted']} values regenerated until they fit into the target column")
+
+                if truncated_columns:
+                    lines.append("")
+                    lines.append(f"WARNING: {len(truncated_columns)} columns did not fit into the target column and their values were cut (anonymization.on_value_too_long: fit):")
+                    for column_description in sorted(truncated_columns):
+                        lines.append(f"   - {column_description}")
+
+                if refitted_columns:
+                    lines.append("")
+                    lines.append(f"{len(refitted_columns)} columns did not fit into the target column, the anonymization method was called again until the value did (anonymization.on_value_too_long: find_fitting_value):")
+                    for column_description in sorted(refitted_columns):
+                        lines.append(f"   - {column_description}")
             except Exception as e:
                 lines.append(f"Error computing anonymization stats: {e}")
 
@@ -5758,6 +6036,13 @@ class MigratorTables:
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: create_table_for_validation: Error: {e}")
             raise
+
+        self.apply_comments([
+            self.config_parser.get_validation_tables_name(),
+            self.config_parser.get_validation_columns_name(),
+            self.config_parser.get_validation_indexes_name(),
+            self.config_parser.get_validation_constraints_name(),
+        ])
 
     def insert_validation_table_result(self, settings):
         source_schema_name = settings.get('source_schema_name')

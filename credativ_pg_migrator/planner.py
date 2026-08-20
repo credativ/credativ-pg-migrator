@@ -492,16 +492,11 @@ class Planner:
         include_tables / exclude_tables evaluation as in stdwf_prepare_tables.
         """
         selected = []
-        include_tables = self.config_parser.get_include_tables()
-        exclude_tables = self.config_parser.get_exclude_tables() or []
         source_tables = self.source_connection.fetch_table_names(self.source_schema_name)
         for _, table_info in (source_tables or {}).items():
             table_name = table_info['table_name']
-            if include_tables == ['.*'] or '.*' in include_tables:
-                pass
-            elif include_tables and not any(fnmatch.fnmatch(table_name, pattern) for pattern in include_tables):
-                continue
-            if any(fnmatch.fnmatch(table_name, pattern) for pattern in exclude_tables):
+            included, _reason = self.config_parser.is_object_selected('table', table_name)
+            if not included:
                 continue
             selected.append(table_name)
         return selected
@@ -618,6 +613,10 @@ class Planner:
                 'source_schema_name': self.source_schema_name,
                 'source_table_name': sequence_info.get('table_name', None),
                 'source_column_name': sequence_info.get('column_name', None),
+                ## a sequence object of the source is not an identity column - the flag says so
+                ## explicitly, so the protocol tells the two origins of a sequence apart
+                'source_is_identity': sequence_info.get('used_in_identity', False),
+                'source_column_data_type': sequence_info.get('column_data_type', None),
                 'source_sequence_name': sequence_info['sequence_name'],
                 'source_sequence_sql': sequence_info.get('source_sequence_sql', ''),
                 'source_start_value': sequence_info.get('source_start_value', None),
@@ -675,14 +674,8 @@ class Planner:
                             'success': True,
                             'message': f"Alias used as target name for table {table_info['table_name']}"
                         })
-            # If include_tables is empty, include all tables
-            # If include_tables is ['.*'] or contains '.*', include all tables
-            if include_tables == ['.*'] or '.*' in include_tables:
-                pass
-            elif include_tables and not any(fnmatch.fnmatch(table_info['table_name'], pattern) for pattern in include_tables):
-                continue
-            if any(fnmatch.fnmatch(table_info['table_name'], pattern) for pattern in exclude_tables):
-                self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_tables: Table {table_info['table_name']} is excluded from migration.")
+            if not self.config_parser.report_object_selection(
+                    'table', table_info['table_name'], 'planner: stdwf_prepare_tables'):
                 continue
 
             source_columns = []
@@ -1043,6 +1036,21 @@ class Planner:
                         self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Source trigger code: {trigger_details['sql']}")
                         self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Converted trigger code: {converted_code}")
 
+                        ## The conversion could not express part of this trigger and left it in
+                        ## the code as the source wrote it. The code is stored so that it can be
+                        ## completed by hand, and the trigger is kept out of the target - a
+                        ## trigger which does less than the trigger of the source did must not be
+                        ## created and counted as migrated.
+                        requires_manual_adjustment = self.source_connection.trigger_needs_manual_adjustment(converted_code)
+                        manual_adjustment_details = None
+                        if requires_manual_adjustment:
+                            manual_adjustment_details = self.source_connection.trigger_manual_adjustment_details(converted_code)
+                            self.config_parser.print_log_message('WARNING',
+                                f"planner: stdwf_prepare_tables: Trigger {trigger_name} of table "
+                                f"{table_info['table_name']} could not be converted completely and will NOT be "
+                                f"created in the target - it is reported as failed and its code is stored for "
+                                f"the migration by hand: {manual_adjustment_details}")
+
                         self.migrator_tables.insert_trigger({
                             'source_schema_name': self.source_schema_name,
                             'source_table_name': table_info['table_name'],
@@ -1056,7 +1064,9 @@ class Planner:
                             'trigger_old': trigger_details['old'],
                             'trigger_source_sql': trigger_details['sql'],
                             'trigger_target_sql': converted_code,
-                            'trigger_comment': trigger_details['comment']
+                            'trigger_comment': trigger_details['comment'],
+                            'requires_manual_adjustment': requires_manual_adjustment,
+                            'manual_adjustment_details': manual_adjustment_details,
                         })
                     self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_tables: Trigger {trigger_details['name']} for table {table_info['table_name']}")
                 else:
@@ -1065,6 +1075,7 @@ class Planner:
                 self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_tables: Skipping trigger migration.")
 
             self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_tables: Table {table_info['table_name']} processed successfully.")
+        self.config_parser.log_object_selection_summary('table', 'planner: stdwf_prepare_tables')
         self.stdwf_ensure_parent_fk_indexes()
         self.stdwf_sync_fk_column_types()
 
@@ -1416,13 +1427,8 @@ class Planner:
 
             for order_num, view_info in views.items():
                 self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_views: Processing view ({order_num}): {view_info}")
-                if include_views == ['.*'] or '.*' in include_views:
-                    pass
-                elif not any(fnmatch.fnmatch(view_info['view_name'], pattern) for pattern in include_views):
-                    self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_views: View {view_info['view_name']} does not match patterns for migration.")
-                    continue
-                if any(fnmatch.fnmatch(view_info['view_name'], pattern) for pattern in exclude_views):
-                    self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_views: View {view_info['view_name']} is excluded from migration.")
+                if not self.config_parser.report_object_selection(
+                        'view', view_info['view_name'], 'planner: stdwf_prepare_views'):
                     continue
                 self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_views: View {view_info['view_name']} is included for migration.")
                 target_view_name = view_info.get('target_view_name', view_info['view_name'])
@@ -1485,6 +1491,7 @@ class Planner:
                     'view_comment': view_info['comment']
                 })
                 self.config_parser.print_log_message( 'INFO', f"planner: stdwf_prepare_views: View {view_info['view_name']} processed successfully.")
+            self.config_parser.log_object_selection_summary('view', 'planner: stdwf_prepare_views')
             self.config_parser.print_log_message( 'INFO', "planner: stdwf_prepare_views: Views processed successfully.")
         else:
             self.config_parser.print_log_message( 'INFO', "planner: stdwf_prepare_views: Skipping views migration.")
@@ -2030,7 +2037,17 @@ class Planner:
                     if table_data_export and 'character_set' in table_data_export:
                         character_set = table_data_export['character_set']
 
-                    self.config_parser.print_log_message('DEBUG3',f"planner: stdwf_prepare_data_sources: Table {table_info['source_table_name']} - file_name: {table_file_name}, converted_file_name: {converted_file_name}, data_file_found: {data_file_found}, format: {format}, delimiter: {delimiter}, header: {header}, character_set: {character_set}")
+                    ## the order of the parts of a date in the file - the file itself does
+                    ## not state it, and a wrong reading of '01/04/22' migrates a different
+                    ## date. When nothing is configured it is worked out from the values.
+                    date_format = data_export.get('date_format', None)
+                    if table_data_export and 'date_format' in table_data_export:
+                        date_format = table_data_export['date_format']
+                    ## a name which is not one of the known formats stops the run here,
+                    ## while it can still be corrected, instead of at the first date
+                    self.config_parser.date_format_to_order(date_format)
+
+                    self.config_parser.print_log_message('DEBUG3',f"planner: stdwf_prepare_data_sources: Table {table_info['source_table_name']} - file_name: {table_file_name}, converted_file_name: {converted_file_name}, data_file_found: {data_file_found}, format: {format}, delimiter: {delimiter}, header: {header}, character_set: {character_set}, date_format: {date_format}")
                     data_source = {
                         'source_schema_name': table_info['source_schema_name'],
                         'source_table_name': table_info['source_table_name'],
@@ -2047,6 +2064,7 @@ class Planner:
                             'delimiter': delimiter,
                             'header': header,
                             'character_set': character_set,
+                            'date_format': date_format,
                         }
                     }
                     self.migrator_tables.insert_data_source(data_source)

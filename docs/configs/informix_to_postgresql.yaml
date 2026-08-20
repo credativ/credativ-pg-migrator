@@ -68,8 +68,9 @@ source:
   # ------------------------------------------------------------------------
   # data_export:
   #   format: "UNL"                    # "UNL" | "CSV" | "SQL"
-  #   # {{source_schema}} and {{source_table}} are substituted per table
-  #   file: "/path/to/export/{{source_table}}.unl"          # >>> ADJUST
+  #   # {{source_schema_name}} and {{source_table_name}} are substituted per table
+  #   # - those two are the only placeholders that exist
+  #   file: "/path/to/export/{{source_table_name}}.unl"     # >>> ADJUST
   #   delimiter: "|"                   # UNL default is "|", CSV default is ","
   #   header: false
   #   # UNL is converted to CSV first; the converted files are written here
@@ -125,12 +126,12 @@ migration:
   #     action: "pause"                   # pause | stop | continue
 
 include_tables: all
-exclude_tables:               # >>> ADJUST
+exclude_tables: []            # >>> ADJUST
 include_views: all
 exclude_views:
   - "sys*"                    # Informix system catalog views
 include_funcprocs: all
-exclude_funcprocs:
+exclude_funcprocs: []
 
 # Per-table overrides of the global settings. table_name is a name or regex.
 # >>> ADJUST or delete

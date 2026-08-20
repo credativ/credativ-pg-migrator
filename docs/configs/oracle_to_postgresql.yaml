@@ -113,11 +113,11 @@ migration:
   validate_objects: retry
 
 include_tables: all
-exclude_tables:               # >>> ADJUST - e.g. - "BIN\\$.*"  (recycle bin)
+exclude_tables: []            # >>> ADJUST - e.g. - "BIN$*"  (recycle bin)
 include_views: all
-exclude_views:
+exclude_views: []
 include_funcprocs: all
-exclude_funcprocs:
+exclude_funcprocs: []
 
 # Oracle types that have no direct counterpart, or that you want narrowed.
 # ["table regex", "column regex", "source type", "target type", "length"]

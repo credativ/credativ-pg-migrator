@@ -1,6 +1,6 @@
 # credativ-pg-migrator — test suite
 
-494 test functions in 33 files. **No test in this directory needs a database, a driver
+530 test functions in 34 files. **No test in this directory needs a database, a driver
 connection, or a network.** Everything that would talk to a server is either constructed
 with `Class.__new__(Class)` and fed a fake config, or replaced with `unittest.mock`. A
 full run touches nothing outside the repository and finishes in seconds.
@@ -35,7 +35,7 @@ tests, and no test depends on the order of the others.
 | group | needs | files |
 |---|---|---|
 | configuration & logging | `pyyaml`, `jsonschema`, `pytest` | the 5 `test_config_*` / `test_logging_*` / `test_object_*` files, and `test_schema_names.py` |
-| query conversion | `sqlglot`, `pytest` | the 4 `test_query_*` files and `test_db2_query_conversion.py` |
+| query conversion | `sqlglot`, `pytest` | the 4 `test_query_*` files, `test_db2_query_conversion.py` and `test_oracle_query_conversion.py` |
 | anonymization, Db2 CSV | nothing beyond the standard library | 3 files |
 | everything else | the package's own dependencies — `psycopg2`, `tabulate`, `jaydebeapi` | 19 files, `test_informix_query_conversion.py` and `test_mysql_query_conversion.py` among them |
 
@@ -542,6 +542,25 @@ and the names which only read like one: `AS hex`, `t.user`, a call named in a co
 a literal. Finally the entry point, the view path which keeps the text of the source when the
 statement cannot be parsed, and the assertion that both connectors really do share one
 conversion and one function mapping.
+
+### `test_oracle_query_conversion.py` — 34 functions, 63 tests
+
+**Purpose.** The dialect of Oracle, which leaves more standing after a transpilation than any
+other source here. It needs no Oracle client: the conversion lives in
+`connectors/oracle_query_conversion.py` for that reason, and the tests build it with the base
+connector behind it.
+
+**Covers.** The `(+)` outer join in the three shapes it comes in — the one which becomes a
+`LEFT JOIN`, the one under an `OR` and the one written inside a call, both of which are
+refused because dropping them leaves an inner join that answers fewer rows and looks healthy.
+`ROWNUM`: a limit where the query block does not sort, refused where it does, and refused in
+the select list, under an `OR` and as `ROWNUM = 2`. The format models of `TRUNC`, the ones
+which have an exact field of PostgreSQL and the ones which do not; `ADD_MONTHS`; `ROUND` of a
+date. What the transpiler already writes correctly, asserted so that a rewrite added later
+cannot take it over. The constructs which stop the conversion, each with the reason it gives,
+and the names which only read like one. The five warnings. And the view path, which still
+wraps its `CREATE VIEW` and still keeps the text of the source when the statement cannot be
+parsed.
 
 ### `test_query_conversion_workflow.py` — 27 functions, 31 tests
 

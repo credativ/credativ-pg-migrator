@@ -37,11 +37,14 @@ STYLES = ('auto', 'qmark', 'named', 'at', 'pyformat', 'numeric', 'none')
 
 ## Each style, as it is written in the statement. 'named' excludes '::' so that a cast of
 ## PostgreSQL is not read as a parameter, 'at' excludes '@@' so that a global variable of
-## Sybase ASE and MS SQL Server is not one either.
+## Sybase ASE and MS SQL Server is not one either - and it excludes an '@' written directly
+## behind a name, which is how Oracle addresses a table over a database link:
+## 'FROM orders@remote_erp' held a parameter by that reading, and the table was renamed to
+## 'orderscpgm_bind_param_1'. A parameter of a driver never stands directly behind a name.
 PATTERNS = {
     'qmark': re.compile(r'\?'),
     'named': re.compile(r'(?<![:\w]):([A-Za-z_][A-Za-z_0-9]*)'),
-    'at': re.compile(r'(?<!@)@([A-Za-z_][A-Za-z_0-9]*)'),
+    'at': re.compile(r'(?<![@\w$#)])@([A-Za-z_][A-Za-z_0-9]*)'),
     'pyformat': re.compile(r'%(?:\(([A-Za-z_][A-Za-z_0-9]*)\))?s'),
     'numeric': re.compile(r'\$(\d+)'),
 }

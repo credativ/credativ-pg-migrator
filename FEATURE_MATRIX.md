@@ -46,7 +46,7 @@ Note to the unclear status - the biggest issue is to find reasonable testing dat
 | Sequences[2]                              | ?       | ?       | ?       | --       | ?      | N/A   | ?[10]   | ?[7]   | yes        | --       | N/A    | N/A*   |
 | Aliases / synonyms                        | ?       | ?       | ?       | ?        | ?      | N/A   | N/A     | ?      | N/A        | --       | N/A    | N/A    |
 | SQL functions mapping[11]                 | WIP     | WIP     | WIP     | WIP      | WIP    | WIP   | WIP     | WIP    | N/A        | WIP      | WIP    | WIP    |
-| Conversion of application queries[15]     | yes     | yes     | yes     | yes      | yes    | yes   | yes     | --     | --         | --       | --     | yes    |
+| Conversion of application queries[15]     | yes     | yes     | yes     | yes      | yes    | yes   | yes     | yes    | --         | --       | --     | yes    |
 | Validation - row counts & checksums       | yes     | yes     | --[9]   | yes      | yes    | yes   | yes     | yes    | yes        | yes      | yes    | yes    |
 | Validation - random sample & LOB sizes    | --      | --      | --      | --       | --     | --    | --      | yes    | yes        | --       | yes    | --     |
 ```

@@ -400,49 +400,6 @@ class MySqlQueryConversion:
 
     ## ------------------------------------------------------------------ the conversion
 
-    def sql_without_literals_and_comments(self, code):
-        """
-        The converted statement with everything which is not SQL blanked out - the string
-        literals, the quoted identifiers and the comments. A function name written in the
-        comment above a statement, or in the text of a condition, is not a call.
-        """
-        if not code:
-            return code
-        masked = list(code)
-        index = 0
-        while index < len(code):
-            character = code[index]
-            if character in ("'", '"'):
-                end = index + 1
-                while end < len(code):
-                    if code[end] == character:
-                        if end + 1 < len(code) and code[end + 1] == character:
-                            end += 2
-                            continue
-                        end += 1
-                        break
-                    end += 1
-                for position in range(index, min(end, len(code))):
-                    masked[position] = ' '
-                index = end
-                continue
-            if code.startswith('/*', index):
-                end = code.find('*/', index + 2)
-                end = len(code) if end == -1 else end + 2
-                for position in range(index, end):
-                    masked[position] = ' '
-                index = end
-                continue
-            if code.startswith('--', index) or code.startswith('#', index):
-                end = code.find('\n', index)
-                end = len(code) if end == -1 else end
-                for position in range(index, end):
-                    masked[position] = ' '
-                index = end
-                continue
-            index += 1
-        return ''.join(masked)
-
     def convert_statement_code(self, settings: dict):
         """
         One statement of MySQL or MariaDB, converted for the target - the query of a view and

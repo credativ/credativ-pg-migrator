@@ -98,6 +98,23 @@ def test_a_global_variable_of_the_source_is_not_a_parameter():
     assert '@@rowcount' in parameters.statement
 
 
+def test_a_database_link_of_oracle_is_not_a_parameter():
+    """
+    'FROM orders@remote_erp' addresses a table of another database in Oracle. Read as a
+    parameter it took the name of the table with it: the statement came out of the
+    conversion as 'FROM orderscpgm_bind_param_1'. A parameter of a driver never stands
+    directly behind a name.
+    """
+    parameters, _warnings = extract("SELECT COUNT(*) FROM orders@remote_erp", 'at')
+    assert parameters.count == 0
+    assert parameters.statement == "SELECT COUNT(*) FROM orders@remote_erp"
+
+
+def test_a_parameter_behind_an_operator_or_a_parenthesis_is_still_one():
+    parameters, _warnings = extract("SELECT a FROM t WHERE b=@p AND c IN (@q)", 'at')
+    assert parameters.count == 2
+
+
 @pytest.mark.parametrize('text', [
     "SELECT '?' FROM t",
     "SELECT a FROM t -- and a ? in a comment",

@@ -543,6 +543,36 @@ def build_comments_catalog(config_parser):
         },
     }
 
+    catalog[config_parser.get_protocol_name_queries()] = {
+        'comment': (
+            'The statements of an application which the query conversion read, and what became of each of them. '
+            'The step runs over a finished migration and writes nothing to either database - this table is the '
+            'record of what it found. status says it in one word: CONVERTED (changed and accepted by the target), '
+            'UNCHANGED (already valid PostgreSQL), CONVERTED_FAILING (converted, and the target refused it), '
+            'NOT CONVERTED (the converter could not do it) and SKIPPED (a gate refused it, because it is not a read).'
+        ),
+        'columns': {
+            'input_file': 'The file the statement was read from.',
+            'statement_ordinal': 'Its place in that file, counted from 1.',
+            'line_from': 'The line the statement begins at, so it can be found in the file it came from.',
+            'line_to': 'The line it ends at.',
+            'statement_name': "The name written above the statement as '-- name: ...', when it carries one.",
+            'statement_hash': 'The hash of the statement with its whitespace normalised. The same statement written twice is converted and tested once, and a later run can tell what changed.',
+            'status': 'What became of the statement - one of CONVERTED, UNCHANGED, CONVERTED_FAILING, NOT CONVERTED, SKIPPED.',
+            'reason': 'Why, for everything which is not simply converted: which gate refused the statement, or what the converter or the target said.',
+            'source_sql': 'The statement as it stands in the file of the application.',
+            'target_sql': 'The statement as it was written into the output file, with the bind parameter markers of the application back in it.',
+            'source_test_result': 'The outcome of the test against the source database. Not run in this version - the statements are never sent to the source.',
+            'source_test_message': 'What the source answered, when it was asked.',
+            'target_test_result': "OK, FAILED, INCONCLUSIVE or 'not run'. INCONCLUSIVE means PostgreSQL could not infer the type of a bind parameter, which says nothing about the rest of the statement.",
+            'target_test_message': 'What the target answered - the error of a statement it refused, or which test was run.',
+            'target_test_duration_ms': 'How long the target needed for it. It is here and not in the output file, so that the file stays the same for the same input.',
+            'warnings': 'What has to be read before the statement is used, one per line. A warning marked BLOCKING says the converted statement must not be used as it stands.',
+            'identical_to': 'The ordinal of the statement this one repeats, when the same statement stands in the file more than once. Such a statement is converted and tested once.',
+            'success': 'true for a statement which was converted or was already valid and passed the test of the target; false for everything else.',
+        },
+    }
+
     catalog[config_parser.get_protocol_name_views()] = {
         'comment': (
             'The views of the source and the views created for them in the target. A view is only valid once '

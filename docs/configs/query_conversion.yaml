@@ -1,0 +1,144 @@
+# ============================================================================
+# credativ-pg-migrator - converting the SELECT statements of an application
+# ============================================================================
+# MUST ADJUST
+#   - migrator / source / target connection details
+#   - query_conversion.input - the files holding the statements
+#
+# WHAT THIS IS
+# A step which runs over a migration that is already done. It creates nothing,
+# it moves no data and it writes to neither database: it reads the files named
+# below, converts every SELECT in them for the migrated PostgreSQL schema, asks
+# the target whether the result is valid there, and writes the answer into new
+# files - one per input file, with the outcome of every statement in it.
+#
+#   credativ-pg-migrator --config query_conversion.yaml --convert-queries
+#
+# The whole configuration of the migration is kept in the file, because the
+# conversion uses it: sql_functions_mapping, remote_objects_substitution and
+# the schema names are the same ones the views of the migration were converted
+# with. Use the configuration the migration was run with, with this block
+# added - then the statements are converted exactly as the views were.
+#
+# ONLY SELECT. A statement which writes is never converted and never sent to
+# either database. It stands in the output file as a comment, with the reason.
+#
+# SOURCES: implemented for MS SQL Server and Sybase ASE. Any other source stops
+# the step at the start with "query conversion is not implemented for ..." -
+# the statements are not passed through unconverted, because that would look
+# like a conversion without being one.
+# ============================================================================
+
+workflow: "standard"
+
+pre_migration_analysis:
+  top_n_tables:
+    by_rows: 0
+    by_size: 0
+    by_columns: 0
+    by_indexes: 0
+    by_constraints: 0
+
+migrator:
+  type: "postgresql"
+  host: "localhost"           # >>> ADJUST
+  port: 5432                  # >>> ADJUST
+  username: "postgres"        # >>> ADJUST
+  password: "postgres"        # >>> ADJUST
+  database: "mssql_target"    # >>> ADJUST
+  schema: "migration"
+
+source:
+  type: "mssql"               # >>> ADJUST - "mssql" or "sybase_ase"
+  host: "localhost"           # >>> ADJUST
+  port: 1433                  # >>> ADJUST
+  username: "sa"              # >>> ADJUST
+  password: "password"        # >>> ADJUST
+  database: "app_db"          # >>> ADJUST
+  schema: "dbo"               # >>> ADJUST
+  connectivity: "odbc"
+  odbc:
+    driver: 'ODBC Driver 18 for SQL Server'   # >>> ADJUST - odbcinst -q -d
+  connection_string_options: "encrypt=yes;trustServerCertificate=yes"
+
+target:
+  type: "postgresql"
+  host: "localhost"           # >>> ADJUST
+  port: 5432                  # >>> ADJUST
+  username: "postgres"        # >>> ADJUST
+  password: "postgres"        # >>> ADJUST
+  database: "mssql_target"    # >>> ADJUST
+  schema: "migtest"           # >>> ADJUST - the schema the migration created
+
+migration:
+  names_case_handling: "lower"
+
+# ---------------------------------------------------------------------------
+# THE STEP ITSELF
+# ---------------------------------------------------------------------------
+query_conversion:
+  enabled: true
+
+  # true also runs the step at the end of a normal migration. false means it is
+  # run only by --convert-queries, which can be repeated as often as you like -
+  # after fixing a query file, or after adding a function mapping - without
+  # migrating anything again.
+  run_after_migration: false
+
+  # The files with the statements. Paths and glob patterns, resolved against
+  # the directory of THIS file. A pattern which matches nothing is reported.
+  input:                                  # >>> ADJUST
+    - "queries/*.sql"
+    - "reports/monthly.sql"
+
+  encoding: "utf-8"
+
+  # How a file is cut into statements. "auto" takes both the semicolon and GO
+  # on a line of its own - which is what a file exported from a client of
+  # Sybase ASE or MS SQL Server holds. A separator inside a string literal, a
+  # comment or a $$ quoted body is not a separator.
+  #   auto | semicolon | go | blank_line | whole_file
+  statement_separator: "auto"
+
+  # The bind parameter markers your statements carry:
+  #   ?  qmark      :name  named     @name  at
+  #   %s pyformat   $1     numeric   none
+  # "auto" recognises them and reports a file which mixes two kinds.
+  parameter_style: "auto"
+
+  # "original" writes the markers back as your application holds them today,
+  # so the converted statement is a drop-in replacement. "numeric" writes
+  # $1..$n instead, for an application being ported to a PostgreSQL driver at
+  # the same time.
+  parameter_output: "original"
+
+  # How much of the converted statement is proven against the target:
+  #   off     - nothing is sent to the target
+  #   parse   - PREPARE: syntax, every table, column and function, the types
+  #   explain - the above, plus that a plan can be produced
+  # Both run inside a transaction which is read only and is rolled back. No
+  # data is read, nothing is written. A statement with bind parameters is
+  # always tested with PREPARE - EXPLAIN of one is refused by PostgreSQL too.
+  target_test: "explain"
+
+  timeout: "30s"
+  workers: 4
+
+  # "continue" converts the whole file whatever a single statement does - the
+  # file is the deliverable and has to be complete. "stop" ends the run at the
+  # first failure, for a pipeline which gates on it. The exit code is non-zero
+  # in both cases when anything could not be converted or failed its test.
+  on_error: "continue"
+
+  output:
+    directory: "converted"      # >>> ADJUST - empty writes next to the input file
+    prefix: ""
+    suffix: "_pg"               # queries.sql -> converted/queries_pg.sql
+    overwrite: false            # an existing file is not replaced silently
+    include_original: true      # the statement of the source in the comment block
+    sidecar: "json"             # json | csv | off - one record per statement
+
+summary:
+  top_migrated_tables: 10
+  top_mismatched_tables: 10
+  top_longest_batches: 15

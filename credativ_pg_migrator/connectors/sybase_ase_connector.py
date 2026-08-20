@@ -18,7 +18,7 @@ import jaydebeapi
 from jaydebeapi import Error
 import pyodbc
 from pyodbc import Error
-from credativ_pg_migrator.database_connector import DatabaseConnector
+from credativ_pg_migrator.database_connector import DatabaseConnector, first_line
 from credativ_pg_migrator.migrator_logging import MigratorLogger
 from credativ_pg_migrator.jvm_helper import detach_thread_from_jvm
 import re
@@ -4711,7 +4711,20 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
         view_code_str = ''.join([code[0] for code in view_code])
         return view_code_str
 
-    def convert_view_code(self, settings: dict):
+    def convert_statement_code(self, settings: dict):
+        """
+        One statement of the source converted for PostgreSQL, without a wrapper around it.
+
+        This is the conversion the query of a view is given - the outer joins written '*=',
+        the string concatenation with '+', the double quoted string literals, the user
+        defined types, the functions of the source and the schema of the target. It is used
+        for the query of a view and for a statement of an application; 'view_code' carries
+        the statement.
+
+        Raises ValueError when the statement cannot be parsed. The error carries the text as
+        far as the conversion got in its 'partial_code' attribute, for a caller which prefers
+        that to nothing.
+        """
 
         def quote_column_names(node):
             if isinstance(node, sqlglot.exp.Column):
@@ -4927,7 +4940,7 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
         ## shared with the other T-SQL sources - see convert_string_concatenation()
         ## and is_string_expression() of the base connector
 
-        self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: convert_string_concatenation: settings in convert_view_code: {settings}")
+        self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: convert_statement_code: settings in convert_view_code: {settings}")
         converted_code = settings['view_code']
 
         # Apply remote_objects_substitution
@@ -4938,7 +4951,7 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
                 if source_obj and target_obj:
                     # Case-insensitive replacement
                     converted_code = re.sub(re.escape(source_obj), target_obj, converted_code, flags=re.IGNORECASE)
-                    self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: convert_string_concatenation: Applied remote object substitution: {source_obj} -> {target_obj}")
+                    self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: convert_statement_code: Applied remote object substitution: {source_obj} -> {target_obj}")
 
         # Pre-process Sybase specific join syntax
         # *= -> = /* left_outer */
@@ -4968,9 +4981,14 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
             try:
                 parsed_code = sqlglot.parse_one(converted_code, read='tsql')
             except Exception as e:
-                self.config_parser.print_log_message('ERROR', f"sybase_ase_connector: convert_string_concatenation: Error parsing View code: {e}")
-                # Fallback to the unparsed converted_code instead of empty string to avoid crashes
-                return converted_code
+                ## The statement could not be read, so there is no conversion of it. What the
+                ## caller does with that is the caller's decision - a view keeps its source
+                ## text and is reported as failed, a query of an application is reported as
+                ## NOT CONVERTED - but nothing here answers with a text which was not
+                ## converted as if it had been.
+                error = ValueError(f"the statement could not be parsed as T-SQL: {first_line(e)}")
+                error.partial_code = converted_code
+                raise error
 
             # double quote column names
             parsed_code = parsed_code.transform(quote_column_names)
@@ -4984,19 +5002,19 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
             # Map Sybase native cast datatypes to Postgres native equivalents
             parsed_code = parsed_code.transform(replace_cast_types)
 
-            self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: convert_string_concatenation: Double quoted columns: {parsed_code.sql(dialect='postgres')}")
+            self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: convert_statement_code: Double quoted columns: {parsed_code.sql(dialect='postgres')}")
 
             # replace source schema with target schema
             parsed_code = parsed_code.transform(replace_schema_names)
-            self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: convert_string_concatenation: Replaced schema names: {parsed_code.sql(dialect='postgres')}")
+            self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: convert_statement_code: Replaced schema names: {parsed_code.sql(dialect='postgres')}")
 
             # double quote schema and table names
             parsed_code = parsed_code.transform(quote_schema_and_table_names)
-            self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: convert_string_concatenation: Double quoted schema and table names: {parsed_code.sql(dialect='postgres')}")
+            self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: convert_statement_code: Double quoted schema and table names: {parsed_code.sql(dialect='postgres')}")
 
             # replace functions
             parsed_code = parsed_code.transform(replace_functions)
-            self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: convert_string_concatenation: Replaced functions: {parsed_code.sql(dialect='postgres')}")
+            self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: convert_statement_code: Replaced functions: {parsed_code.sql(dialect='postgres')}")
 
             ## The statement is generated for PostgreSQL. With the default dialect of sqlglot,
             ## which was used here, the niladic keyword functions are written as calls -
@@ -5013,10 +5031,62 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
             # converted_code = converted_code.replace(f"{settings['source_database']}..", f"{settings['target_schema_name']}.")
             # converted_code = converted_code.replace(f"{settings['source_database']}.{settings['source_schema_name']}.", f"{settings['target_schema_name']}.")
             # converted_code = converted_code.replace(f"{settings['source_schema_name']}.", f"{settings['target_schema_name']}.")
-            self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: convert_string_concatenation: Converted view: {converted_code}")
+            self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: convert_statement_code: Converted view: {converted_code}")
         else:
-            self.config_parser.print_log_message('ERROR', f"sybase_ase_connector: convert_string_concatenation: Unsupported target database type: {settings['target_db_type']}")
+            self.config_parser.print_log_message('ERROR', f"sybase_ase_connector: convert_statement_code: Unsupported target database type: {settings['target_db_type']}")
         return converted_code
+
+
+    def convert_view_code(self, settings: dict):
+        """
+        The query of a view, converted for the target.
+
+        A statement which cannot be parsed keeps the text of the source, exactly as before:
+        the view is reported as failed by the migration and its source code stays readable in
+        the protocol.
+        """
+        try:
+            return self.convert_statement_code(settings)
+        except ValueError as e:
+            self.config_parser.print_log_message('ERROR', f"sybase_ase_connector: convert_view_code: {e}")
+            return getattr(e, 'partial_code', settings['view_code'])
+
+    def query_conversion_supported(self):
+        return True
+
+    def convert_query_code(self, settings: dict):
+        """
+        One statement of an application, converted for PostgreSQL - the same conversion the
+        query of a view is given. See the contract in DatabaseConnector.convert_query_code().
+        """
+        statement_id = settings.get('statement_id', '')
+        try:
+            converted = self.convert_statement_code({
+                'view_code': settings['query_code'],
+                'source_schema_name': settings['source_schema_name'],
+                'target_schema_name': settings['target_schema_name'],
+                'target_db_type': settings.get('target_db_type', 'postgresql'),
+            })
+        except ValueError as e:
+            return {'code': '', 'converted': False, 'warnings': [], 'error': first_line(e)}
+        except Exception as e:
+            return {'code': '', 'converted': False, 'warnings': [],
+                    'error': f"the conversion ended with an error: {first_line(e)}"}
+
+        if not (converted or '').strip():
+            return {'code': '', 'converted': False, 'warnings': [],
+                    'error': 'the conversion produced no statement at all'}
+
+        warnings = []
+        ## the outer joins of the source are rewritten by the conversion; a marker left in the
+        ## text says it did not finish, and such a statement is not offered as converted
+        if '/* left_outer */' in converted or '/* right_outer */' in converted:
+            return {'code': '', 'converted': False, 'warnings': [],
+                    'error': "the outer join written '*=' or '=*' could not be rewritten as a "
+                             "LEFT JOIN / RIGHT JOIN - the statement needs to be rewritten by hand"}
+
+        self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: convert_query_code: {statement_id}: {converted}")
+        return {'code': converted, 'converted': True, 'warnings': warnings, 'error': None}
 
     def get_sequence_current_value(self, sequence_name):
         pass

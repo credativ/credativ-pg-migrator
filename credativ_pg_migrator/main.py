@@ -82,6 +82,34 @@ def main():
             logger.logger.info(f"""{MigratorConstants.get_full_name()}, version: {MigratorConstants.get_version()}""")
             logger.logger.info("Validation Done")
 
+        elif args.convert_queries:
+            ## A step over a finished migration, not a migration: the planner is not started
+            ## here on purpose. It would drop and recreate the schema of the migrator metadata
+            ## and, with migration.drop_schema, the target schema this step reads.
+            logger.logger.info('Starting query conversion...')
+            if not config_parser.is_query_conversion_enabled():
+                logger.logger.error("FATAL: --convert-queries needs 'query_conversion.enabled: true' in the "
+                                    "configuration file. Nothing was converted.")
+                terminate_process(1)
+
+            from credativ_pg_migrator.migrator_tables import MigratorTables
+            from credativ_pg_migrator.query_conversion import QueryConverter
+            migrator_tables = None
+            try:
+                migrator_tables = MigratorTables(logger, config_parser)
+            except Exception as e:
+                logger.logger.warning(f"The migrator database could not be reached ({e}) - the converted "
+                                      f"statements are written to their files, but not recorded in a protocol table.")
+            converter = QueryConverter(config_parser, migrator_tables)
+            failures = converter.run()
+
+            logger.logger.info(f"""{MigratorConstants.get_full_name()}, version: {MigratorConstants.get_version()}""")
+            logger.logger.info("Query Conversion Done")
+            if failures:
+                ## a pipeline has to be able to gate on this
+                logger.stop_logging()
+                terminate_process(1)
+
         else:
             if config_parser.is_mapping_workflow():
                 report_filename = config_parser.get_mapping_report_filename()

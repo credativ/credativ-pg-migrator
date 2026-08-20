@@ -61,6 +61,7 @@ DDL text dumps plus unloaded data files. There is no `host`, `port`,
 |---|---|---|
 | [anonymization_workflow.yaml](anonymization_workflow.yaml) | `anonymization` | copy a schema and mask selected columns, to build a test database from production data |
 | [mapping_workflow.yaml](mapping_workflow.yaml) | `mapping` | the target schema **already exists**; only the data is loaded into it, matching tables and columns by name |
+| [query_conversion.yaml](query_conversion.yaml) | `--convert-queries` | not a migration: converts the SELECT statements an application holds as text, over a migration which is already done, and tests each of them against the target |
 
 ### Not a source — an option catalogue
 

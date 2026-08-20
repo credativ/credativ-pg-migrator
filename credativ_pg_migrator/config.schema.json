@@ -1341,6 +1341,145 @@
         }
       }
     },
+    "query_conversion": {
+      "type": "object",
+      "description": "Conversion of the SELECT statements an application holds as text. A separate step over a finished migration - it creates nothing and moves no data: it reads files of statements, converts every SELECT for the migrated PostgreSQL schema, tests the result against the target and writes the answer into new files. Started by --convert-queries, or as the closing step of a migration when run_after_migration is true.",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether the step may run at all. --convert-queries stops when it is false, so a configuration cannot convert queries by accident."
+        },
+        "run_after_migration": {
+          "type": "boolean",
+          "default": false,
+          "description": "Also run the step as the closing step of a migration, after the objects were validated. False means it is run only by --convert-queries, which can be repeated without migrating again."
+        },
+        "input": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "The files holding the statements, as paths or glob patterns resolved against the directory of this configuration file. A pattern which names no file is reported as a warning. A bare directory name is not read recursively - write the pattern out, so the log says which files were taken."
+        },
+        "encoding": {
+          "type": "string",
+          "default": "utf-8",
+          "description": "Encoding of the input files. A file which cannot be read in this encoding stops the run instead of being read as damaged text."
+        },
+        "statement_separator": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "semicolon",
+            "go",
+            "blank_line",
+            "whole_file"
+          ],
+          "default": "auto",
+          "description": "How a file is cut into statements. 'auto' takes both the semicolon and GO on a line of its own, which is what a file exported from a client of Sybase ASE or MS SQL Server holds. 'whole_file' is one statement per file. A separator inside a string literal, a comment or a $$ quoted body is never a separator."
+        },
+        "parameter_style": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "qmark",
+            "named",
+            "at",
+            "pyformat",
+            "numeric",
+            "none"
+          ],
+          "default": "auto",
+          "description": "The bind parameter markers the statements use: '?' (qmark), ':name' (named), '@name' (at), '%s' (pyformat), '$1' (numeric) or none. 'auto' recognises them from the file and reports a file which mixes two kinds."
+        },
+        "parameter_output": {
+          "type": "string",
+          "enum": [
+            "original",
+            "numeric"
+          ],
+          "default": "original",
+          "description": "How the markers are written back into the converted statement. 'original' gives back what the application holds today, 'numeric' writes $1..$n for an application which is being ported to a PostgreSQL driver at the same time."
+        },
+        "target_test": {
+          "type": "string",
+          "enum": [
+            "off",
+            "parse",
+            "explain"
+          ],
+          "default": "explain",
+          "description": "How much of the converted statement is proven against the target. 'parse' sends PREPARE - syntax, every table, column and function, and the types. 'explain' adds that a plan can be produced. Both run inside a read only transaction which is rolled back; neither reads any data. A statement with bind parameters is always tested with PREPARE, because EXPLAIN of one is refused by PostgreSQL as well."
+        },
+        "timeout": {
+          "type": "string",
+          "default": "30s",
+          "description": "statement_timeout of the test transaction, as PostgreSQL writes it ('30s', '2min')."
+        },
+        "workers": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 4,
+          "description": "Statements converted and tested concurrently, each with a connection of its own."
+        },
+        "on_error": {
+          "type": "string",
+          "enum": [
+            "continue",
+            "stop"
+          ],
+          "default": "continue",
+          "description": "'continue' converts the whole file whatever a single statement does - the file is the deliverable and has to be complete. 'stop' ends the run at the first statement which could not be converted or failed its test, for a pipeline which gates on it."
+        },
+        "output": {
+          "type": "object",
+          "description": "Where the converted statements are written, and what the files hold.",
+          "additionalProperties": false,
+          "properties": {
+            "directory": {
+              "type": "string",
+              "default": "",
+              "description": "Directory for the output files, resolved against the directory of this configuration file when it is relative - the same way the input patterns are. Empty writes them next to the file they came from. It is created when it does not exist."
+            },
+            "prefix": {
+              "type": "string",
+              "default": "",
+              "description": "Written in front of the name of the input file."
+            },
+            "suffix": {
+              "type": "string",
+              "default": "_pg",
+              "description": "Written behind the name of the input file, in front of its extension: queries.sql becomes queries_pg.sql."
+            },
+            "overwrite": {
+              "type": "boolean",
+              "default": false,
+              "description": "Whether an output file which exists already may be replaced. False refuses rather than overwriting. An output path which names an input file is always refused - the files of the user are never written to."
+            },
+            "include_original": {
+              "type": "boolean",
+              "default": true,
+              "description": "Whether the statement of the source is written into the comment block above the converted one."
+            },
+            "sidecar": {
+              "type": "string",
+              "enum": [
+                "json",
+                "csv",
+                "off"
+              ],
+              "default": "json",
+              "description": "A machine readable file next to the output file, holding one record per statement - what a CI job or a script which patches application sources reads."
+            }
+          }
+        }
+      }
+    },
     "mapping": {
       "type": "object",
       "description": "Settings of the 'mapping' workflow, which matches existing target objects onto existing source objects and copies only data.",

@@ -58,6 +58,14 @@ class CommandLine:
             help="Run post-migration data validation module utilizing the current config file")
 
         self.parser.add_argument(
+            '--convert-queries',
+            action='store_true',
+            help="Convert the SELECT statements of an application, using the current config file. "
+                 "A step over a finished migration - it creates nothing and moves no data: it "
+                 "reads the files named by query_conversion.input, converts every SELECT for the "
+                 "migrated schema, tests it against the target and writes the answer into new files")
+
+        self.parser.add_argument(
             '--config',
             type=str,
             help='Path/name of the configuration file')
@@ -91,6 +99,7 @@ class CommandLine:
             logger.info("resume (after crash)   = {}".format(self.args.resume))
             logger.info("drop_unfinished_tables = {}".format(self.args.drop_unfinished_tables))
             logger.info("validate               = {}".format(self.args.validate))
+            logger.info("convert_queries        = {}".format(self.args.convert_queries))
             logger.info("ignore_config_schema_errors = {}".format(self.args.ignore_config_schema_errors))
             # logger.info("migrator_dir = {}".format(self.args.migrator_dir))
 

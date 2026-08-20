@@ -1104,6 +1104,77 @@ class ConfigParser:
     def get_validation_constraints_name(self):
         return "validation_constraints"
 
+    def get_config_directory(self):
+        """
+        The directory the configuration file stands in. Every relative path of the
+        configuration is resolved against it and not against the working directory, so a run
+        started from anywhere reads the same files.
+        """
+        return os.path.dirname(os.path.abspath(self.args.config))
+
+    ## Conversion of the SELECT statements an application holds as text - the step which
+    ## runs after a migration and answers which of them still work on the target.
+    def get_query_conversion_config(self):
+        return (self.config.get('query_conversion') or {})
+
+    def is_query_conversion_enabled(self):
+        return bool(self.get_query_conversion_config().get('enabled', False))
+
+    def should_run_query_conversion_after_migration(self):
+        return bool(self.get_query_conversion_config().get('run_after_migration', False))
+
+    def get_query_conversion_input(self):
+        patterns = self.get_query_conversion_config().get('input') or []
+        return [patterns] if isinstance(patterns, str) else list(patterns)
+
+    def get_query_conversion_encoding(self):
+        return self.get_query_conversion_config().get('encoding', 'utf-8')
+
+    def get_query_conversion_statement_separator(self):
+        return self.get_query_conversion_config().get('statement_separator', 'auto')
+
+    def get_query_conversion_parameter_style(self):
+        return self.get_query_conversion_config().get('parameter_style', 'auto')
+
+    def get_query_conversion_parameter_output(self):
+        return self.get_query_conversion_config().get('parameter_output', 'original')
+
+    def get_query_conversion_target_test(self):
+        return self.get_query_conversion_config().get('target_test', 'explain')
+
+    def get_query_conversion_timeout(self):
+        return self.get_query_conversion_config().get('timeout', '30s')
+
+    def get_query_conversion_workers(self):
+        return int(self.get_query_conversion_config().get('workers', 4))
+
+    def get_query_conversion_on_error(self):
+        return self.get_query_conversion_config().get('on_error', 'continue')
+
+    def get_query_conversion_output(self):
+        return self.get_query_conversion_config().get('output') or {}
+
+    def get_query_conversion_output_directory(self):
+        return self.get_query_conversion_output().get('directory', '')
+
+    def get_query_conversion_output_prefix(self):
+        return self.get_query_conversion_output().get('prefix', '')
+
+    def get_query_conversion_output_suffix(self):
+        return self.get_query_conversion_output().get('suffix', '_pg')
+
+    def get_query_conversion_output_overwrite(self):
+        return bool(self.get_query_conversion_output().get('overwrite', False))
+
+    def get_query_conversion_output_include_original(self):
+        return bool(self.get_query_conversion_output().get('include_original', True))
+
+    def get_query_conversion_output_sidecar(self):
+        return self.get_query_conversion_output().get('sidecar', 'json')
+
+    def get_protocol_name_queries(self):
+        return f"{self.get_protocol_name()}_queries"
+
     def get_validation_config(self):
         return (self.config.get('validation') or {})
 

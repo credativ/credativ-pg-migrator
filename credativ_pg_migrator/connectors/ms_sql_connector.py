@@ -18,7 +18,7 @@ import jaydebeapi
 from jaydebeapi import Error
 import pyodbc
 from pyodbc import Error
-from credativ_pg_migrator.database_connector import DatabaseConnector
+from credativ_pg_migrator.database_connector import DatabaseConnector, first_line
 from credativ_pg_migrator.migrator_logging import MigratorLogger
 from credativ_pg_migrator.connectors.tsql_parser import TsqlParser
 from credativ_pg_migrator.jvm_helper import detach_thread_from_jvm
@@ -1346,6 +1346,43 @@ class MsSQLConnector(DatabaseConnector):
                 transformed_sqls.append(f"-- ERROR transforming: {e}")
 
         return "\n".join(transformed_sqls)
+
+    def query_conversion_supported(self):
+        return True
+
+    def convert_query_code(self, settings: dict):
+        """
+        One statement of an application, converted for PostgreSQL - the same conversion the
+        query of a view is given, without the CREATE VIEW around it. See the contract in
+        DatabaseConnector.convert_query_code().
+        """
+        statement_id = settings.get('statement_id', '')
+        try:
+            converted = self.convert_statement_code({
+                'view_code': settings['query_code'],
+                'source_schema_name': settings['source_schema_name'],
+                'target_schema_name': settings['target_schema_name'],
+                'target_db_type': settings.get('target_db_type', 'postgresql'),
+            })
+        except ValueError as e:
+            return {'code': '', 'converted': False, 'warnings': [],
+                    'error': f"the statement could not be parsed as T-SQL: {first_line(e)}"}
+        except Exception as e:
+            return {'code': '', 'converted': False, 'warnings': [],
+                    'error': f"the conversion ended with an error: {first_line(e)}"}
+
+        ## convert_statement_code() writes the transformation it could not do into the text it
+        ## returns. Such a result is not a conversion and is not offered as one.
+        failed = [line for line in (converted or '').splitlines() if line.strip().startswith('-- ERROR')]
+        if failed:
+            return {'code': '', 'converted': False, 'warnings': [],
+                    'error': f"the statement could not be transformed: {failed[0].strip()}"}
+        if not (converted or '').strip():
+            return {'code': '', 'converted': False, 'warnings': [],
+                    'error': 'the conversion produced no statement at all'}
+
+        self.config_parser.print_log_message('DEBUG', f"ms_sql_connector: convert_query_code: {statement_id}: {converted}")
+        return {'code': converted, 'converted': True, 'warnings': [], 'error': None}
 
     def convert_view_code(self, settings: dict):
         """

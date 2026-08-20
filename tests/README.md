@@ -1,6 +1,6 @@
 # credativ-pg-migrator — test suite
 
-289 test functions in 26 files. **No test in this directory needs a database, a driver
+381 test functions in 30 files. **No test in this directory needs a database, a driver
 connection, or a network.** Everything that would talk to a server is either constructed
 with `Class.__new__(Class)` and fed a fake config, or replaced with `unittest.mock`. A
 full run touches nothing outside the repository and finishes in seconds.
@@ -35,6 +35,7 @@ tests, and no test depends on the order of the others.
 | group | needs | files |
 |---|---|---|
 | configuration & logging | `pyyaml`, `jsonschema`, `pytest` | the 5 `test_config_*` / `test_logging_*` / `test_object_*` files, and `test_schema_names.py` |
+| query conversion | `sqlglot`, `pytest` | the 4 `test_query_*` files |
 | anonymization, Db2 CSV | nothing beyond the standard library | 3 files |
 | everything else | the package's own dependencies — `psycopg2`, `tabulate`, `jaydebeapi` | 17 files |
 
@@ -58,7 +59,7 @@ python3 -m pytest tests/ -q \
   --ignore=tests/test_sequence_protocol_columns.py
 ```
 
-**Expected result: `369 passed, 6 skipped`** (9 files; the count is higher than the number
+**Expected result: `545 passed, 6 skipped`** (13 files; the count is higher than the number
 of test functions because many are `parametrize`d. The 6 skipped are the ones in
 `test_schema_names.py` which build `MigratorTables`, and that module imports `psycopg2`).
 
@@ -443,6 +444,65 @@ so it has to describe a default which IS that function.
 writes around its own defaults (`(getdate())`) allowed. A default which only contains the
 function is not: `'[' + suser_name() + '@' + host_name() + ']'` used to collapse to the
 bare `current_user`. Neither is a longer name which starts with the mapped one.
+
+---
+
+## 5. Query conversion
+
+The step which converts the SELECT statements an application holds as text
+(`--convert-queries`). None of these needs a database: what they exercise is the reading of
+a file, the decision whether a statement may be converted at all, the bind parameters and
+the file which is handed over.
+
+### `test_query_splitter.py` — 25 tests
+
+**Purpose.** Cutting a file of application SQL into the statements it holds.
+
+**Covers.** Every way a separator turns out not to be one: a semicolon inside a string
+literal, a doubled quote, a line comment, a block comment, a `$$` quoted body and a quoted
+identifier in each of the three spellings the sources use. `GO` alone on its line cuts, with
+or without a repeat count, while `go` as a column name does not. The other four separator
+modes, CRLF and a byte order mark, the line numbers a statement is reported at, the
+`-- name:` annotation, and the hash which recognises the same statement written twice.
+
+### `test_query_classifier.py` — 23 functions, 65 tests
+
+**Purpose.** The four gates which decide whether a statement is a read. This is the safety
+property of the whole step, so it is asserted construct by construct.
+
+**Covers.** Nineteen statements which write, each refused - and a write the parser cannot
+read at all, which is the one case gate 2 decides on its own: "the migrator does not
+understand it" and "it writes" are very different answers. The constructs which begin with
+`SELECT` and still write or lock: `SELECT ... INTO` a table and into a host variable, a
+data-modifying CTE, `FOR UPDATE`, `HOLDLOCK`, `UPDLOCK`, `nextval()`, `setval()` and two
+statements in one entry. `NOLOCK`, which is not a write and is reported instead of refused.
+A statement the parser cannot read is neither converted nor called a write. Gate 4 asks the
+same questions of the converted statement, in the dialect of the target.
+
+### `test_query_parameters.py` — 18 functions, 33 tests
+
+**Purpose.** The bind parameters of an application, through the conversion and back.
+
+**Covers.** The five marker styles and the round trip of each. What is not a parameter: a
+marker inside a string literal or a comment, a `::` cast, a `@@` global variable of the
+source. The name the converters see instead of `$1`, because a parser reads `$1` as a column
+and writes it back quoted. And the order: a conversion which moved the parameters -
+`TOP (?)` becomes `LIMIT $1` at the other end - or lost one is reported as BLOCKING.
+
+### `test_query_conversion_workflow.py` — 27 functions, 31 tests
+
+**Purpose.** The two ends of the step: what is sent to the target, and what is written into
+the file.
+
+**Covers.** The probe is a transaction which is read only, bounded by a timeout, and rolled
+back - the last of the four layers which keep this step from writing, asserted statement by
+statement. Each test level sends what it promises, a prepared statement is deallocated
+again, and a statement with bind parameters is always prepared because EXPLAIN of one is
+refused. Then the output file: a statement which may not be used is commented out so the
+file stays runnable, every block says what both tests answered, a warning cannot be missed,
+the counts are in the head of the file, and the same input produces the same file. An output
+path which would write over an input file is refused, and so is replacing an existing output
+file without being told to.
 
 ---
 

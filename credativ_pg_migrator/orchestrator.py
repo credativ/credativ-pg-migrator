@@ -115,6 +115,8 @@ class Orchestrator:
                     # Final validity pass: re-attempt failed objects (if configured) and mark
                     # which views / functions / triggers are valid at the end of the migration.
                     self.stdwf_validate_objects()
+
+                    self.stdwf_convert_queries()
                 else:
                     self.config_parser.print_log_message('INFO', "orchestrator: run: Dry run mode enabled. No data migration performed.")
 
@@ -2263,6 +2265,29 @@ class Orchestrator:
 
         except Exception as e:
             self.handle_error(e, 'migrate_triggers')
+
+    def stdwf_convert_queries(self):
+        """
+        The closing step of a migration which was asked to convert the statements of an
+        application as well - query_conversion.run_after_migration.
+
+        It runs here, at the very end, because it reads the migrated objects: every converted
+        statement is tested against them. It never stops the migration - the data is migrated
+        by then, and a query file which cannot be read is not a reason to end the run with an
+        error - what it could not do is reported.
+        """
+        if not self.config_parser.is_query_conversion_enabled():
+            return
+        if not self.config_parser.should_run_query_conversion_after_migration():
+            self.config_parser.print_log_message('INFO', "orchestrator: stdwf_convert_queries: query_conversion.run_after_migration is false - the statements are converted by --convert-queries instead.")
+            return
+
+        try:
+            from credativ_pg_migrator.query_conversion import QueryConverter
+            self.config_parser.print_log_message('INFO', "orchestrator: stdwf_convert_queries: Converting the statements of the application.")
+            QueryConverter(self.config_parser, self.migrator_tables).run()
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"orchestrator: stdwf_convert_queries: The query conversion could not be carried out: {e}")
 
     def stdwf_validate_objects(self):
         """Final validity pass over migrated views, functions/procedures and triggers, run at

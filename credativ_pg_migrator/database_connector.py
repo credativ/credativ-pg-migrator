@@ -14,7 +14,20 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import re
 from abc import ABC, abstractmethod
+
+def first_line(error):
+    """
+    The first line of an error, for a message which has to stay readable.
+
+    The parse errors of sqlglot carry the offending statement and terminal escape sequences
+    behind their first line, and those belong in the log at DEBUG level, not in the comment
+    block of a file a developer reads.
+    """
+    text = re.sub(r'\x1b\[[0-9;]*m', '', str(error)).strip()
+    return text.splitlines()[0].strip() if text else repr(error)
+
 
 class DatabaseConnector(ABC):
     """
@@ -1274,6 +1287,44 @@ class DatabaseConnector(ABC):
         Returns a string with the code.
         """
         pass
+
+    def query_conversion_supported(self):
+        """
+        Whether this connector can convert a bare statement of its source for the target -
+        the entry point convert_query_code() below.
+
+        The query conversion asks this before it reads a single file and stops when the
+        answer is no. It does not fall back to passing the statements through: a statement
+        of another dialect handed over unchanged would look like a conversion without being
+        one, which is the failure mode this migrator treats as a bug.
+        """
+        return False
+
+    def convert_query_code(self, settings: dict):
+        """
+        One bare statement of the source, converted for the target.
+
+        settings:
+            query_code          - the statement, with its bind parameters already replaced
+                                  by $1..$n, so that what arrives here is valid SQL
+            source_schema_name  - schema the statement names its objects in
+            target_schema_name  - schema those objects live in after the migration
+            target_db_type      - type of the target database
+            statement_id        - where the statement stands, for the messages
+
+        Returns a dictionary, not a string:
+            {'code': str, 'converted': bool, 'warnings': [str], 'error': str | None}
+
+        A converter which could not do the work says so in 'error' with 'converted': False,
+        and the statement is reported as NOT CONVERTED. It never answers with the text it was
+        given as if that were the conversion.
+        """
+        return {
+            'code': '',
+            'converted': False,
+            'warnings': [],
+            'error': f"query conversion is not implemented for {type(self).__name__}",
+        }
 
     @abstractmethod
     def convert_view_code(self, settings: dict):

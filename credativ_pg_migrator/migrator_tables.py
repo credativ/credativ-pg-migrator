@@ -3094,6 +3094,79 @@ class MigratorTables:
         """)
         self.config_parser.print_log_message('DEBUG', f"migrator_tables: create_table_for_views: Created protocol table {table_name} for views.")
 
+    def create_table_for_queries(self):
+        """
+        The protocol table of the query conversion.
+
+        The step runs on its own, after a migration and possibly long after it, so the schema
+        of the migrator metadata may not be there any more. It is created when it is missing -
+        created, never dropped: create_protocol(), which does drop it, belongs to the planner
+        of a migration and is not called from here.
+        """
+        table_name = self.config_parser.get_protocol_name_queries()
+        self.protocol_connection.execute_query(f"""CREATE SCHEMA IF NOT EXISTS "{self.protocol_schema}" """)
+        self.protocol_connection.execute_query(self.drop_table_sql.format(protocol_schema=self.protocol_schema, table_name=table_name))
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
+            (id SERIAL PRIMARY KEY,
+            input_file TEXT,
+            statement_ordinal INTEGER,
+            line_from INTEGER,
+            line_to INTEGER,
+            statement_name TEXT,
+            statement_hash TEXT,
+            status TEXT,
+            reason TEXT,
+            source_sql TEXT,
+            target_sql TEXT,
+            source_test_result TEXT,
+            source_test_message TEXT,
+            target_test_result TEXT,
+            target_test_message TEXT,
+            target_test_duration_ms NUMERIC,
+            warnings TEXT,
+            identical_to INTEGER,
+            task_created TIMESTAMP DEFAULT clock_timestamp(),
+            success BOOLEAN,
+            message TEXT
+            )
+        """)
+        self.config_parser.print_log_message('DEBUG', f"migrator_tables: create_table_for_queries: Created protocol table {table_name} for converted queries.")
+        self.apply_comments([table_name])
+
+    def insert_query(self, settings):
+        """One converted - or refused - statement of the query conversion."""
+        func_run_id = uuid.uuid4()
+        table_name = self.config_parser.get_protocol_name_queries()
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."{table_name}"
+            (input_file, statement_ordinal, line_from, line_to, statement_name, statement_hash,
+             status, reason, source_sql, target_sql,
+             source_test_result, source_test_message,
+             target_test_result, target_test_message, target_test_duration_ms,
+             warnings, identical_to, success, message)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        source_test = settings.get('source_test') or {}
+        target_test = settings.get('target_test') or {}
+        warnings = settings.get('warnings') or []
+        params = (
+            settings.get('input_file'), settings.get('ordinal'),
+            settings.get('line_from'), settings.get('line_to'),
+            settings.get('name'), settings.get('sha256'),
+            settings.get('status'), settings.get('reason'),
+            settings.get('source_sql'), settings.get('target_sql'),
+            source_test.get('result'), source_test.get('message'),
+            target_test.get('result'), target_test.get('message'), target_test.get('duration_ms'),
+            '\n'.join(warnings) if warnings else None,
+            settings.get('identical_to'),
+            settings.get('status') in ('CONVERTED', 'UNCHANGED'),
+            settings.get('reason') or None)
+        try:
+            self.protocol_connection.execute_query(query, params)
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_query: ({func_run_id}): {settings.get('input_file')}: {e}")
+
     def decode_protocol_row(self, row):
         return {
             'id': row[0],

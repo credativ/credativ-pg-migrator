@@ -101,6 +101,23 @@ DEFAULT_READERS = {
     'validation.check_lob_sizes': 'is_validation_lob_sizes_enabled',
     'validation.random_sample_size': 'get_validation_sample_size',
 
+    'query_conversion.enabled': 'is_query_conversion_enabled',
+    'query_conversion.run_after_migration': 'should_run_query_conversion_after_migration',
+    'query_conversion.encoding': 'get_query_conversion_encoding',
+    'query_conversion.statement_separator': 'get_query_conversion_statement_separator',
+    'query_conversion.parameter_style': 'get_query_conversion_parameter_style',
+    'query_conversion.parameter_output': 'get_query_conversion_parameter_output',
+    'query_conversion.target_test': 'get_query_conversion_target_test',
+    'query_conversion.timeout': 'get_query_conversion_timeout',
+    'query_conversion.workers': 'get_query_conversion_workers',
+    'query_conversion.on_error': 'get_query_conversion_on_error',
+    'query_conversion.output.directory': 'get_query_conversion_output_directory',
+    'query_conversion.output.prefix': 'get_query_conversion_output_prefix',
+    'query_conversion.output.suffix': 'get_query_conversion_output_suffix',
+    'query_conversion.output.overwrite': 'get_query_conversion_output_overwrite',
+    'query_conversion.output.include_original': 'get_query_conversion_output_include_original',
+    'query_conversion.output.sidecar': 'get_query_conversion_output_sidecar',
+
     'mapping.forced_table_mappings': 'get_forced_table_mappings',
     'mapping.forced_column_mappings': 'get_forced_column_mappings',
 

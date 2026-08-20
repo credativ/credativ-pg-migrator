@@ -1947,7 +1947,12 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
     def migrate_sequences(self, target_connector, settings):
         target_schema_name = settings.get('target_schema_name', '')
         target_sequence_name = settings.get('target_sequence_name', '')
-        source_start_value = settings.get('source_start_value')
+        ## where the sequence of the target begins: the position of the sequence in the source
+        ## when that is known - it is not, for a delivery of DDL files - otherwise the value the
+        ## source declares it to start at
+        source_start_value = settings.get('source_last_value')
+        if source_start_value is None:
+            source_start_value = settings.get('source_start_value')
         source_increment_by = settings.get('source_increment_by')
         source_minvalue = settings.get('source_minvalue')
         source_maxvalue = settings.get('source_maxvalue')

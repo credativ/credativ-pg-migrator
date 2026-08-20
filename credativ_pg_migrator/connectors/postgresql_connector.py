@@ -2988,7 +2988,11 @@ class PostgreSQLConnector(DatabaseConnector):
                 start_value = details['start_value'] if details and details.get('start_value') is not None else 1
                 is_cycled = 'YES' if cycle else 'NO'
 
-                last_number = start_value
+                ## where the sequence stands now - it is not in pg_sequence, it is in the
+                ## sequence itself. It is reported next to the declared start value and not in
+                ## its place: the two are different facts and the target needs both, the start
+                ## for its own START WITH and the position for the setval which follows it.
+                last_value = None
                 try:
                     last_val_query = f'SELECT last_value FROM "{schema_name}"."{sequence_name}"'
                     cursor = self.connection.cursor()
@@ -2996,9 +3000,9 @@ class PostgreSQLConnector(DatabaseConnector):
                     curr_val_row = cursor.fetchone()
                     cursor.close()
                     if curr_val_row and curr_val_row[0] is not None:
-                        last_number = curr_val_row[0]
-                except Exception:
-                    pass
+                        last_value = curr_val_row[0]
+                except Exception as e:
+                    self.config_parser.print_log_message('WARNING', f"postgresql_connector: fetch_sequences: The position of the sequence {schema_name}.{sequence_name} could not be read ({e}) - the target sequence starts at its declared start value {start_value}.")
 
                 source_sequence_sql = (
                     f'CREATE SEQUENCE "{schema_name}"."{sequence_name}" '
@@ -3012,14 +3016,15 @@ class PostgreSQLConnector(DatabaseConnector):
                     'table_name': None,
                     'column_name': None,
                     'source_sequence_sql': source_sequence_sql,
-                    'source_start_value': last_number,
+                    'source_start_value': start_value,
+                    'source_last_value': last_value,
                     'source_increment_by': increment_by,
                     'source_minvalue': min_value,
                     'source_maxvalue': max_value,
                     'source_cache': cache_size,
                     'source_is_cycled': is_cycled,
                 }
-                self.config_parser.print_log_message('DEBUG', f"postgresql_connector: fetch_sequences: Found sequence {sequence_name} (start {last_number}, increment {increment_by}).")
+                self.config_parser.print_log_message('DEBUG', f"postgresql_connector: fetch_sequences: Found sequence {sequence_name} (declared start {start_value}, standing at {last_value}, increment {increment_by}).")
                 order_num += 1
 
             self.disconnect()
@@ -3181,7 +3186,9 @@ class PostgreSQLConnector(DatabaseConnector):
                     'increment_by': result[2],
                     'cycle': result[3],
                     'cache_size': result[4],
-                    'last_value': result[5], # seqstart is 'start value', current value needs get_sequence_current_value
+                    ## pg_sequence.seqstart is where the sequence is declared to start. Where it
+                    ## stands is not in the catalog at all - it is read from the sequence itself,
+                    ## by get_sequence_current_value() or by the SELECT in fetch_sequences().
                     'start_value': result[5],
                     'comment': ''
                 }
@@ -3311,16 +3318,25 @@ class PostgreSQLConnector(DatabaseConnector):
         increment_by = _to_int(settings.get('source_increment_by')) or 1
         minvalue = _to_int(settings.get('source_minvalue'))
         maxvalue = _to_int(settings.get('source_maxvalue'))
-        start_value = _to_int(settings.get('source_start_value'))
         cache = _to_int(settings.get('source_cache'))
         is_cycled = str(settings.get('source_is_cycled') or '').upper() in ('Y', 'YES', 'TRUE', '1')
+
+        ## Two different values, and the sequence of the target needs both: the declared start,
+        ## which is what a RESTART of it will use, and the position, which the setval below
+        ## sets. A source which keeps no declared start value hands the position over here, so
+        ## that the target still does not begin behind its own data.
+        start_value = _to_int(settings.get('source_start_value'))
+        if start_value is None:
+            start_value = _to_int(settings.get('source_last_value'))
 
         if maxvalue is not None and maxvalue >= PG_BIGINT_MAX:
             maxvalue = None
         if minvalue is not None and minvalue <= PG_BIGINT_MIN:
             minvalue = None
 
-        last_value = start_value
+        last_value = _to_int(settings.get('source_last_value'))
+        if last_value is None:
+            last_value = start_value
         is_called = True
         try:
             self.connect()

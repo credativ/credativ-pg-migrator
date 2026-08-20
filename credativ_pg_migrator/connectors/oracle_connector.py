@@ -151,7 +151,13 @@ class OracleConnector(DatabaseConnector):
         increment_by = _to_int(settings.get('source_increment_by')) or 1
         minvalue = _to_int(settings.get('source_minvalue'))
         maxvalue = _to_int(settings.get('source_maxvalue'))
-        start_value = _to_int(settings.get('source_start_value'))
+        ## The sequence of the target is created and not set afterwards, so it has to start
+        ## where the sequence of the source stands - otherwise it hands out values which are
+        ## already in the migrated rows. Oracle reports no declared start value at all, so
+        ## this is normally the position; a source which reports both starts at its own start.
+        start_value = _to_int(settings.get('source_last_value'))
+        if start_value is None:
+            start_value = _to_int(settings.get('source_start_value'))
         cache = _to_int(settings.get('source_cache'))
         is_cycled = str(settings.get('source_is_cycled') or '').upper() in ('Y', 'YES', 'TRUE', '1')
 
@@ -2095,14 +2101,19 @@ class OracleConnector(DatabaseConnector):
                     'table_name': None,
                     'column_name': None,
                     'source_sequence_sql': source_sequence_sql,
-                    'source_start_value': last_number,
+                    ## ALL_SEQUENCES does not keep the value the sequence was declared to start
+                    ## at - Oracle forgets it once the sequence runs. LAST_NUMBER is where the
+                    ## sequence stands (the next value it would hand out, rounded up by the
+                    ## cache), and that is reported as what it is.
+                    'source_start_value': None,
+                    'source_last_value': last_number,
                     'source_increment_by': increment_by,
                     'source_minvalue': min_value,
                     'source_maxvalue': max_value,
                     'source_cache': cache_size,
                     'source_is_cycled': is_cycled,
                 }
-                self.config_parser.print_log_message('DEBUG', f"oracle_connector: fetch_sequences: Found sequence {sequence_name} (start {last_number}, increment {increment_by}).")
+                self.config_parser.print_log_message('DEBUG', f"oracle_connector: fetch_sequences: Found sequence {sequence_name} (standing at {last_number}, increment {increment_by}).")
                 order_num += 1
             cursor.close()
             self.disconnect()

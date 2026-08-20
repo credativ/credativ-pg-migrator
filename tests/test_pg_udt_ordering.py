@@ -203,7 +203,13 @@ class TestPgUdtOrdering(unittest.TestCase):
             sequences = connector.fetch_sequences('public')
             self.assertEqual(len(sequences), 1)
             self.assertEqual(sequences[1]['sequence_name'], 'customer_events_event_id_seq')
-            self.assertEqual(sequences[1]['source_start_value'], 100)
+            # The declared start of the sequence and the value it stands at are two different
+            # facts and are reported as two. source_start_value used to carry the position,
+            # because that is what the target has to start at - which made the protocol say a
+            # sequence starts at 100 when it was declared to start at 1, and gave the target
+            # sequence a START WITH which a RESTART of it would go back to.
+            self.assertEqual(sequences[1]['source_start_value'], 1)
+            self.assertEqual(sequences[1]['source_last_value'], 100)
             self.assertIn('CREATE SEQUENCE "public"."customer_events_event_id_seq"', sequences[1]['source_sequence_sql'])
 
     def test_migrate_single_sequence(self):
@@ -238,6 +244,73 @@ class TestPgUdtOrdering(unittest.TestCase):
             self.assertTrue(res)
             target_connector.execute_query.assert_any_call('CREATE SEQUENCE IF NOT EXISTS "migtest"."countdown_seq" INCREMENT BY 1 MINVALUE 1 START WITH 988 CACHE 1 NO CYCLE;')
             target_connector.execute_query.assert_any_call('SELECT setval(\'"migtest"."countdown_seq"\', 988, true);')
+
+    def test_migrate_single_sequence_keeps_the_declared_start_and_the_position_apart(self):
+        """
+        The sequence of the target is declared to start where the sequence of the source is
+        declared to start, and is then set to where the source stands. Both facts survive the
+        migration: a RESTART of the target sequence goes back to 1, as it does in the source,
+        while the next value it hands out is behind the migrated rows.
+        """
+        mock_config = MagicMock()
+        mock_config.get_log_file.return_value = 'migrator.log'
+        with patch('credativ_pg_migrator.connectors.postgresql_connector.MigratorLogger'), \
+             patch.object(PostgreSQLConnector, 'prepare_session_settings', return_value=''):
+            source_connector = PostgreSQLConnector(mock_config, 'source')
+            source_connector.connect = MagicMock()
+            source_connector.disconnect = MagicMock()
+            mock_cursor = MagicMock()
+            source_connector.connection = MagicMock()
+            source_connector.connection.cursor.return_value = mock_cursor
+            mock_cursor.fetchone.return_value = (5000, True)
+
+            target_connector = MagicMock()
+
+            settings = {
+                'source_schema_name': 'public',
+                'target_schema_name': 'migtest',
+                'source_sequence_name': 'orders_seq',
+                'target_sequence_name': 'orders_seq',
+                'source_increment_by': 1,
+                'source_minvalue': 1,
+                'source_maxvalue': 9223372036854775807,
+                'source_start_value': 1,
+                'source_last_value': 5000,
+                'source_cache': 1,
+                'source_is_cycled': 'NO'
+            }
+
+            self.assertTrue(source_connector.migrate_sequences(target_connector, settings))
+            target_connector.execute_query.assert_any_call('CREATE SEQUENCE IF NOT EXISTS "migtest"."orders_seq" INCREMENT BY 1 MINVALUE 1 START WITH 1 CACHE 1 NO CYCLE;')
+            target_connector.execute_query.assert_any_call('SELECT setval(\'"migtest"."orders_seq"\', 5000, true);')
+
+    def test_migrate_single_sequence_starts_where_the_source_stands_without_a_declared_start(self):
+        """
+        Oracle keeps no declared start value - ALL_SEQUENCES forgets it once the sequence
+        runs - so the position is all there is, and the target has to start there.
+        """
+        mock_config = MagicMock()
+        mock_config.get_log_file.return_value = 'migrator.log'
+        with patch('credativ_pg_migrator.connectors.postgresql_connector.MigratorLogger'), \
+             patch.object(PostgreSQLConnector, 'prepare_session_settings', return_value=''):
+            source_connector = PostgreSQLConnector(mock_config, 'source')
+            source_connector.connect = MagicMock(side_effect=Exception('no source connection'))
+            source_connector.disconnect = MagicMock()
+            target_connector = MagicMock()
+
+            settings = {
+                'source_schema_name': 'public',
+                'target_schema_name': 'migtest',
+                'source_sequence_name': 'orders_seq',
+                'target_sequence_name': 'orders_seq',
+                'source_increment_by': 1,
+                'source_start_value': None,
+                'source_last_value': 5000,
+                'source_is_cycled': 'NO'
+            }
+
+            self.assertTrue(source_connector.migrate_sequences(target_connector, settings))
+            target_connector.execute_query.assert_any_call('CREATE SEQUENCE IF NOT EXISTS "migtest"."orders_seq" INCREMENT BY 1 START WITH 5000 NO CYCLE;')
 
     def test_fetch_table_columns_array_type(self):
         mock_config = MagicMock()

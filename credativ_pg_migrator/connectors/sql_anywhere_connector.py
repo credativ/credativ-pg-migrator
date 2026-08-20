@@ -128,8 +128,12 @@ class SQLAnywhereConnector(DatabaseConnector):
             statement.append(f"MINVALUE {settings['source_minvalue']}")
         if settings.get('source_maxvalue') is not None:
             statement.append(f"MAXVALUE {settings['source_maxvalue']}")
-        if settings.get('source_start_value') is not None:
-            statement.append(f"START WITH {settings['source_start_value']}")
+        ## created and not set afterwards, so it starts where the sequence of the source stands
+        start_with = settings.get('source_last_value')
+        if start_with is None:
+            start_with = settings.get('source_start_value')
+        if start_with is not None:
+            statement.append(f"START WITH {start_with}")
         if settings.get('source_cache') is not None:
             ## SQL Anywhere writes NO CACHE as a cache of 0, PostgreSQL counts from 1
             statement.append(f"CACHE {max(int(settings['source_cache']), 1)}")
@@ -1873,7 +1877,10 @@ class SQLAnywhereConnector(DatabaseConnector):
                     'source_minvalue': int(row[1]) if row[1] is not None else None,
                     'source_maxvalue': int(row[2]) if row[2] is not None else None,
                     'source_increment_by': int(row[3]) if row[3] is not None else None,
-                    'source_start_value': int(row[7] if row[7] is not None else row[4]),
+                    ## start_with is the declared start of the sequence, resume_at is where it
+                    ## stands - both are kept, the second is what the target is started from
+                    'source_start_value': int(row[4]) if row[4] is not None else None,
+                    'source_last_value': int(row[7]) if row[7] is not None else None,
                     'source_cache': int(row[5]) if row[5] is not None else None,
                     'source_is_cycled': bool(row[6]),
                     'used_in_identity': False,

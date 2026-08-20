@@ -610,6 +610,7 @@ class Planner:
                 'source_sequence_name': sequence_info['sequence_name'],
                 'source_sequence_sql': sequence_info.get('source_sequence_sql', ''),
                 'source_start_value': sequence_info.get('source_start_value', None),
+                'source_last_value': sequence_info.get('source_last_value', None),
                 'source_increment_by': sequence_info.get('source_increment_by', None),
                 'source_minvalue': sequence_info.get('source_minvalue', None),
                 'source_maxvalue': sequence_info.get('source_maxvalue', None),

@@ -2976,6 +2976,7 @@ class MigratorTables:
             source_sequence_name TEXT,
             source_sequence_sql TEXT,
             source_start_value BIGINT,
+            source_last_value BIGINT,
             source_increment_by BIGINT,
             source_minvalue BIGINT,
             source_maxvalue BIGINT,
@@ -3172,20 +3173,21 @@ class MigratorTables:
             'source_sequence_name': row[7],
             'source_sequence_sql': row[8],
             'source_start_value': row[9],
-            'source_increment_by': row[10],
-            'source_minvalue': row[11],
-            'source_maxvalue': row[12],
-            'source_cache': row[13],
-            'source_is_cycled': row[14],
-            'source_sequence_comment': row[15],
-            'target_schema_name': row[16],
-            'target_table_name': row[17],
-            'target_column_name': row[18],
-            'target_column_data_type': row[19],
-            'target_sequence_name': row[20],
-            'target_sequence_sql': row[21],
-            'target_sequence_last_value': row[22],
-            'target_sequence_comment': row[23]
+            'source_last_value': row[10],
+            'source_increment_by': row[11],
+            'source_minvalue': row[12],
+            'source_maxvalue': row[13],
+            'source_cache': row[14],
+            'source_is_cycled': row[15],
+            'source_sequence_comment': row[16],
+            'target_schema_name': row[17],
+            'target_table_name': row[18],
+            'target_column_name': row[19],
+            'target_column_data_type': row[20],
+            'target_sequence_name': row[21],
+            'target_sequence_sql': row[22],
+            'target_sequence_last_value': row[23],
+            'target_sequence_comment': row[24]
         }
 
     def decode_trigger_row(self, row):
@@ -3733,17 +3735,17 @@ class MigratorTables:
         ## column of Sybase ASE is a NUMERIC of up to 38 digits and can report a value which
         ## no BIGINT column of the protocol can hold
         clamped, message = self.clamp_bigint_sequence_fields(
-            settings, ('source_start_value', 'source_increment_by', 'source_minvalue', 'source_maxvalue', 'source_cache', 'source_next_identity'))
+            settings, ('source_start_value', 'source_last_value', 'source_increment_by', 'source_minvalue', 'source_maxvalue', 'source_cache', 'source_next_identity'))
         if message:
             self.config_parser.print_log_message('WARNING', f"migrator_tables: insert_sequence: ({func_run_id}): sequence {settings.get('source_sequence_name') or settings.get('target_sequence_name')}: {message}")
 
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{protocol_table_name}"
-            (sequence_id, source_schema_name, source_table_name, source_column_name, source_column_data_type, source_is_identity, source_next_identity, source_sequence_name, source_sequence_sql, source_start_value, source_increment_by, source_minvalue, source_maxvalue, source_cache, source_is_cycled, source_sequence_comment, target_schema_name, target_table_name, target_column_name, target_column_data_type, target_sequence_name, target_sequence_sql, target_sequence_comment, message)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (sequence_id, source_schema_name, source_table_name, source_column_name, source_column_data_type, source_is_identity, source_next_identity, source_sequence_name, source_sequence_sql, source_start_value, source_last_value, source_increment_by, source_minvalue, source_maxvalue, source_cache, source_is_cycled, source_sequence_comment, target_schema_name, target_table_name, target_column_name, target_column_data_type, target_sequence_name, target_sequence_sql, target_sequence_comment, message)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (settings.get('sequence_id'), settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_column_name'), settings.get('source_column_data_type'), settings.get('source_is_identity'), clamped['source_next_identity'], settings.get('source_sequence_name'), settings.get('source_sequence_sql'), clamped['source_start_value'], clamped['source_increment_by'], clamped['source_minvalue'], clamped['source_maxvalue'], clamped['source_cache'], settings.get('source_is_cycled'), settings.get('source_sequence_comment'), settings.get('target_schema_name'), settings.get('target_table_name'), settings.get('target_column_name'), settings.get('target_column_data_type'), settings.get('target_sequence_name'), settings.get('target_sequence_sql'), settings.get('target_sequence_comment'), message)
+        params = (settings.get('sequence_id'), settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_column_name'), settings.get('source_column_data_type'), settings.get('source_is_identity'), clamped['source_next_identity'], settings.get('source_sequence_name'), settings.get('source_sequence_sql'), clamped['source_start_value'], clamped['source_last_value'], clamped['source_increment_by'], clamped['source_minvalue'], clamped['source_maxvalue'], clamped['source_cache'], settings.get('source_is_cycled'), settings.get('source_sequence_comment'), settings.get('target_schema_name'), settings.get('target_table_name'), settings.get('target_column_name'), settings.get('target_column_data_type'), settings.get('target_sequence_name'), settings.get('target_sequence_sql'), settings.get('target_sequence_comment'), message)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)

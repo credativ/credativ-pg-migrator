@@ -1,6 +1,6 @@
 # credativ-pg-migrator — test suite
 
-282 test functions in 25 files. **No test in this directory needs a database, a driver
+289 test functions in 26 files. **No test in this directory needs a database, a driver
 connection, or a network.** Everything that would talk to a server is either constructed
 with `Class.__new__(Class)` and fed a fake config, or replaced with `unittest.mock`. A
 full run touches nothing outside the repository and finishes in seconds.
@@ -36,7 +36,7 @@ tests, and no test depends on the order of the others.
 |---|---|---|
 | configuration & logging | `pyyaml`, `jsonschema`, `pytest` | the 5 `test_config_*` / `test_logging_*` / `test_object_*` files, and `test_schema_names.py` |
 | anonymization, Db2 CSV | nothing beyond the standard library | 3 files |
-| everything else | the package's own dependencies — `psycopg2`, `tabulate`, `jaydebeapi` | 16 files |
+| everything else | the package's own dependencies — `psycopg2`, `tabulate`, `jaydebeapi` | 17 files |
 
 The third group imports the connectors, which import their drivers at module level, so
 those files fail to **collect** if the drivers are absent — the message is
@@ -54,7 +54,8 @@ python3 -m pytest tests/ -q \
   --ignore=tests/test_pg_lob_worker.py           --ignore=tests/test_pg_udt_ordering.py \
   --ignore=tests/test_sybase_rowcount_return.py  --ignore=tests/test_pg_session_settings.py \
   --ignore=tests/test_data_migration_limitation.py --ignore=tests/test_varchar_to_text.py \
-  --ignore=tests/test_default_value_substitution_patterns.py
+  --ignore=tests/test_default_value_substitution_patterns.py \
+  --ignore=tests/test_sequence_protocol_columns.py
 ```
 
 **Expected result: `369 passed, 6 skipped`** (9 files; the count is higher than the number
@@ -417,6 +418,20 @@ migrated whole; `{source_schema_name}` and `{source_table_name}` are substituted
 entries matching one table are combined with `AND`, and only those which apply are;
 an unusable column pattern is reported instead of ending the run; and the columns of a
 table are accepted in each of the shapes the callers hold them in.
+
+### `test_sequence_protocol_columns.py` — 6 functions, 7 tests
+
+**Purpose.** The sequences protocol table against the code which reads and writes it.
+`decode_sequence_row()` reads a row by position, so a column added in the middle shifts
+every following one and nothing says so — the migration keeps running and writes the
+increment into the minimum value.
+
+**Covers.** The test reads the `CREATE TABLE` the migrator issues and compares it with the
+decoder position by position (not only in the same order: a decoder reading two names out
+of one position keeps the order and is still wrong), checks that the `INSERT` names only
+columns which exist and passes one value per column, and that the declared start of a
+sequence and the value it stands at are two separate columns, both clamped to what a
+`BIGINT` column can hold.
 
 ### `test_default_value_substitution_patterns.py` — 7 functions, 9 tests
 

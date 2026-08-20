@@ -3402,10 +3402,13 @@ class TsqlParser:
 
         # Apply global SQL functions mapping (e.g., datepart, getdate) across all output lines
         if self.functions_mapping_converter:
+            ## The type of the target database, not the way it is connected to -
+            ## get_connectivity() answers 'native' / 'jdbc' / 'odbc' as a string, and asking a
+            ## string for a key ended the whole conversion of the routine with
+            ## "'str' object has no attribute 'get'".
             target_db_type = 'postgresql'
             if self.config_parser:
-                target_conn = self.config_parser.get_connectivity('target')
-                target_db_type = target_conn.get('db_type', 'postgresql') if target_conn else 'postgresql'
+                target_db_type = self.config_parser.get_target_db_type() or 'postgresql'
             for line in final_output:
                 line.content = self.functions_mapping_converter(line.content, {'target_db_type': target_db_type})
 

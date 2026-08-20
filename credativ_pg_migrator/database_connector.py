@@ -1181,12 +1181,27 @@ class DatabaseConnector(ABC):
     def fetch_sequences(self, schema_name: str):
         """
         Fetch sequences for the specified schema.
-        This function is only relevant for target databases that uses sequences.
+        This function is only relevant for source databases which have sequence objects of
+        their own - the legacy engines have identity columns instead, and those are found
+        with the table which owns them.
+
+        'source_start_value' is the value the sequence is declared to start at and
+        'source_last_value' is where it stands. They are two facts, not two names for one:
+        the first is what a RESTART of the sequence goes back to, the second is what decides
+        whether the first row inserted after the migration collides with a migrated one.
+        Report what the source really keeps and leave the other out - the sequence of the
+        target is created from the start value and set to the position afterwards, and where
+        a connector cannot set it afterwards it starts the target at the position.
+
         Returns: dict
         { ordinary_number: {
             'sequence_name': sequence_name:
             'id': sequence_id,
-            'source_sequence_sql': source_sequence_sql
+            'source_sequence_sql': source_sequence_sql,
+            'source_start_value': the declared start of the sequence, when the source keeps it,
+            'source_last_value': where the sequence stands, when the source can be asked,
+            'source_increment_by', 'source_minvalue', 'source_maxvalue', 'source_cache',
+            'source_is_cycled': the rest of the declaration
             }
         }
         """
@@ -1205,6 +1220,15 @@ class DatabaseConnector(ABC):
     def get_sequence_details(self, sequence_owner, sequence_name):
         """
         Returns the details of a sequence.
+
+        'start_value' and 'last_value' are two different facts and neither stands in for the
+        other: the first is the value the sequence is declared to start at - its START WITH,
+        where a RESTART of it goes back to - and the second is where the sequence stands now.
+        A source keeps one of them, the other or both: PostgreSQL declares the start in
+        pg_sequence and holds the position in the sequence itself, Oracle forgets the declared
+        start once the sequence runs and reports only LAST_NUMBER. Report what the source
+        really says and leave the other one out; the migration reads them separately.
+
         Returns: dict
         { ordinary_number: {
             'name': sequence_name:
@@ -1214,7 +1238,8 @@ class DatabaseConnector(ABC):
             'cycle': cycle,
             'order': order,
             'cache_size': cache_size,
-            'last_value': last_value,
+            'start_value': the value the sequence is declared to start at, when the source keeps it,
+            'last_value': where the sequence stands, when the source can be asked,
             'comment': sequence_comment
             }
         }

@@ -88,7 +88,7 @@ def parse_expecting_failure(tmp_path, config):
     ('missing required block',
      lambda c: c.pop('target')),
     ('a fixed-arity row of the wrong length',
-     lambda c: c.update({'data_migration_limitation': [['orders', 'id > 1', 'id', 1000]]})),
+     lambda c: c.update({'data_migration_limitation': [['orders', 'id > 1', 'id', 1000, 'more']]})),
 ])
 def test_a_setting_the_migrator_cannot_carry_out_stops_the_run(tmp_path, base_config, label, mutate):
     config = copy.deepcopy(base_config)
@@ -132,6 +132,31 @@ def test_an_unknown_key_is_reported_but_does_not_stop_the_run(tmp_path, base_con
     warnings = logger.messages('warning')
     assert any(where in message for message in warnings), f'{label}: not reported'
     assert not logger.messages('error')
+
+
+@pytest.mark.parametrize('entry', [
+    ['orders', "created_at >= '2024-01-01'", 'created_at'],
+    ['orders', "created_at >= '2024-01-01'", 'created_at', 1000000],
+])
+def test_a_data_migration_limitation_is_accepted_with_and_without_the_row_limit(tmp_path, base_config, entry):
+    """
+    The row limit is the optional fourth element - the number of rows a table has to exceed
+    before the condition is applied to it. An entry without it restricts the table whatever
+    its size, which is what every entry did before the limit existed.
+    """
+    config = copy.deepcopy(base_config)
+    config['data_migration_limitation'] = [entry]
+    parser, logger = parse(tmp_path, config)
+    assert not logger.messages('error')
+    assert parser.get_data_migration_limitation() == [
+        ['orders', "created_at >= '2024-01-01'", 'created_at', entry[3] if len(entry) == 4 else None]]
+
+
+def test_a_row_limit_which_is_not_a_number_stops_the_run(tmp_path, base_config):
+    config = copy.deepcopy(base_config)
+    config['data_migration_limitation'] = [['orders', 'id > 1', 'id', 'a million']]
+    with pytest.raises(ValueError):
+        parse(tmp_path, config)
 
 
 def test_a_valid_configuration_says_so_and_starts(tmp_path, base_config):

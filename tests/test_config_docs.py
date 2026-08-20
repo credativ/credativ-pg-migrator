@@ -204,18 +204,20 @@ def test_fixed_arity_lists_have_the_right_length(path):
     is a ValueError at startup rather than a warning.
     """
     arity = {
-        'data_types_substitution': 5,
-        'default_values_substitution': 4,
-        'remote_objects_substitution': 2,
-        'data_migration_limitation': 3,
+        'data_types_substitution': {5},
+        'default_values_substitution': {4},
+        'remote_objects_substitution': {2},
+        ## three elements, or four with the optional row limit
+        'data_migration_limitation': {3, 4},
     }
     with open(path, encoding='utf-8') as handle:
         document = yaml.safe_load(handle) or {}
     problems = []
     for key, expected in arity.items():
         for position, row in enumerate(document.get(key) or [], start=1):
-            if isinstance(row, list) and len(row) != expected:
-                problems.append(f'{key}[{position}] has {len(row)} elements, expected {expected}')
+            if isinstance(row, list) and len(row) not in expected:
+                spelled = ' or '.join(str(length) for length in sorted(expected))
+                problems.append(f'{key}[{position}] has {len(row)} elements, expected {spelled}')
     assert not problems, '; '.join(problems)
 
 

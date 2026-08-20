@@ -1,6 +1,6 @@
 # credativ-pg-migrator — test suite
 
-233 test functions in 20 files. **No test in this directory needs a database, a driver
+289 test functions in 26 files. **No test in this directory needs a database, a driver
 connection, or a network.** Everything that would talk to a server is either constructed
 with `Class.__new__(Class)` and fed a fake config, or replaced with `unittest.mock`. A
 full run touches nothing outside the repository and finishes in seconds.
@@ -34,9 +34,9 @@ tests, and no test depends on the order of the others.
 
 | group | needs | files |
 |---|---|---|
-| configuration & logging | `pyyaml`, `jsonschema`, `pytest` | the 5 `test_config_*` / `test_logging_*` / `test_object_*` files |
+| configuration & logging | `pyyaml`, `jsonschema`, `pytest` | the 5 `test_config_*` / `test_logging_*` / `test_object_*` files, and `test_schema_names.py` |
 | anonymization, Db2 CSV | nothing beyond the standard library | 3 files |
-| everything else | the package's own dependencies — `psycopg2`, `tabulate`, `jaydebeapi` | 12 files |
+| everything else | the package's own dependencies — `psycopg2`, `tabulate`, `jaydebeapi` | 17 files |
 
 The third group imports the connectors, which import their drivers at module level, so
 those files fail to **collect** if the drivers are absent — the message is
@@ -52,17 +52,21 @@ python3 -m pytest tests/ -q \
   --ignore=tests/test_mysql_zero_datetime_default.py --ignore=tests/test_pg_aggregates.py \
   --ignore=tests/test_pg_collations.py           --ignore=tests/test_pg_extensions.py \
   --ignore=tests/test_pg_lob_worker.py           --ignore=tests/test_pg_udt_ordering.py \
-  --ignore=tests/test_sybase_rowcount_return.py
+  --ignore=tests/test_sybase_rowcount_return.py  --ignore=tests/test_pg_session_settings.py \
+  --ignore=tests/test_data_migration_limitation.py --ignore=tests/test_varchar_to_text.py \
+  --ignore=tests/test_default_value_substitution_patterns.py \
+  --ignore=tests/test_sequence_protocol_columns.py
 ```
 
-**Expected result: `356 passed`** (8 files; the count is higher than the number of test
-functions because many are `parametrize`d).
+**Expected result: `369 passed, 6 skipped`** (9 files; the count is higher than the number
+of test functions because many are `parametrize`d. The 6 skipped are the ones in
+`test_schema_names.py` which build `MigratorTables`, and that module imports `psycopg2`).
 
 ---
 
 ## 1. Configuration language
 
-These five check the configuration language itself against
+These six check the configuration language itself against
 `credativ_pg_migrator/config.schema.json`, which is the single source of truth: the
 migrator validates your configuration against it at startup and
 `docs/config_reference.md` is generated from it. They exist so that the schema, the
@@ -168,6 +172,22 @@ levels were compared as positions in a list beginning with `INFO`, so the defaul
 showed `INFO` alone and every `WARNING` message in the migrator — around two hundred of
 them — was invisible.
 
+### `test_schema_names.py` — 8 functions, 16 tests
+
+**Purpose.** The two schema names the migrator cannot work without: `migrator -> schema`
+and `target -> schema`.
+
+**Covers.** `public` as the schema of the migrator metadata stops the run, in any spelling
+— that schema is dropped with everything in it at the start of every run, so the name
+would take the public schema of the database with it. An empty name stops the run on both
+sides. `public` as the *target* schema is allowed, and a name which merely contains the
+word (`public_migration`) is too. The same two refusals are asserted a second time against
+`MigratorTables`, which checks them itself before it opens its connection — that is the
+gate directly in front of the `DROP SCHEMA`.
+
+**Expected result.** All pass; 6 are skipped when `psycopg2` is not installed
+(`MigratorTables` imports it).
+
 ---
 
 ## 2. Anonymization
@@ -271,10 +291,13 @@ functions; `CHAR` casts and grouping booleans.
 **Purpose.** A Sybase ASE procedure returning `@@rowcount` becomes a PostgreSQL function
 that returns a table.
 
-**Covers.** The converted DDL contains `RETURNS TABLE` and `RETURN QUERY`, and the
-Sybase-only `RETURN @@rowcount;` is commented out rather than emitted.
+**Covers.** The converted DDL contains `RETURNS TABLE` and `RETURN QUERY`, `@@rowcount`
+is translated into a variable filled by `GET DIAGNOSTICS`, and the status code the
+procedure returned next to its rows is commented out rather than emitted — a function
+returning a set cannot return a scalar as well ("RETURN cannot have a parameter in
+function returning set").
 
-**Expected result.** Passes. Note the four assertions are at module level, so they run at
+**Expected result.** Passes. Note the assertions are at module level, so they run at
 **collection** time — a failure appears as a collection error, not a test failure. Worth
 turning into proper test functions when this file is next touched.
 
@@ -357,6 +380,69 @@ generated columns keeps all its columns.
 **Covers.** `uuid-ossp` is inferred from `uuid_default_function: uuid_generate_v4()`; an
 explicit `required_extensions` list is returned; `check_and_create_extension` reports
 success and a message containing `present` when the extension is already there.
+
+### `test_pg_session_settings.py` — 9 tests
+
+**Purpose.** `target -> settings` (and the same key for a PostgreSQL source): what is
+prepared out of them, and that every connection runs with them.
+
+**Covers.** The settings of one side are never applied on the connection to the other; a
+name is recognised whatever its case (`Role`, `WORK_MEM` used to raise `KeyError`); `role`
+is always the last statement, so a setting needing more rights is not blocked by the
+switch to it; `search_path` is written without quotes of its own; a name PostgreSQL does
+not know is reported and left out. Then that `connect()` applies them — which is what
+decides who owns the objects the migration creates — and that preparing them does not
+recurse, since `prepare_session_settings()` opens a connection of its own.
+
+### `test_varchar_to_text.py` — 11 functions, 17 tests
+
+**Purpose.** `migration.varchar_to_text_length` and `migration.char_to_text_length`.
+
+**Covers.** Each setting decides its own family and nothing else: with only
+`char_to_text_length` configured, a `varchar` column keeps its length — it used to become
+`TEXT`, because `CHAR` is a substring of `VARCHAR` and both settings default to `-1`,
+which compares true against every length. Also the promotion itself at and above the
+limit, `nvarchar` / `univarchar` counting as the varchar family, a column the source
+reports no length for becoming `TEXT`, and a non-string type never being promoted.
+
+### `test_data_migration_limitation.py` — 14 functions, 17 tests
+
+**Purpose.** How one entry of `data_migration_limitation` decides which rows of a table
+are migrated. The planner, the orchestrator and the validator all ask the same resolver,
+so one entry cannot mean one thing while the rows are counted and another while they are
+copied.
+
+**Covers.** The condition is used only for a table which really has the column named in
+the entry (as a name or as a pattern); a table not larger than the optional row limit is
+migrated whole; `{source_schema_name}` and `{source_table_name}` are substituted; several
+entries matching one table are combined with `AND`, and only those which apply are;
+an unusable column pattern is reported instead of ending the run; and the columns of a
+table are accepted in each of the shapes the callers hold them in.
+
+### `test_sequence_protocol_columns.py` — 6 functions, 7 tests
+
+**Purpose.** The sequences protocol table against the code which reads and writes it.
+`decode_sequence_row()` reads a row by position, so a column added in the middle shifts
+every following one and nothing says so — the migration keeps running and writes the
+increment into the minimum value.
+
+**Covers.** The test reads the `CREATE TABLE` the migrator issues and compares it with the
+decoder position by position (not only in the same order: a decoder reading two names out
+of one position keeps the order and is still wrong), checks that the `INSERT` names only
+columns which exist and passes one value per column, and that the declared start of a
+sequence and the value it stands at are two separate columns, both clamped to what a
+`BIGINT` column can hold.
+
+### `test_default_value_substitution_patterns.py` — 7 functions, 9 tests
+
+**Purpose.** The patterns the planner writes into `default_values_substitution` for every
+entry of `sql_functions_mapping`. Such a row replaces the default of a column *entirely*,
+so it has to describe a default which IS that function.
+
+**Covers.** A default which is the function is substituted, with the parentheses a source
+writes around its own defaults (`(getdate())`) allowed. A default which only contains the
+function is not: `'[' + suser_name() + '@' + host_name() + ']'` used to collapse to the
+bare `current_user`. Neither is a longer name which starts with the mapped one.
 
 ---
 

@@ -960,7 +960,18 @@ class SybaseASEConnector(DatabaseConnector):
                 bt.name as base_type_name
             FROM dbo.systypes t
             JOIN dbo.sysusers u ON t.uid = u.uid
-            LEFT JOIN dbo.systypes bt ON t.type = bt.type AND bt.usertype < 100
+            LEFT JOIN dbo.systypes bt ON bt.usertype = (
+                /* The base type of a user defined type is found by its type code, and several
+                   system types share one: 'varchar' and 'sysname' are both type 39, 'char' and
+                   'nchar' are both 47, 'varbinary' and 'timestamp' are both 37. The join took
+                   whichever of them the server returned last, so a type over varbinary could be
+                   resolved to 'timestamp' - which is the row version type of Sybase and becomes
+                   BYTEA - and one over char to 'sysname', which the mapping does not know at
+                   all. The lowest usertype of a type code is its canonical type, and it is the
+                   one taken here; it also makes the row per user defined type unambiguous. */
+                SELECT MIN(b2.usertype) FROM dbo.systypes b2
+                WHERE b2.type = t.type AND b2.usertype < 100
+            )
             WHERE t.usertype > 100
             ORDER BY t.name
         """
@@ -1943,6 +1954,7 @@ class SybaseASEConnector(DatabaseConnector):
 
             returns_clause = "RETURNS void"
             convert_to_scalar_return = False
+            returns_dataset = False
 
             if explicit_func_return:
                  returns_clause = f"RETURNS {explicit_func_return}"
@@ -1977,6 +1989,7 @@ class SybaseASEConnector(DatabaseConnector):
                            col_defs.append(f'"{c_name}" {t_mapped}')
                       if col_defs:
                            returns_clause = f"RETURNS TABLE ({', '.join(col_defs)})"
+                           returns_dataset = True
             elif has_explicit_return_value:
                  returns_clause = "RETURNS integer"
 
@@ -2001,6 +2014,22 @@ class SybaseASEConnector(DatabaseConnector):
                       match = re.match(r'(?i)^(\s*)RETURN\s+(?!QUERY\b|NEXT\b)([^;]+?)\s*;?\s*$', line_obj.content)
                       if match:
                            line_obj.content = f"{match.group(1)}{status_parameter} := {match.group(2)}; RETURN;"
+
+            if returns_dataset:
+                 ## The routine answers with the rows of its SELECT, and a 'return @@rowcount'
+                 ## next to that is the status code of Sybase - which PostgreSQL refuses outright
+                 ## in a function returning a set: 'RETURN cannot have a parameter in function
+                 ## returning set'. The statement is kept as a comment instead of being dropped,
+                 ## so whoever reads the routine sees what the source returned there, and the
+                 ## rows are what the function answers with.
+                 for line_obj in final_output:
+                      match = re.match(r'(?i)^(\s*)RETURN\s+(?!QUERY\b|NEXT\b)(.+?)\s*;?\s*$', line_obj.content)
+                      if match:
+                           line_obj.content = f"{match.group(1)}/* RETURN {match.group(2)}; -- Sybase ASE construct which cannot be used in PostgreSQL */"
+                           self.config_parser.print_log_message('WARNING',
+                               f"sybase_ase_connector: convert_funcproc_code: {proc_name} returns rows and a status code "
+                               f"at the same time - the status code 'RETURN {match.group(2)}' cannot be returned next to "
+                               f"the rows and is commented out in the generated routine.")
 
             if convert_to_scalar_return:
                  for line_obj in final_output:
@@ -5011,7 +5040,18 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
                 bt.name as base_type_name
             FROM dbo.systypes t
             JOIN dbo.sysusers u ON t.uid = u.uid
-            LEFT JOIN dbo.systypes bt ON t.type = bt.type AND bt.usertype < 100
+            LEFT JOIN dbo.systypes bt ON bt.usertype = (
+                /* The base type of a user defined type is found by its type code, and several
+                   system types share one: 'varchar' and 'sysname' are both type 39, 'char' and
+                   'nchar' are both 47, 'varbinary' and 'timestamp' are both 37. The join took
+                   whichever of them the server returned last, so a type over varbinary could be
+                   resolved to 'timestamp' - which is the row version type of Sybase and becomes
+                   BYTEA - and one over char to 'sysname', which the mapping does not know at
+                   all. The lowest usertype of a type code is its canonical type, and it is the
+                   one taken here; it also makes the row per user defined type unambiguous. */
+                SELECT MIN(b2.usertype) FROM dbo.systypes b2
+                WHERE b2.type = t.type AND b2.usertype < 100
+            )
             WHERE t.usertype > 100
             ORDER BY t.name
         """

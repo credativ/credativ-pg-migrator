@@ -146,7 +146,12 @@ class MariaDBConnector(DatabaseConnector):
         increment_by = _to_int(settings.get('source_increment_by')) or 1
         minvalue = _to_int(settings.get('source_minvalue'))
         maxvalue = _to_int(settings.get('source_maxvalue'))
-        start_value = _to_int(settings.get('source_start_value'))
+        ## the sequence of the target is created and not set afterwards, so it starts where the
+        ## sequence of the source stands - its declared start value is behind the rows which
+        ## were migrated and would hand out keys which are already there
+        start_value = _to_int(settings.get('source_last_value'))
+        if start_value is None:
+            start_value = _to_int(settings.get('source_start_value'))
         cache = _to_int(settings.get('source_cache'))
         is_cycled = str(settings.get('source_is_cycled') or '').upper() in ('Y', 'YES', 'TRUE', '1')
 
@@ -1024,7 +1029,11 @@ class MariaDBConnector(DatabaseConnector):
                             'table_name': None,
                             'column_name': None,
                             'source_sequence_sql': source_sequence_sql,
-                            'source_start_value': next_val,
+                            ## start_value is what the sequence was declared to start at,
+                            ## next_not_cached_value is where it stands - the two are reported
+                            ## as the two facts they are
+                            'source_start_value': start_val,
+                            'source_last_value': next_val,
                             'source_increment_by': inc,
                             'source_minvalue': min_val,
                             'source_maxvalue': max_val,

@@ -215,9 +215,44 @@ class ConfigParser:
                 if not isinstance(entry, (list, tuple)) or len(entry) != 5:
                     raise ValueError("Please update your config file. Each entry in data_types_substitution must have 5 elements - [table_name, column_name, source_type, target_type, comment].")
 
+        self.validate_schema_names()
         self.validate_anonymization_config()
 
         return True
+
+    def validate_schema_names(self):
+        """
+        The schema of the migrator metadata and the schema of the target, checked before
+        anything is opened.
+
+        The protocol schema is dropped and created again at the start of every run -
+        migrator_tables.create_protocol() runs DROP SCHEMA ... CASCADE on it. Named 'public',
+        that drops the public schema of the database with everything anybody else keeps in
+        it. It is refused, and so is a schema left empty: an empty name would put the
+        metadata tables wherever the search_path happens to point, which is usually 'public'
+        again.
+
+        The target schema is refused empty for the same reason - the objects of the migration
+        would be created in whatever schema the connection happens to see.
+        """
+        migrator_schema = self.get_migrator_schema()
+        if not migrator_schema or not str(migrator_schema).strip():
+            raise ValueError(
+                "The schema of the migrator metadata (migrator -> schema) cannot be empty - "
+                "the migrator keeps its protocol tables in a schema of its own.")
+        if str(migrator_schema).strip().lower() == 'public':
+            raise ValueError(
+                "The schema of the migrator metadata (migrator -> schema) cannot be 'public' - "
+                "it is dropped with everything in it at the start of every run. Name a schema of its own.")
+
+        ## read the way get_target_schema() reads it, but without reaching into a section
+        ## which may not be there at all - a missing 'target' is reported by the schema check
+        target_section = self.config.get('target') or {}
+        target_schema = target_section.get('schema', target_section.get('owner', 'public'))
+        if not target_schema or not str(target_schema).strip():
+            raise ValueError(
+                "The schema of the target database (target -> schema) cannot be empty - "
+                "name the schema the migration is to create its objects in.")
 
     def validate_anonymization_config(self):
         """
@@ -803,7 +838,40 @@ class ConfigParser:
         return True
 
     def get_data_migration_limitation(self):
-        return (self.config.get('data_migration_limitation') or {})
+        """
+        The restrictions on which rows of a table are migrated, one list per entry:
+        [table_name_or_pattern, condition, column_name_or_pattern, row_limit].
+
+        The row limit is optional - an entry written with three elements answers with None
+        in its place, which means "restrict the table however many rows it has". Every entry
+        is answered with four elements, so the readers unpack one shape and not two.
+        """
+        limitations = self.config.get('data_migration_limitation') or []
+        if not isinstance(limitations, list):
+            raise ValueError("data_migration_limitation must be a list of entries - see docs/config_reference.md.")
+        normalized = []
+        for position, entry in enumerate(limitations, start=1):
+            if not isinstance(entry, (list, tuple)):
+                raise ValueError(
+                    f"data_migration_limitation[{position}] is not a list - each entry is "
+                    f"[table_name_or_pattern, condition, column_name_or_pattern] and may carry a row limit as its fourth element.")
+            if len(entry) not in (3, 4):
+                raise ValueError(
+                    f"data_migration_limitation[{position}] has {len(entry)} elements - each entry is "
+                    f"[table_name_or_pattern, condition, column_name_or_pattern] and may carry a row limit as its fourth element.")
+            table_name, condition, column_name = entry[0], entry[1], entry[2]
+            row_limit = entry[3] if len(entry) == 4 else None
+            if row_limit is not None and str(row_limit).strip() != '':
+                try:
+                    row_limit = int(row_limit)
+                except (TypeError, ValueError):
+                    raise ValueError(
+                        f"data_migration_limitation[{position}]: the row limit '{row_limit}' is not a number - "
+                        f"it is the number of rows a table has to exceed before the condition is applied to it.")
+            else:
+                row_limit = None
+            normalized.append([table_name, condition, column_name, row_limit])
+        return normalized
 
     def get_remote_objects_substitution(self):
         return (self.config.get('remote_objects_substitution') or {})
@@ -1402,8 +1470,20 @@ class ConfigParser:
     def get_indent(self):
         return (self.config.get('migrator') or {}).get('indent', MigratorConstants.get_default_indent())
 
+    def get_db_session_settings(self, source_or_target):
+        """
+        The session settings written for one side of the migration, as name: value.
+
+        They belong to the connection they were written for: the role and the search_path of
+        the target must never be set on the connection to the source, and a PostgreSQL source
+        can carry settings of its own.
+        """
+        if source_or_target not in ('source', 'target'):
+            raise ValueError(f"Invalid source_or_target: {source_or_target}")
+        return (self.config.get(source_or_target) or {}).get('settings') or {}
+
     def get_target_db_session_settings(self):
-        return self.config['target'].get('settings', {})
+        return self.get_db_session_settings('target')
 
     def get_target_partitioning(self):
         return (self.config.get('target_partitioning') or {})

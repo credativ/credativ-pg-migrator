@@ -191,12 +191,21 @@ class Validator:
             action = None
 
             if check_counts:
-                migration_limitation = None
-                limitations = self.migrator_tables.get_records_data_migration_limitation(source_table)
-                if limitations:
-                    migration_limitation = limitations[0][0]
-                
-                s_count = source_conn.get_rows_count(source_schema, source_table, migration_limitation)
+                ## the whole count first - a restriction carrying a row limit applies only to a
+                ## table which exceeds it, and the count of the source has to be measured the
+                ## same way the migration measured it
+                s_count_unlimited = source_conn.get_rows_count(source_schema, source_table, None)
+                migration_limitation = self.migrator_tables.resolve_data_migration_limitation({
+                    'source_schema_name': source_schema,
+                    'source_table_name': source_table,
+                    'source_columns': source_cols,
+                    'source_table_rows_all': s_count_unlimited,
+                })
+
+                if migration_limitation:
+                    s_count = source_conn.get_rows_count(source_schema, source_table, migration_limitation)
+                else:
+                    s_count = s_count_unlimited
                 t_count = target_conn.get_rows_count(target_schema, target_table)
                 
                 if target_copy_conn:

@@ -213,10 +213,9 @@ class Planner:
             self.check_script_accessibility(self.pre_script)
             self.check_script_accessibility(self.post_script)
 
+            ## connect() applies the session settings of the configuration, the role among
+            ## them - which is the owner of the schema created below
             self.target_connection.connect()
-            if self.target_connection.session_settings:
-                self.config_parser.print_log_message( 'DEBUG', f"planner: pre_planning: CREATE SCHEMA - Executing session settings for target database: {self.target_connection.session_settings}")
-                self.target_connection.execute_query(self.target_connection.session_settings)
 
             if self.config_parser.should_drop_schema():
                 if self.config_parser.is_mapping_workflow():
@@ -241,16 +240,7 @@ class Planner:
 
             if self.sql_functions_mapping:
                 for src_func, tgt_func in self.sql_functions_mapping.items():
-                    # Escape parentheses in src_func for regex usage
-                    escaped_src_func = re.escape(src_func)
-                    if src_func and (src_func[0].isalnum() or src_func[0] == '_') and (src_func[-1].isalnum() or src_func[-1] == '_'):
-                        pattern = rf"(?i)\b{escaped_src_func}\b"
-                    elif src_func and (src_func[0].isalnum() or src_func[0] == '_'):
-                        pattern = rf"(?i)\b{escaped_src_func}"
-                    elif src_func and (src_func[-1].isalnum() or src_func[-1] == '_'):
-                        pattern = rf"(?i){escaped_src_func}\b"
-                    else:
-                        pattern = rf"(?i){escaped_src_func}"
+                    pattern = self.default_value_pattern_for_function(src_func)
                     self.migrator_tables.insert_default_values_substitution({
                         'column_name': '',
                         'source_column_data_type': '',
@@ -620,6 +610,7 @@ class Planner:
                 'source_sequence_name': sequence_info['sequence_name'],
                 'source_sequence_sql': sequence_info.get('source_sequence_sql', ''),
                 'source_start_value': sequence_info.get('source_start_value', None),
+                'source_last_value': sequence_info.get('source_last_value', None),
                 'source_increment_by': sequence_info.get('source_increment_by', None),
                 'source_minvalue': sequence_info.get('source_minvalue', None),
                 'source_maxvalue': sequence_info.get('source_maxvalue', None),
@@ -824,17 +815,21 @@ class Planner:
 
                 self.config_parser.print_log_message( 'INFO', f"planner: stdwf_prepare_tables: Counting rows in source table {table_info['table_name']}...")
                 self.source_connection.connect()
-                migration_limitation = None
-                limitations = self.migrator_tables.get_records_data_migration_limitation(table_info['table_name'])
-                if limitations:
-                    migration_limitation = limitations[0][0]
-                
+                ## the whole count is read first - a restriction can carry a row limit, which
+                ## decides whether it applies to this table at all
                 source_table_rows_all = self.source_connection.get_rows_count(
                     self.source_schema_name,
                     table_info['table_name'],
                     None
                 )
-                
+
+                migration_limitation = self.migrator_tables.resolve_data_migration_limitation({
+                    'source_schema_name': self.source_schema_name,
+                    'source_table_name': table_info['table_name'],
+                    'source_columns': source_columns,
+                    'source_table_rows_all': source_table_rows_all,
+                })
+
                 source_table_rows_limited = source_table_rows_all
                 if migration_limitation:
                     source_table_rows_limited = self.source_connection.get_rows_count(
@@ -1304,6 +1299,65 @@ class Planner:
         if added_count > 0:
             self.config_parser.print_log_message('INFO', f"planner: stdwf_ensure_parent_fk_indexes: Successfully auto-added {added_count} unique index(es) on parent tables for foreign keys.")
 
+    def default_value_pattern_for_function(self, src_func):
+        """
+        The pattern under which one entry of sql_functions_mapping is offered as a
+        substitution of a whole column default.
+
+        A row of default_values_substitution replaces the default of the column entirely, so
+        the pattern has to describe a default which IS that function and not one which merely
+        contains it. Unanchored, a mapping such as 'suser_name() -> current_user' collapsed a
+        default of "'[' + suser_name() + '@' + host_name() + ']'" to the bare 'current_user',
+        throwing away the brackets, the '@' and host_name() - and, because these rows carry
+        '(?i)' and are preferred by the ORDER BY of the lookup, it did so in front of a
+        whole-value substitution the user had written for exactly that default.
+
+        A function inside a larger expression is not the business of this table: every
+        connector translates the functions of a default token by token in its own
+        convert_default_value() / apply_sql_functions_mapping().
+
+        The parentheses a source writes around a default of its own - MS SQL stores
+        '(getdate())' - are part of the default and not of the function, so they are allowed
+        around it.
+        """
+        escaped_src_func = re.escape(str(src_func).strip())
+        return rf"(?i)^\(*\s*{escaped_src_func}\s*\)*$"
+
+    def promote_string_type_to_text(self, coltype, character_maximum_length):
+        """
+        The type a string column gets in the target: itself, or TEXT when the configuration
+        asks for the long ones to be migrated as TEXT.
+
+        A varchar column is governed by varchar_to_text_length and a char column by
+        char_to_text_length, and by nothing else. 'CHAR' is a substring of 'VARCHAR', so the
+        varchar family - univarchar and nvarchar among them, which are mapped to VARCHAR -
+        has to be recognised first and kept out of the char branch. Each limit guards its own
+        branch too: with only one of the two configured, the other branch compared the length
+        against its default of -1, which is true for every column, and turned a whole family
+        into TEXT although nothing asked for it.
+
+        A length below zero says the source reports no length for the column at all - a LOB,
+        or a type the mapping does not size - and such a column is TEXT whatever is configured.
+        """
+        if character_maximum_length < 0:
+            if self.source_connection.is_string_type(coltype) or any(t in coltype for t in ('CHAR', 'TEXT', 'STRING', 'CLOB', 'VARCHAR')):
+                return 'TEXT'
+            return coltype
+
+        if not self.source_connection.is_string_type(coltype):
+            return coltype
+
+        coltype_upper = coltype.upper()
+        varchar_to_text_length = self.config_parser.get_varchar_to_text_length()
+        char_to_text_length = self.config_parser.get_char_to_text_length()
+        if 'VARCHAR' in coltype_upper:
+            if varchar_to_text_length >= 0 and character_maximum_length >= varchar_to_text_length:
+                return 'TEXT'
+        elif 'CHAR' in coltype_upper:
+            if char_to_text_length >= 0 and character_maximum_length >= char_to_text_length:
+                return 'TEXT'
+        return coltype
+
     def convert_table_columns(self, settings):
         target_db_type = settings['target_db_type']
         source_db_type = settings['source_db_type']
@@ -1357,18 +1411,7 @@ class Planner:
                         else:
                             coltype = types_mapping.get(coltype, coltype).upper()
 
-                    if character_maximum_length < 0:
-                        if self.source_connection.is_string_type(coltype) or any(t in coltype for t in ('CHAR', 'TEXT', 'STRING', 'CLOB', 'VARCHAR')):
-                            coltype = 'TEXT'
-                    elif self.config_parser.get_varchar_to_text_length() >= 0 or self.config_parser.get_char_to_text_length() >= 0:
-                        if (self.source_connection.is_string_type(coltype)
-                            and 'VARCHAR' in coltype.upper()
-                            and character_maximum_length >= self.config_parser.get_varchar_to_text_length()):
-                            coltype = 'TEXT'
-                        elif (self.source_connection.is_string_type(coltype)
-                              and 'CHAR' in coltype.upper()
-                              and character_maximum_length >= self.config_parser.get_char_to_text_length()):
-                            coltype = 'TEXT'
+                    coltype = self.promote_string_type_to_text(coltype, character_maximum_length)
 
                 self.config_parser.print_log_message( 'DEBUG', f"planner: convert_table_columns: Column {column_info['column_name']} - using data type: {coltype}")
 
@@ -1831,15 +1874,17 @@ class Planner:
                         source_table_rows_all = data_migration_info.get('source_table_rows_all', 0)
                         source_table_rows_limited = data_migration_info.get('source_table_rows_limited', 0)
                     else:
-                        migration_limitation = None
-                        limitations = self.migrator_tables.get_records_data_migration_limitation(data_migration_info['source_table_name'])
-                        if limitations:
-                            migration_limitation = limitations[0][0]
                         source_table_rows_all = self.source_connection.get_rows_count(
                             data_migration_info['source_schema_name'],
                             data_migration_info['source_table_name'],
                             None
                         )
+                        migration_limitation = self.migrator_tables.resolve_data_migration_limitation({
+                            'source_schema_name': data_migration_info['source_schema_name'],
+                            'source_table_name': data_migration_info['source_table_name'],
+                            'source_columns': table_info.get('source_columns'),
+                            'source_table_rows_all': source_table_rows_all,
+                        })
                         source_table_rows_limited = source_table_rows_all
                         if migration_limitation:
                             source_table_rows_limited = self.source_connection.get_rows_count(
@@ -2370,17 +2415,19 @@ class Planner:
             target_schema_name = self.target_schema_name
             mapped_table = pair # Assuming 'pair' itself represents the mapped table info
 
-            migration_limitation = None
-            limitations = self.migrator_tables.get_records_data_migration_limitation(source_t)
-            if limitations:
-                migration_limitation = limitations[0][0]
-
             self.source_connection.connect()
             source_table_rows_all = self.source_connection.get_rows_count(
                 source_schema_name,
                 source_t,
                 None
             )
+
+            migration_limitation = self.migrator_tables.resolve_data_migration_limitation({
+                'source_schema_name': source_schema_name,
+                'source_table_name': source_t,
+                'source_columns': source_columns_map.get(source_t, []),
+                'source_table_rows_all': source_table_rows_all,
+            })
             
             source_table_rows_limited = source_table_rows_all
             if migration_limitation:
@@ -2468,10 +2515,12 @@ class Planner:
             self.config_parser.print_log_message('DEBUG3', f"planner: mapping_match_tables: Fetching source rows count for '{source_t}'")
             self.source_connection.connect()
             self.source_connection.connect()
-            migration_limitation = None
-            limitations = self.migrator_tables.get_records_data_migration_limitation(source_t)
-            if limitations:
-                migration_limitation = limitations[0][0]
+            migration_limitation = self.migrator_tables.resolve_data_migration_limitation({
+                'source_schema_name': self.source_schema_name,
+                'source_table_name': source_t,
+                'source_columns': source_columns_map.get(source_t, []),
+                'source_table_rows_all': source_table_rows_all,
+            })
             
             # Since this section only seems to be re-fetching or is redundant for the log message,
             # we'll fetch just limited for the message or rely on what's available

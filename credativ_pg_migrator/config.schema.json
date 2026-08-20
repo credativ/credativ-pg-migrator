@@ -186,8 +186,9 @@
         },
         "schema": {
           "type": "string",
+          "minLength": 1,
           "default": "migration",
-          "description": "Schema for the migrator metadata tables. Created if it does not exist."
+          "description": "Schema for the migrator metadata tables. Created if it does not exist. It must be a schema of its own: it is dropped with everything in it at the start of every run, so 'public' and an empty value are refused."
         },
         "indent": {
           "type": "string",
@@ -275,6 +276,17 @@
         "version": {
           "type": "string",
           "description": "Source server version. Normally detected at connect time and written back; set it only to override the detection."
+        },
+        "settings": {
+          "type": "object",
+          "description": "PostgreSQL settings applied to every session the migrator opens on the source, as name: value. Only for a PostgreSQL source - the settings of one side are never applied on the connection to the other. A name PostgreSQL does not know is reported as a warning and not applied.",
+          "additionalProperties": {
+            "type": [
+              "string",
+              "number",
+              "boolean"
+            ]
+          }
         },
         "connectivity": {
           "type": "string",
@@ -445,8 +457,9 @@
         },
         "schema": {
           "type": "string",
+          "minLength": 1,
           "default": "public",
-          "description": "Target schema. Synonym of 'owner' - set one, not both."
+          "description": "Target schema. Synonym of 'owner' - set one, not both. An empty value is refused: the objects of the migration would be created wherever the search_path happens to point."
         },
         "owner": {
           "type": "string",
@@ -454,7 +467,7 @@
         },
         "settings": {
           "type": "object",
-          "description": "PostgreSQL settings applied to every session the migrator opens on the target, as name: value. A name not on the allow-list is ignored.",
+          "description": "PostgreSQL settings applied to every session the migrator opens on the target, as name: value. Because every connection runs with them, 'role' is also the owner of every object created in the target - the login role has to be a member of it. 'role' is applied last, so a setting needing more rights is not blocked by the switch to it. A name PostgreSQL does not know is reported as a warning and not applied.",
           "additionalProperties": {
             "type": [
               "string",
@@ -1149,17 +1162,35 @@
         "array",
         "null"
       ],
-      "description": "Copies only part of a table. Each entry is exactly [table_name_or_pattern, condition, column_name_or_pattern] - the condition is used only for tables that match the pattern and really have the column. The condition is written without WHERE and may contain the placeholders {source_schema} and {source_table_name}. The key may also be left empty, which means the same as an empty list.",
+      "description": "Copies only part of a table. Each entry is [table_name_or_pattern, condition, column_name_or_pattern] and may carry a row limit as its fourth element - the condition is used only for tables that match the pattern, really have the column, and have more rows than the limit. The condition is written without WHERE and may contain the placeholders {source_schema_name} and {source_table_name}. Several entries matching one table are combined with AND. The key may also be left empty, which means the same as an empty list.",
       "items": {
         "type": "array",
         "minItems": 3,
-        "maxItems": 3,
-        "items": {
-          "type": "string"
-        },
-        "description": "[table_name_or_pattern, condition, column_name_or_pattern]"
+        "maxItems": 4,
+        "prefixItems": [
+          {
+            "type": "string",
+            "description": "table_name_or_pattern"
+          },
+          {
+            "type": "string",
+            "description": "condition, written without WHERE"
+          },
+          {
+            "type": "string",
+            "description": "column_name_or_pattern which has to exist in the table"
+          },
+          {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "row limit - the condition applies only to a table with more rows than this"
+          }
+        ],
+        "description": "[table_name_or_pattern, condition, column_name_or_pattern] with an optional row limit as the fourth element"
       },
-      "x-arity-note": "Exactly three elements. migrator_tables.py:307 unpacks three and the protocol table has three columns, so a fourth element - a row-count threshold - raises ValueError. The threshold is not implemented."
+      "x-arity-note": "Three elements, or four with the row limit. Anything else stops the run."
     },
     "target_partitioning": {
       "type": [

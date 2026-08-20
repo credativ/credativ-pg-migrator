@@ -15,6 +15,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import json
+import re
 import uuid
 import psycopg2
 import traceback
@@ -97,8 +98,16 @@ class MigratorTables:
             self.protocol_connection = ProtocolPostgresConnection(self.config_parser)
         else:
             raise ValueError(f"Unsupported database type for protocol table: {protocol_db_type}")
-        self.protocol_connection.connect()
         self.protocol_schema = self.config_parser.get_migrator_schema()
+        ## checked here as well, in front of the connection which would carry it out:
+        ## create_protocol() drops this schema with everything in it, and 'public' would take
+        ## the whole database with it. The configuration is checked at startup too - this is
+        ## the last gate before the DROP, and it is passed before anything is opened.
+        if not self.protocol_schema or not str(self.protocol_schema).strip():
+            raise ValueError("The schema of the migrator metadata (migrator -> schema) cannot be empty.")
+        if str(self.protocol_schema).strip().lower() == 'public':
+            raise ValueError("The schema of the migrator metadata (migrator -> schema) cannot be 'public' - it is dropped with everything in it at the start of every run.")
+        self.protocol_connection.connect()
         self.drop_table_sql = """DROP TABLE IF EXISTS "{protocol_schema}"."{table_name}";"""
 
     def create_all(self):
@@ -298,24 +307,25 @@ class MigratorTables:
         source_table_name TEXT,
         where_limitation TEXT,
         use_when_column_present TEXT,
+        row_limit INTEGER,
         inserted TIMESTAMP DEFAULT clock_timestamp()
         )
         """)
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: prepare_data_migration_limitation: Table data_migration_limitation created in schema {self.protocol_schema}")
 
         # Insert data into the table
-        for source_table_name, where_limitation, use_when_column_present in self.config_parser.get_data_migration_limitation():
+        for source_table_name, where_limitation, use_when_column_present, row_limit in self.config_parser.get_data_migration_limitation():
             self.protocol_connection.execute_query(f"""
             INSERT INTO "{self.protocol_schema}".data_migration_limitation
-            (source_table_name, where_limitation, use_when_column_present)
-            VALUES (%s, %s, %s)
-            """, (source_table_name, where_limitation, use_when_column_present))
+            (source_table_name, where_limitation, use_when_column_present, row_limit)
+            VALUES (%s, %s, %s, %s)
+            """, (source_table_name, where_limitation, use_when_column_present, row_limit))
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: prepare_data_migration_limitation: Data inserted into table data_migration_limitation in schema {self.protocol_schema}")
         self.apply_comments(['data_migration_limitation'])
 
     def get_records_data_migration_limitation(self, source_table_name):
         query = f"""
-        SELECT where_limitation, use_when_column_present
+        SELECT where_limitation, use_when_column_present, row_limit
         FROM "{self.protocol_schema}".data_migration_limitation
         WHERE trim('{source_table_name}') = trim(source_table_name)
         OR trim('{source_table_name}') ~ trim(source_table_name)
@@ -329,6 +339,114 @@ class MigratorTables:
             return result
         else:
             return None
+
+    @staticmethod
+    def limitation_column_names(source_columns):
+        """
+        The names of the columns of a table, whichever shape the caller holds them in: the
+        dictionary of the protocol tables ({order: {'column_name': ...}}), the list the mapping
+        workflow and the validator build, or plain names.
+        """
+        if not source_columns:
+            return []
+        entries = source_columns.values() if isinstance(source_columns, dict) else source_columns
+        names = []
+        for entry in entries:
+            if isinstance(entry, dict):
+                name = entry.get('column_name') or entry.get('name')
+            else:
+                name = entry
+            if name:
+                names.append(str(name))
+        return names
+
+    def resolve_data_migration_limitation(self, settings):
+        """
+        The condition which restricts the rows of one table, or '' when the table is migrated
+        whole. Every reader of data_migration_limitation asks this - the planner, the
+        orchestrator and the validator - so that the same entry cannot mean one thing while the
+        rows are counted and another while they are copied.
+
+        Three things decide whether an entry applies, and all three used to be skipped in the
+        planner and in the validator, which took the condition of the first matching row as it
+        stood:
+          - use_when_column_present: the column has to exist in the table. One condition can
+            then be written for a group of tables and only reaches those which have the column.
+          - row_limit: the table has to have more rows than the limit. It leaves the small
+            tables complete and thins out the large ones.
+          - the placeholders {source_schema_name} and {source_table_name} are substituted.
+        Several entries matching the same table are combined with AND.
+
+        settings: source_table_name, source_schema_name, source_columns, source_table_rows_all
+        """
+        source_table_name = settings['source_table_name']
+        source_schema_name = settings.get('source_schema_name') or ''
+        source_table_rows_all = settings.get('source_table_rows_all')
+
+        limitations = self.get_records_data_migration_limitation(source_table_name)
+        if not limitations:
+            return ''
+
+        column_names = self.limitation_column_names(settings.get('source_columns'))
+        conditions = []
+        for limitation in limitations:
+            where_clause = limitation[0]
+            use_when_column_present = limitation[1]
+            row_limit = limitation[2] if len(limitation) > 2 else None
+            if not where_clause:
+                continue
+
+            if row_limit is not None and source_table_rows_all is not None and source_table_rows_all <= row_limit:
+                self.config_parser.print_log_message('INFO',
+                    f"migrator_tables: resolve_data_migration_limitation: {source_table_name} has {source_table_rows_all} rows, "
+                    f"which does not exceed the limit {row_limit} of the restriction '{where_clause}' - the table is migrated whole.")
+                continue
+
+            if use_when_column_present and str(use_when_column_present).strip():
+                if not column_names:
+                    ## a caller which cannot say which columns the table has cannot decide this
+                    ## either - saying so is better than leaving the table restricted or whole
+                    ## without a word
+                    self.config_parser.print_log_message('WARNING',
+                        f"migrator_tables: resolve_data_migration_limitation: The columns of {source_table_name} are not known here, "
+                        f"so it cannot be checked whether it has the column '{use_when_column_present}' - the restriction "
+                        f"'{where_clause}' is not applied to it.")
+                    continue
+                matched_column = None
+                for column_name in column_names:
+                    if column_name == use_when_column_present:
+                        matched_column = column_name
+                        break
+                    try:
+                        if re.match(use_when_column_present, column_name):
+                            matched_column = column_name
+                            break
+                    except re.error as e:
+                        self.config_parser.print_log_message('WARNING',
+                            f"migrator_tables: resolve_data_migration_limitation: '{use_when_column_present}' is not a usable "
+                            f"regular expression ({e}) - the restriction '{where_clause}' is compared as a plain column name.")
+                        break
+                if not matched_column:
+                    self.config_parser.print_log_message('DEBUG',
+                        f"migrator_tables: resolve_data_migration_limitation: {source_table_name} has no column matching "
+                        f"'{use_when_column_present}' - the restriction '{where_clause}' does not apply to it.")
+                    continue
+                self.config_parser.print_log_message('DEBUG',
+                    f"migrator_tables: resolve_data_migration_limitation: {source_table_name}: column {matched_column} matches "
+                    f"'{use_when_column_present}' - the restriction '{where_clause}' applies.")
+
+            where_clause = (where_clause
+                            .replace('{source_schema_name}', source_schema_name)
+                            .replace('{source_table_name}', source_table_name))
+            if where_clause not in conditions:
+                conditions.append(where_clause)
+
+        if not conditions:
+            return ''
+        condition = ' AND '.join(conditions)
+        self.config_parser.print_log_message('INFO',
+            f"migrator_tables: resolve_data_migration_limitation: {source_table_name} is migrated with the restriction: {condition}")
+        return condition
 
     def prepare_remote_objects_substitution(self):
         # Drop table if exists
@@ -2858,6 +2976,7 @@ class MigratorTables:
             source_sequence_name TEXT,
             source_sequence_sql TEXT,
             source_start_value BIGINT,
+            source_last_value BIGINT,
             source_increment_by BIGINT,
             source_minvalue BIGINT,
             source_maxvalue BIGINT,
@@ -3054,20 +3173,21 @@ class MigratorTables:
             'source_sequence_name': row[7],
             'source_sequence_sql': row[8],
             'source_start_value': row[9],
-            'source_increment_by': row[10],
-            'source_minvalue': row[11],
-            'source_maxvalue': row[12],
-            'source_cache': row[13],
-            'source_is_cycled': row[14],
-            'source_sequence_comment': row[15],
-            'target_schema_name': row[16],
-            'target_table_name': row[17],
-            'target_column_name': row[18],
-            'target_column_data_type': row[19],
-            'target_sequence_name': row[20],
-            'target_sequence_sql': row[21],
-            'target_sequence_last_value': row[22],
-            'target_sequence_comment': row[23]
+            'source_last_value': row[10],
+            'source_increment_by': row[11],
+            'source_minvalue': row[12],
+            'source_maxvalue': row[13],
+            'source_cache': row[14],
+            'source_is_cycled': row[15],
+            'source_sequence_comment': row[16],
+            'target_schema_name': row[17],
+            'target_table_name': row[18],
+            'target_column_name': row[19],
+            'target_column_data_type': row[20],
+            'target_sequence_name': row[21],
+            'target_sequence_sql': row[22],
+            'target_sequence_last_value': row[23],
+            'target_sequence_comment': row[24]
         }
 
     def decode_trigger_row(self, row):
@@ -3615,17 +3735,17 @@ class MigratorTables:
         ## column of Sybase ASE is a NUMERIC of up to 38 digits and can report a value which
         ## no BIGINT column of the protocol can hold
         clamped, message = self.clamp_bigint_sequence_fields(
-            settings, ('source_start_value', 'source_increment_by', 'source_minvalue', 'source_maxvalue', 'source_cache', 'source_next_identity'))
+            settings, ('source_start_value', 'source_last_value', 'source_increment_by', 'source_minvalue', 'source_maxvalue', 'source_cache', 'source_next_identity'))
         if message:
             self.config_parser.print_log_message('WARNING', f"migrator_tables: insert_sequence: ({func_run_id}): sequence {settings.get('source_sequence_name') or settings.get('target_sequence_name')}: {message}")
 
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{protocol_table_name}"
-            (sequence_id, source_schema_name, source_table_name, source_column_name, source_column_data_type, source_is_identity, source_next_identity, source_sequence_name, source_sequence_sql, source_start_value, source_increment_by, source_minvalue, source_maxvalue, source_cache, source_is_cycled, source_sequence_comment, target_schema_name, target_table_name, target_column_name, target_column_data_type, target_sequence_name, target_sequence_sql, target_sequence_comment, message)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (sequence_id, source_schema_name, source_table_name, source_column_name, source_column_data_type, source_is_identity, source_next_identity, source_sequence_name, source_sequence_sql, source_start_value, source_last_value, source_increment_by, source_minvalue, source_maxvalue, source_cache, source_is_cycled, source_sequence_comment, target_schema_name, target_table_name, target_column_name, target_column_data_type, target_sequence_name, target_sequence_sql, target_sequence_comment, message)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (settings.get('sequence_id'), settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_column_name'), settings.get('source_column_data_type'), settings.get('source_is_identity'), clamped['source_next_identity'], settings.get('source_sequence_name'), settings.get('source_sequence_sql'), clamped['source_start_value'], clamped['source_increment_by'], clamped['source_minvalue'], clamped['source_maxvalue'], clamped['source_cache'], settings.get('source_is_cycled'), settings.get('source_sequence_comment'), settings.get('target_schema_name'), settings.get('target_table_name'), settings.get('target_column_name'), settings.get('target_column_data_type'), settings.get('target_sequence_name'), settings.get('target_sequence_sql'), settings.get('target_sequence_comment'), message)
+        params = (settings.get('sequence_id'), settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_column_name'), settings.get('source_column_data_type'), settings.get('source_is_identity'), clamped['source_next_identity'], settings.get('source_sequence_name'), settings.get('source_sequence_sql'), clamped['source_start_value'], clamped['source_last_value'], clamped['source_increment_by'], clamped['source_minvalue'], clamped['source_maxvalue'], clamped['source_cache'], settings.get('source_is_cycled'), settings.get('source_sequence_comment'), settings.get('target_schema_name'), settings.get('target_table_name'), settings.get('target_column_name'), settings.get('target_column_data_type'), settings.get('target_sequence_name'), settings.get('target_sequence_sql'), settings.get('target_sequence_comment'), message)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)

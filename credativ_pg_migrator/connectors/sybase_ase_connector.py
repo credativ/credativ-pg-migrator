@@ -4953,28 +4953,9 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
                     converted_code = re.sub(re.escape(source_obj), target_obj, converted_code, flags=re.IGNORECASE)
                     self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: convert_statement_code: Applied remote object substitution: {source_obj} -> {target_obj}")
 
-        # Pre-process Sybase specific join syntax
-        # *= -> = /* left_outer */
-        # =* -> = /* right_outer */
-        # Pre-process Sybase specific join syntax
-        # *= -> = /* left_outer */
-        # =* -> = /* right_outer */
-        converted_code = re.sub(r'\*=', '= /* left_outer */', converted_code)
-        converted_code = re.sub(r'=\*', '= /* right_outer */', converted_code)
-
-        # Remove 'noholdlock' hints (often interpreted as aliases)
-        converted_code = re.sub(r'\bnoholdlock\b', '', converted_code, flags=re.IGNORECASE)
+        converted_code = self.prepare_query_for_parsing(converted_code)
 
         converted_code = self._apply_udt_to_base_type_substitutions(converted_code, settings)
-
-        # Convert double-quoted string literals to single-quoted strings
-        # Sybase often allows "string" where PostgreSQL expects 'string' (which would otherwise parse as an identifier)
-        def replacer_dq(m):
-            inner = m.group(1)
-            inner = inner.replace("'", "''")
-            return f"'{inner}'"
-
-        converted_code = re.sub(r'"([^"]*)"', replacer_dq, converted_code)
 
         if settings['target_db_type'] == 'postgresql':
 
@@ -5050,6 +5031,36 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
         except ValueError as e:
             self.config_parser.print_log_message('ERROR', f"sybase_ase_connector: convert_view_code: {e}")
             return getattr(e, 'partial_code', settings['view_code'])
+
+    def prepare_query_for_parsing(self, query_code):
+        """
+        The statement rewritten into something a T-SQL parser can read, without converting
+        anything: this is what makes the constructs of Sybase ASE parseable at all.
+
+          '*=' and '=*' - the outer join of ASE written in the WHERE clause. No parser of any
+          other dialect knows them, so they become an equality carrying a marker which says
+          which side was outer; the conversion turns the marker into a LEFT / RIGHT JOIN.
+
+          'noholdlock' - a read hint which a parser reads as the alias of the table.
+
+          "text" - with quoted_identifier off, a double quoted literal is a STRING in ASE and
+          an identifier everywhere else.
+
+        It is used by convert_statement_code() and by the query conversion, which has to
+        classify the statement before it converts it - a statement which cannot be parsed
+        would be reported as unreadable although the conversion can do it.
+        """
+        if not query_code:
+            return query_code
+
+        prepared = re.sub(r'\*=', '= /* left_outer */', query_code)
+        prepared = re.sub(r'=\*', '= /* right_outer */', prepared)
+        prepared = re.sub(r'\bnoholdlock\b', '', prepared, flags=re.IGNORECASE)
+
+        def single_quote(match):
+            return "'" + match.group(1).replace("'", "''") + "'"
+
+        return re.sub(r'"([^"]*)"', single_quote, prepared)
 
     def query_conversion_supported(self):
         return True

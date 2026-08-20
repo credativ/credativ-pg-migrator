@@ -283,7 +283,7 @@ def split_statements(text, separator='auto', input_file=''):
         fragment_start = start + leading
         statement_text = fragment[leading:].rstrip()
         ## an indented statement keeps its indentation on the lines behind the first
-        if not statement_text.strip():
+        if not statement_text.strip() or is_only_comments(statement_text):
             continue
         ordinal += 1
         line_from = text.count('\n', 0, fragment_start) + 1
@@ -316,6 +316,20 @@ def keep_separator(text, boundaries, separator):
     if start < len(text) and (not kept or kept[-1][1] < len(text)):
         kept.append((start, len(text), None))
     return kept
+
+
+def is_only_comments(text):
+    """
+    Whether the fragment holds nothing but comments and whitespace.
+
+    A file of application statements begins with a header describing it, and the header is
+    followed by the separator like everything else. That is not a statement: reported as one
+    it would be counted, converted and answered with "the parser read no statement at all",
+    which says nothing to anybody.
+    """
+    without_block = re.sub(r'/\*.*?\*/', ' ', text, flags=re.DOTALL)
+    without_line = re.sub(r'(?m)--.*$', ' ', without_block)
+    return not without_line.strip()
 
 
 def statement_name(statement_text):

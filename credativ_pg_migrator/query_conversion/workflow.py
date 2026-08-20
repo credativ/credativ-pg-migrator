@@ -227,8 +227,12 @@ class QueryConverter:
         bind_parameters, parameter_warnings = parameters_module.extract(
             statement.text, self.config_parser.get_query_conversion_parameter_style())
 
+        ## the connector rewrites what no parser of its dialect can read - the '*=' outer
+        ## join of Sybase ASE - so that a statement its own conversion handles is not
+        ## reported as one the migrator cannot read
+        parse_text = source_connection.prepare_query_for_parsing(bind_parameters.conversion_statement)
         classification = classifier.classify(statement.text, self.source_db_type,
-                                             parse_text=bind_parameters.conversion_statement)
+                                             parse_text=parse_text)
         if classification.verdict == 'refused':
             result.status = SKIPPED
             result.reason = classification.reason

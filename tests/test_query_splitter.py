@@ -164,10 +164,35 @@ def test_crlf_and_a_byte_order_mark_are_read_like_anything_else():
     assert '\r' not in statements[1].text
 
 
+def test_a_fragment_which_is_only_comments_is_not_a_statement():
+    """
+    A file of application statements begins with a header describing it, and the header is
+    followed by the separator like everything else. Counted as a statement it would be
+    converted, and answered with "the parser read no statement at all".
+    """
+    text = ("-- =====================================\n"
+            "-- The queries of the reporting module\n"
+            "-- =====================================\n"
+            ";\n"
+            "SELECT 1;\n"
+            "/* and a block comment of its own */\n"
+            ";\n")
+    assert texts(text) == ['SELECT 1']
+
+
+def test_a_comment_above_a_statement_still_belongs_to_it():
+    """Only a fragment which holds nothing else is dropped."""
+    statements = split_statements("-- name: daily\n-- why: the daily report\nSELECT 1;")
+    assert len(statements) == 1
+    assert statements[0].name == 'daily'
+    assert 'SELECT 1' in statements[0].text
+
+
 def test_an_empty_file_holds_no_statement():
     assert texts('') == []
     assert texts('\n\n   \n') == []
     assert texts(';;;') == []
+    assert texts('-- nothing but a comment\n') == []
 
 
 def test_a_trailing_separator_does_not_add_an_empty_statement():

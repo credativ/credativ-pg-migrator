@@ -1288,6 +1288,20 @@ class DatabaseConnector(ABC):
         """
         pass
 
+    def prepare_query_for_parsing(self, query_code):
+        """
+        The statement of the source rewritten into something a SQL parser can read, without
+        converting anything.
+
+        Most sources need nothing here and the statement is answered as it is. A source whose
+        dialect holds constructs no parser models - the '*=' outer join of Sybase ASE is the
+        example - rewrites them into something equivalent which parses, so that the statement
+        can be classified before it is converted. A statement which cannot be parsed is
+        reported as one the migrator does not understand, and that answer must not be given
+        to a statement its own connector can convert.
+        """
+        return query_code
+
     def query_conversion_supported(self):
         """
         Whether this connector can convert a bare statement of its source for the target -

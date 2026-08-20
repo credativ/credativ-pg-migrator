@@ -62,16 +62,51 @@ SQLGLOT_DIALECTS = {
 ## Words which begin a statement that is not a read. Checked against the text itself, so
 ## that a statement the parser could not read is still refused rather than guessed at.
 WRITING_KEYWORDS = (
-    'INSERT', 'UPDATE', 'DELETE', 'MERGE', 'TRUNCATE', 'CREATE', 'ALTER', 'DROP',
-    'GRANT', 'REVOKE', 'EXEC', 'EXECUTE', 'CALL', 'SET', 'USE', 'BEGIN', 'COMMIT',
-    'ROLLBACK', 'LOCK',
+    ## the writes every dialect has
+    'INSERT', 'UPDATE', 'DELETE', 'MERGE', 'TRUNCATE', 'REPLACE', 'UPSERT',
+    ## the data definition, which stands in the same files as the queries
+    'CREATE', 'ALTER', 'DROP', 'RENAME', 'COMMENT', 'GRANT', 'REVOKE',
+    ## running something, which can do anything
+    'EXEC', 'EXECUTE', 'CALL', 'PREPARE', 'DEALLOCATE',
+    ## the session and the transaction, which change what everything behind them does
+    'SET', 'USE', 'BEGIN', 'START', 'END', 'COMMIT', 'ROLLBACK', 'SAVEPOINT', 'LOCK',
+    ## moving data in and out, and the maintenance of a database
+    'LOAD', 'UNLOAD', 'IMPORT', 'EXPORT', 'BULK', 'COPY', 'BACKUP', 'RESTORE', 'DUMP',
+    'FLUSH', 'ANALYZE', 'VACUUM', 'REINDEX', 'CLUSTER', 'REFRESH', 'REORG', 'RUNSTATS',
+    'PURGE', 'KILL', 'SHUTDOWN',
+    ## the cursor of an embedded program, and the LOB writes of Sybase ASE
+    'DECLARE', 'OPEN', 'FETCH', 'CLOSE', 'WRITETEXT', 'UPDATETEXT',
 )
 
 ## Functions which move a sequence on and therefore write, whatever the statement around
 ## them looks like.
 WRITING_FUNCTIONS = ('NEXTVAL', 'SETVAL', 'NEXTVAL_FOR', 'NEXT_VALUE_FOR')
 
+## The same, as the dialects write it when it is not a function call at all: Oracle and
+## Db2 read a sequence as the pseudo column 'sequence.NEXTVAL', MS SQL Server and Db2 write
+## 'NEXT VALUE FOR sequence'. Neither is a function, so neither is found in the parsed
+## statement - and both of them move the sequence on.
+SEQUENCE_ADVANCE = re.compile(r'(?i)\bNEXTVAL\b|\bNEXT\s+VALUE\s+FOR\b|\bPREVVAL\b')
+
 LOCKING_HINTS = ('HOLDLOCK', 'UPDLOCK', 'XLOCK', 'TABLOCKX', 'PAGLOCK', 'ROWLOCK')
+
+## The locking reads, as the dialects write them. The parsed statement says it too where a
+## parser models the clause - but 'FOR UPDATE' is not modelled in every dialect, and a
+## statement which takes row locks has to be refused whether or not it could be read.
+LOCKING_PHRASES = re.compile(r'(?i)\bFOR\s+UPDATE\b|\bFOR\s+SHARE\b'
+                             r'|\bFOR\s+NO\s+KEY\s+UPDATE\b'
+                             r'|\bLOCK\s+IN\s+SHARE\s+MODE\b|\bWITH\s+LOCK\b'
+                             r'|\bKEEP\s+(?:UPDATE|EXCLUSIVE|SHARE)\s+LOCKS\b')
+
+## The data change table reference of Db2: 'SELECT ... FROM FINAL TABLE (INSERT ...)'. The
+## statement begins with SELECT, gives back rows, and carries out the write inside it. No
+## parser of the migrator models it, so it is decided from the text.
+DATA_CHANGE_TABLE = re.compile(r'(?i)\bFROM\s+(FINAL|OLD|NEW)\s+TABLE\s*\(')
+
+## SELECT ... INTO, in the spellings which a parser cannot always read. 'INTO TEMP' and
+## 'INTO SCRATCH' of Informix create and fill a table; 'INTO :name' and 'INTO @name' read
+## into the host variable of an embedded program, which is not a statement of its own.
+SELECT_INTO_TARGET = re.compile(r'(?i)\bINTO\s+(TEMP|SCRATCH)\b|\bINTO\s+[:@][A-Za-z_]')
 
 NOLOCK_HINT = re.compile(r'(?i)\bWITH\s*\(\s*NOLOCK\s*\)|\bNOLOCK\b')
 
@@ -155,6 +190,76 @@ def check_written_words(text):
     return None
 
 
+def check_sequence_advance(text):
+    """
+    Gate 2 as well - a statement which reads a sequence, decided from the text.
+
+    Reading a sequence moves it on, so such a statement writes although it is a SELECT with
+    nothing else in it. Oracle and Db2 write it as a pseudo column ('seq.NEXTVAL'), which is
+    not a function call and cannot be found in the parsed statement at all.
+    """
+    match = SEQUENCE_ADVANCE.search(text)
+    if match:
+        return (f"gate 2: the statement reads a sequence ({match.group(0).strip()}), "
+                f"which moves it on - that is a write")
+    return None
+
+
+def check_select_into(text):
+    """
+    Gate 2 as well - the SELECT ... INTO spellings, decided from the text.
+
+    The parsed statement says it too, for the dialects a parser models. These two do not
+    reach the parse at all: 'INTO TEMP' of Informix is not modelled anywhere, and a host
+    variable is not SQL. Both of them have to be refused whether or not the statement parses -
+    the first creates and fills a table, the second is a fragment of an embedded program.
+    """
+    match = SELECT_INTO_TARGET.search(text)
+    if match:
+        target = re.sub(r'\s+', ' ', match.group(0)).strip()
+        if match.group(1):
+            return (f"gate 2: {target} creates and fills a table - it writes, although the "
+                    f"statement begins with SELECT")
+        return (f"gate 2: {target} reads into a host variable of an embedded SQL program - "
+                f"it is not a statement which can be run on its own")
+    return None
+
+
+def check_data_change_table(text):
+    """
+    Gate 2 as well - the data change table reference of Db2, decided from the text.
+
+    'SELECT order_id FROM FINAL TABLE (INSERT INTO orders ...)' begins with SELECT, gives
+    back rows and carries out the INSERT. It is the construct which looks the most like a
+    read of everything in this file.
+    """
+    match = DATA_CHANGE_TABLE.search(text)
+    if match:
+        return (f"gate 2: the statement reads from a {match.group(1).upper()} TABLE, so the "
+                f"INSERT, UPDATE or DELETE inside it is carried out - it writes, although it "
+                f"begins with SELECT")
+    return None
+
+
+def check_locking_hints(text):
+    """
+    Gate 2 as well - a statement which takes locks, decided from the text.
+
+    This one cannot wait for the parse: 'FROM orders o holdlock' is a hint written where a
+    parser expects a second alias, so the statement does not parse at all - and a statement
+    which locks has to be refused whether or not anything could read it. Refusing is the
+    safe direction: the worst a wrong hit costs is a statement reported as needing a look.
+    """
+    upper = text.upper()
+    for hint in LOCKING_HINTS:
+        if re.search(rf'\b{hint}\b', upper):
+            return f"gate 2: the statement takes locks ({hint})"
+    match = LOCKING_PHRASES.search(text)
+    if match:
+        return f"gate 2: the statement takes row locks ({re.sub(r'\s+', ' ', match.group(0)).upper()})"
+    return None
+
+
 def cte_is_select(cte):
     inner = cte.this
     return isinstance(inner, (exp.Select, exp.Union, exp.Except, exp.Intersect, exp.Subquery))
@@ -167,6 +272,11 @@ def parsed_is_select(expression):
     if isinstance(expression, (exp.Union, exp.Except, exp.Intersect)):
         return True
     if isinstance(expression, exp.Select):
+        return True
+    ## a bare VALUES is a statement of its own in Db2 and in PostgreSQL. It gives back the
+    ## rows written into it and touches nothing - the VALUES of an INSERT is part of that
+    ## INSERT and is refused with it, one node higher up.
+    if isinstance(expression, exp.Values):
         return True
     return False
 
@@ -237,11 +347,6 @@ def check_traps(expression, text, source_db_type=''):
     if argument(expression, 'locks'):
         return "gate 3: the statement takes row locks (FOR UPDATE / FOR SHARE)", warnings
 
-    upper = text.upper()
-    for hint in LOCKING_HINTS:
-        if re.search(rf'\b{hint}\b', upper):
-            return f"gate 3: the statement takes locks ({hint})", warnings
-
     ## a function which moves a sequence on writes, wherever it stands
     for function in expression.find_all(exp.Func):
         name = function_name(function)
@@ -278,6 +383,22 @@ def classify(text, source_db_type='', dialect=None, parse_text=None):
     written = check_written_words(text)
     if written:
         return Classification('refused', 2, written)
+
+    locking = check_locking_hints(text)
+    if locking:
+        return Classification('refused', 2, locking)
+
+    sequence = check_sequence_advance(text)
+    if sequence:
+        return Classification('refused', 2, sequence)
+
+    into = check_select_into(text)
+    if into:
+        return Classification('refused', 2, into)
+
+    data_change = check_data_change_table(text)
+    if data_change:
+        return Classification('refused', 2, data_change)
 
     read_dialect = dialect if dialect is not None else dialect_for(source_db_type)
     parsed_text = parse_text if parse_text is not None else text

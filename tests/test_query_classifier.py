@@ -71,6 +71,17 @@ def test_a_read_is_recognised_as_one(text):
     "COMMIT",
     "ROLLBACK",
     "LOCK TABLE t IN EXCLUSIVE MODE",
+    ## the writes which are not spelled the same way everywhere
+    "REPLACE INTO t (a) VALUES (1)",
+    "LOAD DATA INFILE '/tmp/x.csv' INTO TABLE t",
+    "UNLOAD TO '/tmp/x.unl' SELECT * FROM t",
+    "COPY t FROM '/tmp/x.csv'",
+    "TRUNCATE TABLE t",
+    "REFRESH TABLE mqt_orders",
+    "DECLARE c CURSOR FOR SELECT a FROM t",
+    "FETCH NEXT FROM c",
+    "START TRANSACTION",
+    "WRITETEXT t.notes @ptr 'x'",
 ])
 def test_a_statement_which_writes_is_refused(text):
     assert refuses(text), f"not refused: {text}"
@@ -119,6 +130,48 @@ def test_select_into_a_host_variable_is_refused():
     assert 'host variable' in result.reason
 
 
+@pytest.mark.parametrize('text,source', [
+    ("SELECT a, b FROM t WHERE c = 1 INTO TEMP work_table", 'informix'),
+    ("SELECT a FROM t INTO SCRATCH work_table", 'informix'),
+    ("SELECT a INTO :hostvar FROM t", 'ibm_db2_luw'),
+    ("SELECT a INTO @result FROM t", 'sql_anywhere'),
+])
+def test_select_into_is_refused_although_the_statement_does_not_parse(text, source):
+    """
+    'INTO TEMP' is modelled by no parser, and a host variable is not SQL - so neither
+    reaches the parsed statement. Both write, or are a fragment of a program, and have to be
+    refused whether or not anything could read them.
+    """
+    result = classify(text, source)
+    assert result.verdict == 'refused'
+    assert result.gate == 2
+
+
+@pytest.mark.parametrize('text', [
+    "SELECT order_id FROM FINAL TABLE (INSERT INTO orders (order_id) VALUES (1))",
+    "SELECT event_id FROM OLD TABLE (DELETE FROM customer_events WHERE event_id = 1)",
+    "SELECT a FROM NEW TABLE (UPDATE t SET a = 1)",
+])
+def test_a_data_change_table_reference_is_refused(text):
+    """
+    The Db2 construct which looks the most like a read: it begins with SELECT, it gives back
+    rows, and the write inside it is carried out.
+    """
+    result = classify(text, 'ibm_db2_luw')
+    assert result.verdict == 'refused'
+    assert result.gate == 2
+
+
+def test_a_bare_values_statement_is_a_read():
+    """It gives back the rows written into it and touches no table."""
+    assert classify("VALUES (1, 'ONE')", 'ibm_db2_luw').is_select
+    assert classify("VALUES (1), (2)", 'postgresql').is_select
+
+
+def test_the_values_of_an_insert_is_still_an_insert():
+    assert refuses("INSERT INTO t (a) VALUES (1)", 'ibm_db2_luw')
+
+
 def test_a_data_modifying_cte_is_refused():
     result = classify("WITH x AS (DELETE FROM t RETURNING *) SELECT * FROM x", 'postgresql')
     assert result.verdict == 'refused'
@@ -129,17 +182,38 @@ def test_a_data_modifying_cte_is_refused():
     ("SELECT a FROM t FOR UPDATE", 'oracle'),
     ("SELECT a FROM t HOLDLOCK", 'sybase_ase'),
     ("SELECT a FROM t WITH (UPDLOCK)", 'mssql'),
+    ## the clause is not modelled in every dialect - it still locks
+    ("SELECT a FROM t WHERE b = 1 FOR UPDATE", 'sql_anywhere'),
+    ("SELECT a FROM t FOR SHARE", 'postgresql'),
+    ("SELECT a FROM t LOCK IN SHARE MODE", 'mysql'),
+    ("SELECT a FROM t WITH LOCK", 'ibm_db2_luw'),
 ])
 def test_a_statement_which_locks_is_refused(text, source):
     assert refuses(text, source), f"not refused: {text}"
 
 
-@pytest.mark.parametrize('text', [
-    "SELECT nextval('s')",
-    "SELECT setval('s', 1)",
+def test_a_locking_hint_is_refused_although_the_statement_does_not_parse():
+    """
+    'FROM orders o holdlock' is a hint written where a parser expects a second alias, so
+    the statement cannot be read at all - and a statement which locks has to be refused
+    whether or not anything could read it.
+    """
+    result = classify("SELECT o.order_id FROM orders o holdlock WHERE o.order_id = 1", 'sybase_ase')
+    assert result.verdict == 'refused'
+    assert result.gate == 2
+
+
+@pytest.mark.parametrize('text,source', [
+    ("SELECT nextval('s')", 'postgresql'),
+    ("SELECT setval('s', 1)", 'postgresql'),
+    ## not a function call at all - the pseudo column of Oracle and Db2
+    ("SELECT seq_orders.NEXTVAL FROM DUAL", 'oracle'),
+    ("SELECT NEXT VALUE FOR seq_orders", 'mssql'),
+    ("SELECT PREVVAL FOR seq_orders FROM sysibm.sysdummy1", 'ibm_db2_luw'),
 ])
-def test_a_function_which_moves_a_sequence_on_is_refused(text):
-    assert refuses(text, 'postgresql'), f"not refused: {text}"
+def test_a_statement_which_moves_a_sequence_on_is_refused(text, source):
+    """Reading a sequence moves it on, so the statement writes."""
+    assert refuses(text, source), f"not refused: {text}"
 
 
 def test_two_statements_in_one_entry_are_refused():

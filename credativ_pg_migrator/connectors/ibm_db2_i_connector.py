@@ -14,7 +14,8 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-from credativ_pg_migrator.database_connector import DatabaseConnector
+from credativ_pg_migrator.database_connector import DatabaseConnector, first_line
+from credativ_pg_migrator.connectors.db2_query_conversion import Db2QueryConversion
 from credativ_pg_migrator.migrator_logging import MigratorLogger
 from credativ_pg_migrator.migrator_tables import MigratorTables
 import psycopg2
@@ -25,7 +26,7 @@ import glob
 import re
 import sqlglot
 
-class IbmDb2IConnector(DatabaseConnector):
+class IbmDb2IConnector(Db2QueryConversion, DatabaseConnector):
     """
     IBM DB2 for i (IBM i / AS/400) connector supporting DDL connectivity
     parsing DDL SQL files (with DB2 for i specific syntax like FOR SYSTEM NAME,
@@ -1004,28 +1005,6 @@ class IbmDb2IConnector(DatabaseConnector):
 
         self.config_parser.print_log_message('INFO', "ibm_db2_i_connector: parse_ddl_files: DDL parsing completed and unified protocol tables populated with DB2 for i source metadata.")
 
-    def get_sql_functions_mapping(self, settings):
-        target_db_type = settings['target_db_type']
-        if target_db_type == 'postgresql':
-            return {
-                "CURRENT SQLID": "CURRENT_USER",
-                "CURRENT USER": "CURRENT_USER",
-                "USER": "SESSION_USER",
-                "CURRENT DATE": "CURRENT_DATE",
-                "CURRENT TIME": "CURRENT_TIME",
-                "CURRENT TIMESTAMP": "CURRENT_TIMESTAMP",
-                "CURRENT SCHEMA": "CURRENT_SCHEMA",
-                "CURRENT SERVER": "current_database()",
-                "VARCHAR_FORMAT(": "to_char(",
-                "POSSTR(": "position(",
-                "LISTAGG(": "string_agg(",
-                "SUBSTR(": "substring(",
-                "VALUE(": "coalesce(",
-                "NVL(": "coalesce(",
-            }
-        else:
-            raise ValueError(f"Unsupported target database type: {target_db_type}")
-
     def fetch_table_names(self, table_schema: str):
         return self.fetch_all_tables(table_schema)
 
@@ -1764,7 +1743,18 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
         code = re.sub(r"(?i)\bCREATE\s+(?:OR\s+REPLACE\s+)?TABLE\b", "CREATE MATERIALIZED VIEW", code, count=1)
         return code
 
-    def convert_view_code(self, settings: dict):
+    def convert_statement_code(self, settings: dict):
+        """
+        One statement of the source converted for PostgreSQL, without a wrapper around it.
+
+        This is the conversion the query of a view is given - the system names and the CONCAT
+        operator of Db2 for i, LISTAGG, the functions, the special registers written without
+        parentheses and the names of the target schema. It is used for the query of a view and
+        for a statement of an application; 'view_code' carries the statement.
+
+        Raises ValueError when the statement cannot be parsed. The error carries the text as
+        far as the conversion got in its 'partial_code' attribute.
+        """
         cte_names = set()
 
         def quote_column_names(node):
@@ -1860,13 +1850,37 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
             return node
 
         def replace_functions(node):
+            ## The mapping is written the way it is applied to text - 'SUBSTR(' -> 'SUBSTRING('.
+            ## Here it is applied to a parsed function call, whose name carries no parenthesis,
+            ## so the keys are read without one: looking 'substr' up as 'substr(' never matched
+            ## anything and no function of Db2 for i was converted at all.
+            extracted = self.db2_date_part_to_extract(node)
+            if extracted is not node:
+                return extracted
             mapping = self.get_sql_functions_mapping({'target_db_type': settings['target_db_type']})
-            func_name_map = {k.lower(): v for k, v in mapping.items()}
+            func_name_map = {}
+            for source_name, target_name in mapping.items():
+                if source_name.endswith('()'):
+                    func_name_map[source_name[:-2].lower()] = target_name
+                elif source_name.endswith('('):
+                    func_name_map[source_name[:-1].lower()] = (
+                        target_name[:-1] if target_name.endswith('(') else target_name)
+                else:
+                    func_name_map[source_name.lower()] = target_name
 
             if isinstance(node, sqlglot.exp.Anonymous):
                 func_name = node.name.lower()
-                if func_name in func_name_map:
-                    mapped = func_name_map[func_name]
+                mapped = func_name_map.get(func_name)
+                if mapped:
+                    ## 'YEAR(x)' becomes 'EXTRACT(YEAR FROM x)', which is another node and not
+                    ## another name
+                    if mapped.upper().startswith('EXTRACT('):
+                        arguments = node.args.get("expressions")
+                        if arguments and len(arguments) == 1:
+                            return sqlglot.exp.Extract(
+                                this=sqlglot.exp.Identifier(this=func_name, quoted=False),
+                                expression=arguments[0])
+                        return node
                     node.set("this", sqlglot.exp.Identifier(this=mapped.strip('('), quoted=False))
             return node
 
@@ -1940,6 +1954,9 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
             )
 
             converted_code = self.convert_db2i_operators(converted_code)
+            ## the special registers, labelled durations, isolation clause and the other
+            ## constructs which no PostgreSQL parser can read - see db2_query_conversion.py
+            converted_code = self.prepare_query_for_parsing(converted_code)
 
             try:
                 # The 'db2' dialect is not supported by sqlglot, the code is read as 'postgres':
@@ -1948,15 +1965,24 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                 # adding explicit NULLS FIRST / NULLS LAST which inverts the original ordering.
                 parsed_code = sqlglot.parse_one(converted_code, read="postgres")
             except Exception as e:
-                self.config_parser.print_log_message('ERROR', f"ibm_db2_i_connector: convert_view_code: Error parsing View code: {e}")
-                return converted_code + check_option
+                ## no conversion of a statement which could not be read - what the caller does
+                ## with that is the caller's decision, and nothing here answers with a text
+                ## which was not converted as if it had been
+                error = ValueError(f"the statement could not be parsed: {first_line(e)}")
+                error.partial_code = converted_code + check_option
+                raise error
 
             # sqlglot does not raise on unknown syntax - it silently falls back to a plain
             # Command node. All transformations below would then be no-ops and the untranslated
             # DB2 for i code would be handed over to the target database, so this is reported here.
             if isinstance(parsed_code, sqlglot.exp.Command):
-                self.config_parser.print_log_message('ERROR', f"ibm_db2_i_connector: convert_view_code: View code contains syntax unsupported by the SQL parser, it is left unconverted: {converted_code}")
-                return converted_code + check_option
+                ## sqlglot does not raise on syntax it does not model - it answers with a plain
+                ## Command node. Every transformation below would be a no-op and the
+                ## untranslated code would be handed over as if it had been converted.
+                error = ValueError("the SQL parser does not model this statement of Db2 for i, "
+                                   "so none of the conversion was applied to it")
+                error.partial_code = converted_code + check_option
+                raise error
 
             for cte_node in parsed_code.find_all(sqlglot.exp.CTE):
                 if cte_node.alias_or_name:
@@ -1971,6 +1997,24 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
             converted_code = converted_code.replace("()()", "()")
             return converted_code + check_option
         return view_code
+
+    def db2_dialect_preparation(self, code):
+        """What Db2 for i adds: its system names, its CCSID clauses and its CONCAT operator."""
+        return self.convert_db2i_operators(self.strip_db2i_specific_clauses(code))
+
+    def convert_view_code(self, settings: dict):
+        """
+        The query of a view, converted for the target.
+
+        A statement which cannot be parsed keeps the text of the source, exactly as before:
+        the view is reported as failed by the migration and its source code stays readable
+        in the protocol.
+        """
+        try:
+            return self.convert_statement_code(settings)
+        except ValueError as e:
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_i_connector: convert_view_code: {e}")
+            return getattr(e, 'partial_code', settings['view_code'])
 
     def convert_funcproc_code(self, settings: dict):
         code = settings.get('code', '')

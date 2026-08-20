@@ -14,7 +14,8 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-from credativ_pg_migrator.database_connector import DatabaseConnector
+from credativ_pg_migrator.database_connector import DatabaseConnector, first_line
+from credativ_pg_migrator.connectors.db2_query_conversion import Db2QueryConversion
 from credativ_pg_migrator.migrator_logging import MigratorLogger
 import ibm_db_dbi  ## install ibm_db package to use this connector
 import traceback
@@ -23,7 +24,7 @@ import sqlglot
 import time
 import datetime
 
-class IbmDb2LuwConnector(DatabaseConnector):
+class IbmDb2LuwConnector(Db2QueryConversion, DatabaseConnector):
     def __init__(self, config_parser, source_or_target):
         if source_or_target != 'source':
             raise ValueError("IBM DB2 is only supported as a source database")
@@ -51,57 +52,6 @@ class IbmDb2LuwConnector(DatabaseConnector):
                 self.connection.close()
         except Exception as e:
             pass
-
-    def get_sql_functions_mapping(self, settings):
-        """ Returns a dictionary of SQL functions mapping for the target database """
-        target_db_type = settings['target_db_type']
-        if target_db_type == 'postgresql':
-            return {
-                # --- Special Registers (Session Variables) ---
-                "CURRENT SQLID": "CURRENT_USER",
-                "CURRENT USER": "CURRENT_USER",
-                "USER": "SESSION_USER",          # SESSION_USER tracks the original login role
-                "CURRENT DATE": "CURRENT_DATE",
-                "CURRENT TIME": "CURRENT_TIME",
-                "CURRENT TIMESTAMP": "CURRENT_TIMESTAMP",
-                "CURRENT SCHEMA": "CURRENT_SCHEMA",
-                "CURRENT SERVER": "current_database()",
-
-                # --- Null Handling & Control Flow ---
-                "VALUE(": "COALESCE(",
-                "IFNULL(": "COALESCE(",
-                "NVL(": "COALESCE(",
-
-                # --- String Functions ---
-                "SUBSTR(": "SUBSTRING(",
-                "POSSTR(": "STRPOS(",       # DB2's POSSTR takes (source, search)
-                "LOCATE(": "POSITION(",     # DB2's LOCATE takes (search, source)
-                "UCASE(": "UPPER(",
-                "LCASE(": "LOWER(",
-                "STRIP(": "TRIM(",
-                "LENGTH(": "LENGTH(",
-                "CONCAT(": "CONCAT(",
-                "VARCHAR_FORMAT(": "TO_CHAR(",
-                "TIMESTAMP_FORMAT(": "TO_TIMESTAMP(",
-                "LISTAGG(": "STRING_AGG(",
-
-                # --- Date and Time Functions ---
-                "YEAR(": "EXTRACT(YEAR FROM ",
-                "MONTH(": "EXTRACT(MONTH FROM ",
-                "DAY(": "EXTRACT(DAY FROM ",
-                "HOUR(": "EXTRACT(HOUR FROM ",
-                "MINUTE(": "EXTRACT(MINUTE FROM ",
-                "SECOND(": "EXTRACT(SECOND FROM ",
-
-                # --- Math & Numeric Functions ---
-                "CEILING(": "CEIL(",
-                "TRUNCATE(": "TRUNC(",
-                "RAND()": "RANDOM()",
-                "DECFLOAT(": "NUMERIC(",
-            }
-        else:
-            self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: get_sql_functions_mapping: Unsupported target database type: {target_db_type}")
-            return {}
 
     def migrate_sequences(self, target_connector, settings):
         return True
@@ -1321,8 +1271,18 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
             self.config_parser.print_log_message('ERROR', e)
             raise
 
-    def convert_view_code(self, settings: dict):
+    def convert_statement_code(self, settings: dict):
+        """
+        One statement of the source converted for PostgreSQL, without a wrapper around it.
 
+        This is the conversion the query of a view is given - LISTAGG, the functions of Db2,
+        the special registers written without parentheses, the labelled durations, the
+        isolation clause, and the names of the target schema. It is used for the query of a
+        view and for a statement of an application; 'view_code' carries the statement.
+
+        Raises ValueError when the statement cannot be parsed. The error carries the text as
+        far as the conversion got in its 'partial_code' attribute.
+        """
         cte_names = set()
 
         def quote_column_names(node):
@@ -1435,6 +1395,11 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
             return node
 
         def replace_functions(node):
+            ## YEAR(x) and its siblings are nodes of their own, not a function call carrying a
+            ## name - the mapping below cannot reach them
+            extracted = self.db2_date_part_to_extract(node)
+            if extracted is not node:
+                return extracted
             mapping = self.get_sql_functions_mapping({ 'target_db_type': settings['target_db_type'] })
             func_name_map = {}
             for k, v in mapping.items():
@@ -1585,6 +1550,9 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
 
                 # Clean trailing whitespace inside quoted identifiers (e.g. "MIGTEST ")
                 converted_code = re.sub(r'"([^"\s]+)\s+"', r'"\1"', converted_code)
+                ## the special registers, labelled durations, isolation clause and the other
+                ## constructs which no PostgreSQL parser can read - see db2_query_conversion.py
+                converted_code = self.prepare_query_for_parsing(converted_code)
                 # The 'db2' dialect is not supported by sqlglot, the code is read as 'postgres':
                 # DB2 sorts NULL values as the largest ones, exactly like PostgreSQL, while the
                 # default sqlglot dialect assumes the opposite and would compensate for it by
@@ -1596,9 +1564,14 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                     if cte_node.alias_or_name:
                         cte_names.add(cte_node.alias_or_name.upper())
             except Exception as e:
-                self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: convert_view_code: Error parsing View code: {e}")
-                # Fallback to the unparsed converted_code instead of empty string to avoid crashes
-                return converted_code
+                ## The statement could not be read, so there is no conversion of it. What the
+                ## caller does with that is the caller's decision - a view keeps its source
+                ## text and is reported as failed, a query of an application is reported as
+                ## NOT CONVERTED - but nothing here answers with a text which was not
+                ## converted as if it had been.
+                error = ValueError(f"the statement could not be parsed: {first_line(e)}")
+                error.partial_code = converted_code
+                raise error
 
             parsed_code = parsed_code.transform(quote_column_names)
             parsed_code = parsed_code.transform(convert_string_concatenation)
@@ -1614,6 +1587,20 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
             self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: convert_view_code: Unsupported target database type: {settings['target_db_type']}")
 
         return converted_code
+
+    def convert_view_code(self, settings: dict):
+        """
+        The query of a view, converted for the target.
+
+        A statement which cannot be parsed keeps the text of the source, exactly as before:
+        the view is reported as failed by the migration and its source code stays readable
+        in the protocol.
+        """
+        try:
+            return self.convert_statement_code(settings)
+        except ValueError as e:
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: convert_view_code: {e}")
+            return getattr(e, 'partial_code', settings['view_code'])
 
     def get_sequence_current_value(self, sequence_id: int):
         # Placeholder for fetching sequence current value

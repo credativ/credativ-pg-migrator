@@ -1,6 +1,6 @@
 # credativ-pg-migrator — test suite
 
-530 test functions in 34 files. **No test in this directory needs a database, a driver
+567 test functions in 35 files. **No test in this directory needs a database, a driver
 connection, or a network.** Everything that would talk to a server is either constructed
 with `Class.__new__(Class)` and fed a fake config, or replaced with `unittest.mock`. A
 full run touches nothing outside the repository and finishes in seconds.
@@ -35,7 +35,7 @@ tests, and no test depends on the order of the others.
 | group | needs | files |
 |---|---|---|
 | configuration & logging | `pyyaml`, `jsonschema`, `pytest` | the 5 `test_config_*` / `test_logging_*` / `test_object_*` files, and `test_schema_names.py` |
-| query conversion | `sqlglot`, `pytest` | the 4 `test_query_*` files, `test_db2_query_conversion.py` and `test_oracle_query_conversion.py` |
+| query conversion | `sqlglot`, `pytest` | the 4 `test_query_*` files and the `test_*_query_conversion.py` of Db2, Oracle and SQL Anywhere |
 | anonymization, Db2 CSV | nothing beyond the standard library | 3 files |
 | everything else | the package's own dependencies — `psycopg2`, `tabulate`, `jaydebeapi` | 19 files, `test_informix_query_conversion.py` and `test_mysql_query_conversion.py` among them |
 
@@ -561,6 +561,23 @@ cannot take it over. The constructs which stop the conversion, each with the rea
 and the names which only read like one. The five warnings. And the view path, which still
 wraps its `CREATE VIEW` and still keeps the text of the source when the statement cannot be
 parsed.
+
+### `test_sql_anywhere_query_conversion.py` — 37 functions, 55 tests
+
+**Purpose.** The dialect of SAP SQL Anywhere, which is read as T-SQL — and the two halves
+that follow from it. It needs no SQL Anywhere client, for the same reason the Oracle tests
+need no Oracle one.
+
+**Covers.** What a T-SQL parser cannot read at all, asserted the way the Db2 tests assert it:
+the statement is a read once it has been prepared and would not parse without it, and the
+preparation makes no write look like a read. `TOP n START AT m`, `IF … ENDIF` (including one
+inside a literal, which is text), `STRING()`, `COUNT()` and the pseudo functions written with
+a star. The `*=` outer join, which becomes a `LEFT JOIN` or a reported failure. Then what the
+parser reads and answers differently: `LOCATE`, whose arguments are the other way round, and
+`TIMESTAMP`, which is a date and a time there and a row version in T-SQL. The format of
+`DATEFORMAT` code by code, `LIST`, the constructs which stop the conversion, the `+` which
+concatenates — reported from the parsed statement, so that the '+' in the comment above a
+statement does not fire it — and the six entries of the function mapping which were defects.
 
 ### `test_query_conversion_workflow.py` — 27 functions, 31 tests
 

@@ -49,6 +49,7 @@ import sqlglot
 from sqlglot import exp
 
 from credativ_pg_migrator.database_connector import first_line
+from credativ_pg_migrator.query_conversion import outer_joins
 
 
 ## The format models of Oracle TRUNC(date, fmt) and the field PostgreSQL knows them by. A
@@ -201,68 +202,12 @@ class OracleQueryConversion:
         return sql
 
     def _convert_marked_outer_joins(self, expression):
-        """Rewrite comment-marked equality predicates in the WHERE clause into ANSI LEFT/RIGHT
-        JOINs. In sqlglot's model the extra comma-separated tables are implicit joins on the
-        SELECT, so the null-supplying table's implicit join becomes a LEFT JOIN; if that table is
-        the FROM anchor, the preserved table's join becomes a RIGHT JOIN instead. Returns
-        (expression, unconverted_count)."""
-        unconverted = 0
-        for select_node in expression.find_all(sqlglot.exp.Select):
-            where = select_node.args.get('where')
-            joins = select_node.args.get('joins') or []
-            if not where or not joins:
-                continue
-            join_by_alias = {}
-            for j in joins:
-                t = j.this
-                if t is not None and t.alias_or_name:
-                    join_by_alias[t.alias_or_name] = j
-            for eq in list(where.find_all(sqlglot.exp.EQ)):
-                if not eq.comments:
-                    continue
-                if self._stands_under_an_or(eq, where):
-                    ## A condition under an OR does not belong to the join alone: moving it
-                    ## into the ON clause makes it an AND of the join and leaves the other
-                    ## side of the OR behind, which answers other rows. Informix refuses the
-                    ## same shape for the same reason.
-                    unconverted += 1
-                    continue
-                if any('left_outer' in c for c in eq.comments):
-                    null_col, preserved_col = eq.right, eq.left
-                elif any('right_outer' in c for c in eq.comments):
-                    null_col, preserved_col = eq.left, eq.right
-                else:
-                    continue
-                if not isinstance(null_col, sqlglot.exp.Column) or not null_col.table:
-                    unconverted += 1
-                    continue
-                join_kind = 'LEFT'
-                target_join = join_by_alias.get(null_col.table)
-                if target_join is None and isinstance(preserved_col, sqlglot.exp.Column) and preserved_col.table:
-                    # null-supplying table is the FROM anchor - RIGHT JOIN the preserved table
-                    target_join = join_by_alias.get(preserved_col.table)
-                    join_kind = 'RIGHT'
-                if target_join is None:
-                    unconverted += 1
-                    continue
-                cond = eq.copy()
-                cond.comments = None
-                existing_on = target_join.args.get('on')
-                if existing_on is not None:
-                    cond = sqlglot.exp.And(this=existing_on, expression=cond)
-                target_join.set('kind', target_join.args.get('kind') or join_kind)
-                target_join.set('on', cond)
-                eq.replace(sqlglot.exp.Boolean(this=True))
-        return expression, unconverted
-
-    def _stands_under_an_or(self, node, boundary):
-        """Whether the node is one side of an OR somewhere below the given clause."""
-        parent = node.parent
-        while parent is not None and parent is not boundary:
-            if isinstance(parent, sqlglot.exp.Or):
-                return True
-            parent = parent.parent
-        return False
+        """
+        The marked conditions of the WHERE clause as the joins of PostgreSQL. The work is the
+        same for every dialect which writes its outer joins that way and stands in
+        query_conversion/outer_joins.py; only the marking of '(+)' above is Oracle.
+        """
+        return outer_joins.convert_marked_outer_joins(expression)
 
     def _strip_listagg_on_overflow(self, sql):
         """Remove Oracle LISTAGG's ON OVERFLOW clause, which has no PostgreSQL equivalent
@@ -318,11 +263,9 @@ class OracleQueryConversion:
             r"STRING_AGG(\1, \2 ORDER BY \3)",
             sql,
         )
-        # Tidy the boolean placeholders left by outer-join extraction (all semantics-preserving:
-        # "WHERE TRUE AND x" == "WHERE x", "x AND TRUE" == "x", "WHERE TRUE" == no filter).
-        sql = re.sub(r'(?i)\bWHERE\s+TRUE\s+AND\s+', 'WHERE ', sql)
-        sql = re.sub(r'(?i)\s+AND\s+TRUE\b', '', sql)
-        sql = re.sub(r'(?i)\s*\bWHERE\s+TRUE\b(?=\s*(?:;|\)|$|GROUP\s+BY|ORDER\s+BY|HAVING|LIMIT|UNION|INTERSECT|EXCEPT))', '', sql)
+        # Tidy the boolean placeholders left by outer-join extraction - the same ones the
+        # conversion of the marked joins leaves behind for every dialect which writes them
+        sql = outer_joins.tidy_boolean_placeholders(sql)
         return sql
 
     ## ------------------------------------------------------------------ the rewrites

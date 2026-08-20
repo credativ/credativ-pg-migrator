@@ -15,6 +15,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 from credativ_pg_migrator.database_connector import DatabaseConnector
+from credativ_pg_migrator.connectors.sql_anywhere_query_conversion import SqlAnywhereQueryConversion
 from credativ_pg_migrator.migrator_logging import MigratorLogger
 import sqlanydb
 import pyodbc
@@ -24,7 +25,7 @@ import time
 import datetime
 import re
 
-class SQLAnywhereConnector(DatabaseConnector):
+class SQLAnywhereConnector(SqlAnywhereQueryConversion, DatabaseConnector):
     def __init__(self, config_parser, source_or_target):
         if source_or_target != 'source':
             raise ValueError("SQL Anywhere is only supported as a source database")
@@ -55,59 +56,6 @@ class SQLAnywhereConnector(DatabaseConnector):
                 self.connection.close()
         except Exception as e:
             pass
-
-    def get_sql_functions_mapping(self, settings):
-        """ Returns a dictionary of SQL functions mapping for the target database """
-        target_db_type = settings.get('target_db_type', 'postgresql')
-        if target_db_type == 'postgresql':
-            return {
-                'current timestamp': 'CURRENT_TIMESTAMP',
-                'current_timestamp': 'CURRENT_TIMESTAMP',
-                'timestamp': 'CURRENT_TIMESTAMP',
-                'current date': 'CURRENT_DATE',
-                'current_date': 'CURRENT_DATE',
-                'current time': 'CURRENT_TIME',
-                'current_time': 'CURRENT_TIME',
-                'current user': 'CURRENT_USER',
-                'current_user': 'CURRENT_USER',
-                'last user': 'CURRENT_USER',
-                'current publisher': 'CURRENT_USER',
-                'getutcdate()': "timezone('UTC', now())",
-                'getdate()': 'CURRENT_TIMESTAMP',
-                'now()': 'CURRENT_TIMESTAMP',
-                'today()': 'CURRENT_DATE',
-                'user_name()': 'CURRENT_USER',
-                'user_id()': 'CURRENT_USER',
-                'user': 'CURRENT_USER',
-                'year(': 'extract(year from ',
-                'month(': 'extract(month from ',
-                'day(': 'extract(day from ',
-                'len(': 'length(',
-                'length(': 'length(',
-                'isnull(': 'coalesce(',
-                'ifnull(': 'coalesce(',
-                'string(': 'concat(',
-                'charindex(': 'position(',
-                'locate(': 'position(',
-                'stuff(': 'overlay(',
-                'dateformat(': 'to_char(',
-                'datepart(yyyy,': "date_part('year',",
-                'datepart(year,': "date_part('year',",
-                'datepart(month,': "date_part('month',",
-                'datepart(yy,': "date_part('year',",
-                'datepart(qq,': "date_part('quarter',",
-                'datepart(mm,': "date_part('month',",
-                'datepart(dy,': "date_part('doy',",
-                'datepart(dd,': "date_part('day',",
-                'datepart(wk,': "date_part('week',",
-                'datepart(hh,': "date_part('hour',",
-                'datepart(mi,': "date_part('minute',",
-                'datepart(ss,': "date_part('second',",
-                'datepart(ms,': "date_part('milliseconds',",
-            }
-        else:
-            self.config_parser.print_log_message('ERROR', f"sql_anywhere_connector: get_sql_functions_mapping: Unsupported target database type: {target_db_type}")
-            return {}
 
     def migrate_sequences(self, target_connector, settings):
         """
@@ -1947,56 +1895,6 @@ class SQLAnywhereConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"sql_anywhere_connector: fetch_view_code: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
-
-    def convert_view_code(self, settings: dict):
-        view_code = settings.get('view_code')
-        if not view_code:
-            return view_code
-
-        source_schema = settings.get('source_schema_name', '')
-        target_schema = settings.get('target_schema_name', 'public')
-
-        # 1. Strip source schema qualification: "DBA". -> ""
-        if source_schema:
-            view_code = re.sub(rf"(?i)\"{re.escape(source_schema)}\"\.", "", view_code)
-
-        # 2. Strip double quotes from function calls e.g. "COUNT"( -> count(
-        view_code = re.sub(r'"([A-Za-z0-9_]+)"\s*\(', r'\1(', view_code)
-
-        # 3. Convert empty COUNT() -> count(*)
-        view_code = re.sub(r"(?i)\bCOUNT\s*\(\s*\)", "count(*)", view_code)
-
-        # 4. Convert IF cond THEN val1 ELSE val2 ENDIF -> CASE WHEN cond THEN val1 ELSE val2 END
-        view_code = re.sub(r"(?i)\bIF\s+(.+?)\s+THEN\s+(.+?)\s+ELSE\s+(.+?)\s+ENDIF\b", r"CASE WHEN \1 THEN \2 ELSE \3 END", view_code)
-
-        # 5. Convert LIST(expr, sep ...) -> string_agg(expr::text, sep ...)
-        view_code = re.sub(r"(?i)\bLIST\s*\(\s*([^\s,]+)\s*,", r"string_agg(\1::text,", view_code)
-
-        # 6. Convert SELECT TOP N -> SELECT ... LIMIT N
-        def replace_top(match):
-            top_n = match.group(1)
-            rest = match.group(2)
-            return f"SELECT {rest} LIMIT {top_n}"
-
-        view_code = re.sub(r"(?i)\bSELECT\s+TOP\s+(\d+)\s+(.+?)(?=\)|\s*$)", replace_top, view_code, flags=re.DOTALL)
-
-        # 7. Convert boolean comparisons: "is_active" = 1 -> "is_active" = true
-        view_code = re.sub(r'is_active"\s*=\s*1\b', 'is_active" = true', view_code)
-        view_code = re.sub(r'is_active"\s*=\s*0\b', 'is_active" = false', view_code)
-
-        # 8. Fix recursive CTE string concatenation type matching
-        view_code = re.sub(r"as\s+varchar\s*\(\s*500\s*\)", "as text", view_code, flags=re.IGNORECASE)
-
-        # 9. Apply standard function mappings
-        view_code = self.apply_sql_functions_mapping(view_code, settings)
-
-        # 10. Ensure CREATE OR REPLACE VIEW
-        if not view_code.lower().startswith("create"):
-            view_code = "CREATE OR REPLACE VIEW " + view_code
-        else:
-            view_code = re.sub(r"(?i)^CREATE\s+(MATERIALIZED\s+)?VIEW", "CREATE OR REPLACE VIEW", view_code)
-
-        return view_code
 
     def get_sequence_current_value(self, sequence_id: int):
         pass

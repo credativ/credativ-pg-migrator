@@ -870,6 +870,7 @@ def build_comments_catalog(config_parser):
             'source_table_name': 'The table the restriction applies to. It is compared as a name and as a regular expression, so one entry can cover a group of tables.',
             'where_limitation': 'The condition added to the reading of the table - only the rows satisfying it are migrated.',
             'use_when_column_present': 'The column which has to exist for the restriction to be used. It lets one condition be written for a group of tables while it only applies to those which really have the column.',
+            'row_limit': 'The number of rows a table has to exceed before the restriction is used on it - it leaves the small tables complete and thins out the large ones. Empty means the restriction is used whatever the size of the table.',
             'inserted': 'When the entry was read out of the configuration. The table is rewritten at the beginning of every run.',
         },
     }

@@ -36,6 +36,9 @@ class PostgreSQLConnector(DatabaseConnector):
         # Names of collations usable in this database - filled on first use, see
         # get_existing_collation_names()
         self.existing_collation_names = None
+        ## must be there before prepare_session_settings() runs - it opens a connection of its
+        ## own, and connect() applies whatever is prepared already
+        self.session_settings = ""
         self.session_settings = self.prepare_session_settings()
 
     def connect(self):
@@ -43,6 +46,30 @@ class PostgreSQLConnector(DatabaseConnector):
         self.connection = psycopg2.connect(connection_string, application_name=MigratorConstants.get_application_name())
         self.connection.autocommit = True
         self._register_type_casters()
+        self.apply_session_settings()
+
+    def apply_session_settings(self):
+        """
+        Apply the session settings of the configuration to the connection just opened.
+
+        This is done here, and not by the callers, because every connection has to run with
+        them - the short lived ones which create a single object as much as the workers which
+        copy the data. The role is the owner of everything a connection creates, so a
+        connection which is opened without it leaves an object behind owned by the login role
+        of the connection instead. Before this, the settings were executed in the handful of
+        places which had been patched to do it, and user defined types, domains, sequences,
+        triggers, comments, default values, the pre- and post-migration scripts and the whole
+        mapping workflow created their objects without them.
+        """
+        if not self.session_settings:
+            return
+        try:
+            with self.connection.cursor() as cursor:
+                cursor.execute(self.session_settings)
+            self.config_parser.print_log_message('DEBUG3', f"postgresql_connector: apply_session_settings: Applied on the {self.source_or_target} connection: {self.session_settings}")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: apply_session_settings: Error applying the session settings '{self.session_settings}' on the {self.source_or_target} connection: {e}")
+            raise
 
     def _register_type_casters(self):
         try:
@@ -2654,8 +2681,9 @@ class PostgreSQLConnector(DatabaseConnector):
                 self.config_parser.print_log_message('DEBUG3', f"postgresql_connector: insert_batch: Worker {worker_id}: Insert query: {insert_query_str}")
                 self.connection.autocommit = False
                 try:
-                    if self.session_settings:
-                        cursor.execute(self.session_settings)
+                    ## the session settings were applied when the connection was opened and
+                    ## hold for the whole session - repeating them for every batch only cost
+                    ## a round trip
                     self.config_parser.print_log_message('DEBUG3', f"postgresql_connector: insert_batch: Worker {worker_id}: Starting psycopg2.extras.execute_batch into {target_table_name} with {len(data)} rows")
 
                     psycopg2.extras.execute_batch(cursor, insert_query, data)
@@ -3534,33 +3562,48 @@ class PostgreSQLConnector(DatabaseConnector):
 
     def prepare_session_settings(self):
         """
-        Prepare session settings for the database connection.
+        The SET statements of the session settings of this connection, as one string.
+
+        The settings are read from the section of the configuration this connection belongs
+        to - the settings of the target are not applied on the connection to the source, and a
+        PostgreSQL source can carry its own.
+
+        A name is compared against pg_settings without regard to case, so 'Role' or 'WORK_MEM'
+        are the settings they name and not a KeyError. A name PostgreSQL does not know is
+        reported instead of being dropped in silence. 'role' is applied last: a setting which
+        needs more rights than the role has must be set before the switch to it.
         """
         filtered_settings = ""
         try:
-            settings = self.config_parser.get_target_db_session_settings()
+            settings = self.config_parser.get_db_session_settings(self.source_or_target)
             if not settings:
-                self.config_parser.print_log_message('INFO', "postgresql_connector: prepare_session_settings: No session settings found in config file.")
+                self.config_parser.print_log_message('INFO', f"postgresql_connector: prepare_session_settings: No session settings in the configuration for the {self.source_or_target} database.")
                 return filtered_settings
-            # self.config_parser.print_log_message('INFO', f"postgresql_connector: prepare_session_settings: Preparing session settings: {settings} / {settings.keys()} / {tuple(settings.keys())}")
             self.connect()
             cursor = self.connection.cursor()
             lower_keys = tuple(k.lower() for k in settings.keys())
             cursor.execute("SELECT name FROM (SELECT name FROM pg_settings UNION ALL SELECT name FROM (VALUES('role')) as t(name) ) a WHERE lower(a.name) IN %s", (lower_keys,))
-            matching_settings = cursor.fetchall()
+            known_names = [row[0].lower() for row in cursor.fetchall()]
             cursor.close()
             self.disconnect()
-            if not matching_settings:
+
+            unknown_names = [name for name in settings.keys() if str(name).lower() not in known_names]
+            if unknown_names:
+                self.config_parser.print_log_message('WARNING', f"postgresql_connector: prepare_session_settings: The {self.source_or_target} database does not know the setting(s) {unknown_names} - they are not applied. Check the spelling against pg_settings.")
+
+            accepted_names = [name for name in settings.keys() if str(name).lower() in known_names]
+            ## the order of the configuration is kept, with 'role' moved to the end
+            accepted_names.sort(key=lambda name: str(name).lower() == 'role')
+            if not accepted_names:
                 self.config_parser.print_log_message('INFO', "postgresql_connector: prepare_session_settings: No settings found to prepare.")
                 return filtered_settings
 
-            for setting in matching_settings:
-                setting_name = setting[0]
-                if setting_name in ['search_path']:
+            for setting_name in accepted_names:
+                if str(setting_name).lower() == 'search_path':
                     filtered_settings += f"SET {setting_name} = {settings[setting_name]};"
                 else:
                     filtered_settings += f"SET {setting_name} = '{settings[setting_name]}';"
-            self.config_parser.print_log_message('INFO', f"postgresql_connector: prepare_session_settings: Session settings: {filtered_settings}")
+            self.config_parser.print_log_message('INFO', f"postgresql_connector: prepare_session_settings: Session settings of the {self.source_or_target} database: {filtered_settings}")
             return filtered_settings
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"postgresql_connector: prepare_session_settings: Error preparing session settings: {e}")

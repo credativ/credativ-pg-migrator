@@ -62,8 +62,21 @@ ddl = connector.convert_funcproc_code(settings)
 print(ddl)
 
 # Assertions to verify correct commenting out
+#
+# The routine selects rows and returns a status code at the same time. The rows are what
+# the function answers with (RETURNS TABLE / RETURN QUERY); the status code cannot be
+# returned next to them - PostgreSQL refuses "RETURN cannot have a parameter in function
+# returning set" - so it is commented out instead of being emitted as invalid code.
+#
+# '@@rowcount' itself is translated before this: it becomes a declared variable filled by
+# GET DIAGNOSTICS, so the commented out statement names that variable and not the global
+# variable of Sybase.
+commented_return = "/* RETURN locvar_rowcount; -- Sybase ASE construct which cannot be used in PostgreSQL */"
 assert "RETURNS TABLE" in ddl, "Expected RETURNS TABLE clause"
 assert "RETURN QUERY" in ddl, "Expected RETURN QUERY statement"
-assert "/* RETURN @@rowcount; -- Sybase ASE construct which cannot be used in PostgreSQL */" in ddl, "Expected commented out return statement"
-assert "return @@rowcount;" not in ddl.replace("/* RETURN @@rowcount; -- Sybase ASE construct which cannot be used in PostgreSQL */", ""), "Expected plain return statement to be commented out"
+assert "GET DIAGNOSTICS locvar_rowcount = ROW_COUNT;" in ddl, "Expected @@rowcount to be translated to GET DIAGNOSTICS"
+assert commented_return in ddl, "Expected commented out return statement"
+assert "@@rowcount" not in ddl, "Expected no untranslated Sybase global variable"
+rest = ddl.replace(commented_return, "")
+assert "return locvar_rowcount;" not in rest.lower(), "Expected plain return statement to be commented out"
 print("Unit test passed successfully!")

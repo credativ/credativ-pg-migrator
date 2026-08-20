@@ -1,3 +1,5 @@
+import fnmatch
+import re
 import unittest
 from unittest.mock import MagicMock, patch
 from credativ_pg_migrator.planner import Planner
@@ -17,6 +19,22 @@ def build_planner(source_extensions=None, target_extensions=None, target_availab
     mock_config.get_required_extensions.return_value = list(configured or [])
     mock_config.get_include_tables.return_value = include_tables or ['.*']
     mock_config.get_exclude_tables.return_value = exclude_tables or []
+
+    ## the planner asks is_object_selected(), which answers (selected, reason) - a bare
+    ## MagicMock answers with something which cannot be unpacked into the two. The patterns
+    ## are read the way the configuration reads them by default: as globs.
+    def matches(pattern, object_name):
+        return re.fullmatch(fnmatch.translate(str(pattern).strip()), str(object_name), re.IGNORECASE)
+
+    def is_object_selected(object_kind, object_name):
+        for pattern in (exclude_tables or []):
+            if matches(pattern, object_name):
+                return False, f'excluded by exclude_tables: {pattern}'
+        for pattern in (include_tables or ['*']):
+            if matches(pattern, object_name):
+                return True, None
+        return False, 'not matched by include_tables'
+    mock_config.is_object_selected.side_effect = is_object_selected
     mock_config.should_migrate_indexes.return_value = True
     mock_config.should_migrate_constraints.return_value = True
     mock_config.should_migrate_triggers.return_value = True

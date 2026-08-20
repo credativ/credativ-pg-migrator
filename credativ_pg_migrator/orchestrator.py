@@ -409,12 +409,6 @@ class Orchestrator:
             worker_source_connection.connect()
             worker_target_connection.connect()
 
-            if getattr(worker_source_connection, 'session_settings', None):
-                worker_source_connection.execute_query(worker_source_connection.session_settings)
-
-            if getattr(worker_target_connection, 'session_settings', None):
-                worker_target_connection.execute_query(worker_target_connection.session_settings)
-
             chunk_size = -1
             try:
                 chunk_size = self.config_parser.get_chunk_size()
@@ -462,6 +456,14 @@ class Orchestrator:
                     break
                 settings['chunk_number'] += 1
 
+            ## read while the source is still connected - the sequence of the target has to
+            ## continue behind the value the source would have given the next row, exactly as
+            ## in the standard workflow
+            try:
+                next_identity = worker_source_connection.get_table_next_identity(table_data['source_schema_name'], table_data['source_table_name'])
+            except Exception as e:
+                next_identity = None
+                self.config_parser.print_log_message('WARNING', f"orchestrator: mapping_data_worker: Worker {worker_id}: Next identity value of {table_data['source_schema_name']}.{table_data['source_table_name']} could not be read from the source ({e}) - the sequences are set from the data in the target.")
             worker_source_connection.disconnect()
 
             # sequences setting
@@ -471,13 +473,31 @@ class Orchestrator:
             self.config_parser.print_log_message('INFO', f"orchestrator: mapping_data_worker: Worker {worker_id}: Setting sequences for table {target_table_name} in target database.")
             sequences = worker_target_connection.fetch_table_sequences(target_schema_name, target_table_name)
             if sequences:
+                ## the next identity value describes the identity column of the table and no
+                ## other sequence of it - the same rule as in table_worker
+                table_identity_columns = self.table_identity_columns(table_data)
                 for order_num, sequence_details in sequences.items():
                     sequence_id = sequence_details['id']
                     sequence_name = sequence_details['name']
                     column_name = sequence_details['column_name']
-                    sequence_sql = sequence_details['set_sequence_sql']
+                    source_column = self.find_source_column(table_data, column_name)
+                    if table_identity_columns:
+                        use_next_identity = self.is_identity_column(source_column)
+                    else:
+                        use_next_identity = len(sequences) == 1
+                    sequence_next_identity = next_identity if use_next_identity else None
+
+                    ## the sequence continues behind the greater of the two - the value the
+                    ## source reported and the data which really is in the target
+                    sequence_sql = worker_target_connection.get_set_sequence_sql({
+                        'target_schema_name': target_schema_name,
+                        'target_table_name': target_table_name,
+                        'target_column_name': column_name,
+                        'target_sequence_name': sequence_name,
+                        'source_next_identity': sequence_next_identity,
+                    })
                     self.migrator_tables.insert_sequence(
-                        self.sequence_protocol_settings(table_data, sequence_details, sequence_sql, None))
+                        self.sequence_protocol_settings(table_data, sequence_details, sequence_sql, sequence_next_identity))
                     self.config_parser.print_log_message( 'DEBUG', f"orchestrator: mapping_data_worker: Worker {worker_id}: Setting sequence with SQL: {sequence_sql}")
                     try:
                         worker_target_connection.execute_query(sequence_sql)
@@ -1034,10 +1054,6 @@ class Orchestrator:
             part_name = 'connect target'
             worker_target_connection.connect()
 
-            if worker_target_connection.session_settings:
-                self.config_parser.print_log_message( 'DEBUG', f"orchestrator: table_worker: Worker {worker_id}: Executing session settings: {worker_target_connection.session_settings}")
-                worker_target_connection.execute_query(worker_target_connection.session_settings)
-
             if ((settings['create_tables'] and not settings['resume_after_crash'])
                 or (settings['resume_after_crash'] and settings['drop_unfinished_tables'])
                 or (settings['resume_after_crash'] and not worker_target_connection.target_table_exists(target_schema_name, target_table_name))):
@@ -1510,22 +1526,15 @@ class Orchestrator:
                         'source_table_rows_all': table_data.get('source_table_rows_all', 0)
                     }
 
-                    rows_migration_limitations = settings['migrator_tables'].get_records_data_migration_limitation(table_data['source_table_name'])
-                    migration_limitations = []
-                    if rows_migration_limitations:
-                        self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Found data migration limitations matching table {target_table_name}: {rows_migration_limitations}")
-                        for limitation in rows_migration_limitations:
-                            where_clause = limitation[0]
-                            where_clause = where_clause.replace('{source_schema_name}', table_data['source_schema_name']).replace('{source_table_name}', table_data['source_table_name'])
-                            use_when_column_name = limitation[1]
-                            for col_order_num, column_info in table_data['source_columns'].items():
-                                column_name = column_info['column_name']
-                                if column_name == use_when_column_name or re.match(use_when_column_name, column_name):
-                                    self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Column {column_name} matches migration limitation.")
-                                    migration_limitations.append(where_clause)
-                        if migration_limitations:
-                            table_settings['migration_limitation'] = f"{' AND '.join(migration_limitations)}" if migration_limitations else ''
-                            self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Migration limitations for table {target_table_name}: {migration_limitations}")
+                    migration_limitation = settings['migrator_tables'].resolve_data_migration_limitation({
+                        'source_schema_name': table_data['source_schema_name'],
+                        'source_table_name': table_data['source_table_name'],
+                        'source_columns': table_data['source_columns'],
+                        'source_table_rows_all': table_data.get('source_table_rows_all'),
+                    })
+                    if migration_limitation:
+                        table_settings['migration_limitation'] = migration_limitation
+                        self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Migration limitation for table {target_table_name}: {migration_limitation}")
 
                     while True:
                         if self.config_parser.pause_migration_fired():
@@ -1906,10 +1915,6 @@ class Orchestrator:
 
             worker_target_connection.connect()
 
-            if worker_target_connection.session_settings:
-                self.config_parser.print_log_message( 'DEBUG', f"orchestrator: index_worker: Worker {worker_id}: Executing session settings: {worker_target_connection.session_settings}")
-                worker_target_connection.execute_query(worker_target_connection.session_settings)
-
             worker_target_connection.execute_query(create_index_sql)
             self.config_parser.print_log_message('INFO', f"orchestrator: index_worker: Worker {worker_id}: Index '{index_name}' created successfully.")
 
@@ -2016,10 +2021,6 @@ class Orchestrator:
                 query = f'''SET SESSION search_path TO {constraint_data['target_schema_name']};'''
 
                 worker_target_connection.execute_query(query)
-
-                if worker_target_connection.session_settings:
-                    self.config_parser.print_log_message( 'DEBUG', f"orchestrator: constraint_worker: Worker {worker_id}: Executing session settings: {worker_target_connection.session_settings}")
-                    worker_target_connection.execute_query(worker_target_connection.session_settings)
 
                 creation_try = 0
                 while True:
@@ -2139,10 +2140,6 @@ class Orchestrator:
                         if converted_code is not None and converted_code.strip():
                             self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_funcprocs: Creating {funcproc_type} {funcproc_data['name']} in target database.")
                             self.target_connection.connect()
-
-                            if self.target_connection.session_settings:
-                                self.config_parser.print_log_message( 'DEBUG', f"orchestrator: run_migrate_funcprocs: Executing session settings: {self.target_connection.session_settings}")
-                                self.target_connection.execute_query(self.target_connection.session_settings)
 
                             self.target_connection.execute_query(converted_code)
 
@@ -2291,8 +2288,6 @@ class Orchestrator:
             # Autocommit so a failed retry DDL does not poison later existence checks.
             if hasattr(target_conn, 'connection') and target_conn.connection is not None:
                 target_conn.connection.autocommit = True
-            if target_conn.session_settings:
-                target_conn.execute_query(target_conn.session_settings)
 
             object_groups = [
                 ('view', 'Views', self.migrator_tables.fetch_all_views, self.migrator_tables.decode_view_row,
@@ -2375,6 +2370,9 @@ class Orchestrator:
         if not present and mode == 'retry' and has_ddl:
             was_retried = True
             try:
+                ## connect() applies the session settings, but this connection is long lived and
+                ## the RESET below puts search_path back to what the session started with - a
+                ## configured search_path is set again here for the object about to be created
                 if target_conn.session_settings:
                     target_conn.execute_query(target_conn.session_settings)
                 target_conn.execute_query(f'SET search_path TO "{schema}"')
@@ -2419,10 +2417,6 @@ class Orchestrator:
             # Each worker uses its own separate connection to the target database
             worker_target_connection = self.load_connector('target')
             worker_target_connection.connect()
-
-            if worker_target_connection.session_settings:
-                self.config_parser.print_log_message( 'DEBUG', f"orchestrator: view_worker: Worker {worker_id}: Executing session settings for {view_type_str}: {worker_target_connection.session_settings}")
-                worker_target_connection.execute_query(worker_target_connection.session_settings)
 
             query = f'''SET SESSION search_path TO {view_detail['target_schema_name']};'''
             worker_target_connection.execute_query(query)

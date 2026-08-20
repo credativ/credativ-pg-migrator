@@ -210,9 +210,6 @@ as well, so the two lists cannot disagree.
   it is not applied to the column matching.
 - **`scheduled_actions.timer_hours`** is not implemented — only `datetime` is
   evaluated.
-- **`data_migration_limitation`** takes exactly three elements per entry. A
-  fourth one — a row-count threshold — is not implemented and raises
-  `ValueError` at startup.
 - **`target_partitioning.date_range: day`** is accepted but creates no
   partitions; only `year`, `month` and `week` do.
 

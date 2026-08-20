@@ -43,7 +43,7 @@ The following top-level keys must be present: `migrator`, `source`, `target`.
 | `data_types_substitution` | list of 5-element lists \| null |  |  | Replaces the data type the migrator would choose. Each entry is [table_name, column_name, source_data_type, target_data_type, comment]. table_name, column_name and source_data_type are individually optional - leave them '' - but at least one must be given, normally column_name or source_data_type. The source type is matched as an exact value, then as a LIKE pattern, then as a regex; matching is case-insensitive and a regex wins over LIKE. The target type is mandatory and is written out exactly as given, length included. The key may also be left empty, which means the same as an empty list. |
 | `default_values_substitution` | list of 4-element lists \| null |  |  | Replaces the DEFAULT clause of a column. Each entry is [column_name, source_column_data_type, source_default_value, target_default_value]. The replacement is written into the DDL as it stands, so a string literal inside it uses single apostrophes; doubling them is needed only inside a YAML value quoted with apostrophes, which YAML undoes again. A value readable only with halved apostrophes is corrected with a warning. The key may also be left empty, which means the same as an empty list. |
 | `remote_objects_substitution` | list of 2-element lists \| null |  |  | Rewrites references to objects living in another database, which PostgreSQL cannot express. Each entry is [source_object, target_object] and is applied as a plain search and replace over the converted code. The key may also be left empty, which means the same as an empty list. |
-| `data_migration_limitation` | list of 3-element lists \| null |  |  | Copies only part of a table. Each entry is exactly [table_name_or_pattern, condition, column_name_or_pattern] - the condition is used only for tables that match the pattern and really have the column. The condition is written without WHERE and may contain the placeholders {source_schema} and {source_table_name}. The key may also be left empty, which means the same as an empty list. (Exactly three elements. migrator_tables.py:307 unpacks three and the protocol table has three columns, so a fourth element - a row-count threshold - raises ValueError. The threshold is not implemented.) |
+| `data_migration_limitation` | list of lists \| null |  |  | Copies only part of a table. Each entry is [table_name_or_pattern, condition, column_name_or_pattern] and may carry a row limit as its fourth element - the condition is used only for tables that match the pattern, really have the column, and have more rows than the limit. The condition is written without WHERE and may contain the placeholders {source_schema_name} and {source_table_name}. Several entries matching one table are combined with AND. The key may also be left empty, which means the same as an empty list. (Three elements, or four with the row limit. Anything else stops the run.) |
 | `target_partitioning` | list of entries \| null |  |  | Creates the target table partitioned, whether or not the source table was. One entry per table. The key may also be left empty, which means the same as an empty list. |
 | [`validation`](#validation) | block |  |  | Post-migration data-integrity check, run by the --validate switch instead of a migration. |
 | [`mapping`](#mapping) | block |  |  | Settings of the 'mapping' workflow, which matches existing target objects onto existing source objects and copies only data. |
@@ -97,7 +97,7 @@ PostgreSQL database in which the migrator keeps its own metadata tables. Usually
 | `username` | string |  |  | **required**. Login role. |
 | `password` | string |  |  | **required**. Password for the login role. |
 | `database` | string |  |  | **required**. Database holding the migrator metadata tables. |
-| `schema` | string |  | `migration` | **required**. Schema for the migrator metadata tables. Created if it does not exist. |
+| `schema` | string |  | `migration` | **required**. Schema for the migrator metadata tables. Created if it does not exist. It must be a schema of its own: it is dropped with everything in it at the start of every run, so 'public' and an empty value are refused. |
 | `indent` | string |  |  | String used as one indentation level when the migrator formats generated PL/pgSQL. Defaults to the value of MigratorConstants.get_default_indent(). |
 | `sslmode` | string | `disable`, `allow`, `prefer`, `require`, `verify-ca`, `verify-full` | `prefer` | sslmode of the PostgreSQL connection URI. |
 
@@ -119,6 +119,7 @@ The database being migrated away from.
 | `schema` | string |  | `public` | Source schema. For sqlite the only valid values are 'main' and the name of an attached database. Synonym of 'owner' - set one, not both. |
 | `owner` | string |  |  | Synonym of 'schema', for engines that call it the owner. Read only when 'schema' is absent. |
 | `version` | string |  |  | Source server version. Normally detected at connect time and written back; set it only to override the detection. |
+| `settings` | map |  |  | PostgreSQL settings applied to every session the migrator opens on the source, as name: value. Only for a PostgreSQL source - the settings of one side are never applied on the connection to the other. A name PostgreSQL does not know is reported as a warning and not applied. |
 | `connectivity` | string | `jdbc`, `odbc`, `native`, `ddl` |  | How the source is reached. 'native' needs no further sub-block. 'jdbc' and 'odbc' take the sub-block of the same name. 'ddl' reads the objects from script files instead of a live database. |
 | `connection_string_options` | string |  |  | only for `mssql`. Extra options appended to the connection string, as 'key1=value1;key2=value2'. Currently used only by MS SQL Server over JDBC. Repeated semicolons are cleaned up. |
 | [`jdbc`](#sourcejdbc) | block |  |  | JDBC driver for connectivity: jdbc. |
@@ -202,9 +203,9 @@ The PostgreSQL database being migrated into.
 | `username` | string |  |  | **required**. Login role. Needs the rights to create the target schema and its objects. |
 | `password` | string |  |  | **required**. Password for the login role. |
 | `database` | string |  |  | **required**. Target database. Must already exist. |
-| `schema` | string |  | `public` | **required**. Target schema. Synonym of 'owner' - set one, not both. |
+| `schema` | string |  | `public` | **required**. Target schema. Synonym of 'owner' - set one, not both. An empty value is refused: the objects of the migration would be created wherever the search_path happens to point. |
 | `owner` | string |  |  | Synonym of 'schema'. Read only when 'schema' is absent. |
-| `settings` | map |  |  | PostgreSQL settings applied to every session the migrator opens on the target, as name: value. A name not on the allow-list is ignored. |
+| `settings` | map |  |  | PostgreSQL settings applied to every session the migrator opens on the target, as name: value. Because every connection runs with them, 'role' is also the owner of every object created in the target - the login role has to be a member of it. 'role' is applied last, so a setting needing more rights is not blocked by the switch to it. A name PostgreSQL does not know is reported as a warning and not applied. |
 | `sslmode` | string | `disable`, `allow`, `prefer`, `require`, `verify-ca`, `verify-full` | `prefer` | sslmode of the PostgreSQL connection URI. |
 
 ---

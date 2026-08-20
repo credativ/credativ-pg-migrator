@@ -136,10 +136,12 @@ migration:
 # MIGRATING ONLY PART OF THE DATA
 # Each entry is
 #   ["table regex", "condition without WHERE", "column that must exist", row limit]
-# The condition is applied only to tables that match the pattern AND contain
-# the named column, and only when the table has more rows than the limit - so
-# one entry can thin out the history tables and leave the small reference
-# tables complete. {source_schema} and {source_table_name} are substituted.
+# The row limit is optional - an entry of three elements restricts the table
+# whatever its size. The condition is applied only to tables that match the
+# pattern AND contain the named column, and only when the table has more rows
+# than the limit - so one entry can thin out the history tables and leave the
+# small reference tables complete. {source_schema_name} and {source_table_name}
+# are substituted. Several entries matching one table are combined with AND.
 # >>> ADJUST - delete or replace, these will match nothing in your schema
 # ---------------------------------------------------------------------------
 # data_migration_limitation:

@@ -35,6 +35,7 @@ import os
 import threading
 import time
 
+from credativ_pg_migrator import identifier_case
 from credativ_pg_migrator.constants import MigratorConstants
 from credativ_pg_migrator.database_connector import first_line
 from credativ_pg_migrator.migrator_logging import MigratorLogger
@@ -413,6 +414,22 @@ class QueryConverter:
 
         result.warnings.extend(answer.get('warnings') or [])
         converted = bind_parameters.to_numbered(answer['code'])
+
+        ## The names in the statement, spelled the way names_case_handling spelled the objects
+        ## of the target. Without this a statement of a Sybase ASE or MS SQL Server
+        ## application came out as SELECT "C"."ID" FROM "CUSTOMERS" - the identifiers of the
+        ## source, in quotes - while the migration created `customers`, and the target test
+        ## answered `relation "CUSTOMERS" does not exist`. It is the same repair the views
+        ## were given and the same shared transformation; the $1..$n of the bind parameters
+        ## are not identifiers and are left alone.
+        converted, case_ok = identifier_case.convert_identifiers(
+            converted, self.config_parser.convert_names_case, self.source_db_type)
+        if not case_ok:
+            result.warnings.append(
+                f"the converted statement could not be read as PostgreSQL when the case of its "
+                f"names was to be applied, so they are spelled as the conversion wrote them. "
+                f"With names_case_handling: {self.config_parser.get_names_case_handling()} they "
+                f"may name objects which are spelled differently in the target.")
 
         ## gate 4 - what is about to be sent has to be a read as well
         after = classifier.classify_converted(converted)

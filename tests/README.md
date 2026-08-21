@@ -652,6 +652,30 @@ in the WHERE clause, the `TRUE` left behind is taken out, and a condition standi
 shows is one of the cases. Then `TOP`, the `+`, the function mapping, the schema replacement,
 and the gates in this dialect.
 
+### `test_identifier_case.py` — 47 tests
+
+**Purpose.** The names inside a converted statement, spelled the way the target has them —
+the other half of `names_case_handling`. The tables and columns are created the way the
+setting says; a view's defining query names those objects, so the name in the query has to be
+the name the object got. Three of the twelve connectors did that and nine did not.
+
+**Covers.** What is converted: tables, columns, the aliases they name each other by, output
+aliases (which are the columns of the view), and the names a common table expression
+introduces together with its column list. What is not: the target **schema**, which comes from
+the configuration; the names of functions, which belong to PostgreSQL; the data types; the
+keywords; and everything inside a string literal, which is data. That names come out
+delimited, which is what makes `upper` work at all — bare `CUSTOMERS` folds to `customers` on
+PostgreSQL and would not be found. How each source folds an undelimited name before the
+setting is applied: Db2 and Oracle to upper, Informix and PostgreSQL to lower, the
+Transact-SQL family, MySQL and SQLite as written — so `keep` keeps the name the object really
+has, not the case the DDL was typed in. That a statement which cannot be read as PostgreSQL is
+answered exactly as it came in, because a name changed by a search and replace inside a text
+nobody could parse is not a conversion. The bind parameters of an application statement
+(`$1`…`$n`) are not identifiers and survive the whole round trip. And the matrix the repair was
+measured against: **every connector, both settings**, asserting the table is named as the
+target has it and the schema was not converted — a connector whose driver is not installed is
+skipped by name.
+
 ### `test_names_case_handling.py` — 47 tests
 
 **Purpose.** `names_case_handling`, and the rule the whole migrator follows about names.

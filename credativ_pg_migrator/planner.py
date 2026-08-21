@@ -17,6 +17,7 @@
 import os
 import importlib
 from credativ_pg_migrator.migrator_logging import MigratorLogger
+from credativ_pg_migrator import identifier_case
 from credativ_pg_migrator.migrator_tables import MigratorTables
 from credativ_pg_migrator.constants import MigratorConstants
 import fnmatch
@@ -1556,6 +1557,33 @@ class Planner:
             f"dropping the same object twice and reporting the second one as 'already exists'. "
             f"Use names_case_handling: keep, or rename the objects which clash.")
 
+    def convert_view_identifier_case(self, converted_view_sql, source_view_name):
+        """
+        The identifiers of a converted view, spelled the way names_case_handling made the
+        objects they name.
+
+        A statement which cannot be read as PostgreSQL is answered exactly as it came in and
+        reported: the conversion of a view is allowed to fail, and a view whose text no parser
+        understands is one the user has to look at anyway. What must not happen is a guess -
+        a name changed by a search and replace inside a text nobody could parse would be the
+        kind of quiet damage this migrator treats as a bug.
+        """
+        if not converted_view_sql or not converted_view_sql.strip():
+            return converted_view_sql
+        converted, ok = identifier_case.convert_identifiers(
+            converted_view_sql,
+            self.config_parser.convert_names_case,
+            self.config_parser.get_source_db_type())
+        if not ok:
+            self.config_parser.print_log_message(
+                'WARNING', f"planner: stdwf_prepare_views: the converted query of view "
+                           f"{source_view_name} could not be read as PostgreSQL, so the case of "
+                           f"the names in it was left as the conversion wrote it. With "
+                           f"names_case_handling: {self.config_parser.get_names_case_handling()} "
+                           f"it may name objects which are spelled differently in the target.")
+            return converted_view_sql
+        return converted
+
     def stdwf_prepare_views(self):
         self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_views: Preparing views...")
         # if self.source_db_config.get('connectivity') == 'ddl':
@@ -1623,6 +1651,16 @@ class Planner:
                     for row in rows:
                         self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_views: Views - remote objects substituting {row[0]} with {row[1]}")
                         converted_view_sql = re.sub(re.escape(row[0]), row[1], converted_view_sql, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
+
+                ## The names inside the query, spelled the way the target has them. Three of
+                ## the twelve connectors did this themselves and nine did not - ms_sql and
+                ## sybase_ase wrote the identifiers of the source in double quotes, so a view
+                ## of a migration with `lower` asked for "CUSTOMERS" while the table is
+                ## `customers`, and the other seven wrote them bare, which is right for
+                ## `lower` and wrong for `upper` and for `keep` over a mixed case source. It
+                ## is one transformation for all of them now - see identifier_case.py.
+                converted_view_sql = self.convert_view_identifier_case(
+                    converted_view_sql, view_info['view_name'])
 
                 self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_views: Converted view SQL: {converted_view_sql}")
                 self.migrator_tables.insert_view({

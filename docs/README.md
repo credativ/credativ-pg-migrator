@@ -945,6 +945,20 @@ or rename the objects which clash.
 
 With `keep` nothing can collapse, so the check is skipped.
 
+**The names inside a converted view follow the setting too.** A view's defining query names the
+tables and columns of the target, so those names have to be the ones the migration gave them.
+This is applied to every connector in one place, after its own conversion has run — the schema
+is left exactly as configured, and the functions, the data types and the contents of string
+literals are not names this migration gave anything, so they are not touched. Undelimited names
+are folded the way the source folds them before the setting is applied: `SELECT * FROM customers`
+against Db2 or Oracle reads the table `CUSTOMERS`, and `keep` has to keep *that*, not the case
+someone happened to type. The same transformation is applied to the statements `--convert-queries`
+converts, where the bind parameters (`$1`…`$n`) are not identifiers and are left alone.
+
+A converted query which cannot be read as PostgreSQL is left exactly as the conversion wrote it
+and reported — a name changed by a search and replace inside a text nobody could parse is not a
+conversion.
+
 Treat the migration database as read‑only metadata. You can query it freely for analysis, but avoid modifying its tables directly unless instructed by the tool’s maintainers.
 
 ---

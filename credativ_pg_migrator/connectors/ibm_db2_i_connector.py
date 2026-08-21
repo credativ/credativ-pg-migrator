@@ -1437,7 +1437,7 @@ class IbmDb2IConnector(Db2QueryConversion, DatabaseConnector):
 
         target_table_name = self.config_parser.convert_names_case(target_table_name)
         converted_trigger_name = self.config_parser.convert_names_case(trigger_name)
-        func_name = f"{converted_trigger_name}_func"
+        func_name = self.config_parser.convert_names_case(f"{converted_trigger_name}_func")
 
         if for_each_scope == 'STATEMENT' or timing == 'AFTER':
             return_stmt = "RETURN NULL;"

@@ -652,7 +652,7 @@ in the WHERE clause, the `TRUE` left behind is taken out, and a condition standi
 shows is one of the cases. Then `TOP`, the `+`, the function mapping, the schema replacement,
 and the gates in this dialect.
 
-### `test_identifier_case.py` — 47 tests
+### `test_identifier_case.py` — 60 tests
 
 **Purpose.** The names inside a converted statement, spelled the way the target has them —
 the other half of `names_case_handling`. The tables and columns are created the way the
@@ -675,6 +675,16 @@ nobody could parse is not a conversion. The bind parameters of an application st
 measured against: **every connector, both settings**, asserting the table is named as the
 target has it and the schema was not converted — a connector whose driver is not installed is
 skipped by name.
+
+Then the routines and the triggers, which are the other place a name of the target is written.
+That `NEW`, `OLD`, `TG_OP` and their siblings are **not** renamed — they are variables of
+PL/pgSQL and are folded to lower case whatever the setting says — while the *field* of such a
+record is the column of the table the trigger is on and does follow it. That a trigger names its
+function, the table it is on and everything in its body the way the target has them, in both
+settings, and that the schema is still left alone. That the trigger and the function it calls
+always agree, because a trigger which names a function nobody created is not created either. And
+that no connector builds the name of a trigger function without the case handling — seven of
+them did, and `"TR_AUDITSALES_func"` was consistent and still a name nobody meant.
 
 ### `test_names_case_handling.py` — 47 tests
 

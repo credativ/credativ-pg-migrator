@@ -4148,7 +4148,10 @@ class SybaseASEConnector(DatabaseConnector):
                 f"sybase_ase_connector: convert_trigger: Trigger {trigger_name}: {plain_returns} plain RETURN statement(s) converted to 'RETURN {returned_record}' - a trigger function of PostgreSQL cannot return without a value.")
 
         # 7. Assemble DDL
-        pg_func = f"""CREATE OR REPLACE FUNCTION "{target_schema_name}"."{trigger_name}_func"()
+        ## the whole generated name follows the case handling, not only the part which came
+        ## from the trigger - "TR_X_func" is consistent but reads like a defect
+        trigger_function_name = self.config_parser.convert_names_case(f"{trigger_name}_func")
+        pg_func = f"""CREATE OR REPLACE FUNCTION "{target_schema_name}"."{trigger_function_name}"()
 RETURNS trigger AS $$
 DECLARE
 {chr(10).join(declarations)}
@@ -4162,7 +4165,7 @@ $$ LANGUAGE plpgsql;
         pg_trigger = f"""CREATE TRIGGER "{trigger_name}"
 AFTER {pg_events} ON "{target_schema_name}"."{target_table_name}"
 FOR EACH ROW
-EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
+EXECUTE FUNCTION "{target_schema_name}"."{trigger_function_name}"();
 """
         return pg_func + '\n' + pg_trigger
 

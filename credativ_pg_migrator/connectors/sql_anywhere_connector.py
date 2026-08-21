@@ -1750,7 +1750,7 @@ class SQLAnywhereConnector(SqlAnywhereQueryConversion, DatabaseConnector):
             target_trigger_name = self.config_parser.convert_names_case(trigger_name)
             ## the name of the function is the name of the trigger, which is unique per schema
             ## in the source, and is cut to the length PostgreSQL stores
-            function_name = f"{target_trigger_name}_trigfunc"[:63]
+            function_name = self.config_parser.convert_names_case(f"{target_trigger_name}_trigfunc")[:63]
             body_quote = '$$' if '$$' not in converted_body else '$sa_trigger$'
 
             function_sql = (f'CREATE OR REPLACE FUNCTION "{target_schema_name}"."{function_name}"()\n'

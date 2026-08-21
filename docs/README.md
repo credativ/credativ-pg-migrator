@@ -959,6 +959,15 @@ A converted query which cannot be read as PostgreSQL is left exactly as the conv
 and reported — a name changed by a search and replace inside a text nobody could parse is not a
 conversion.
 
+**Routines and triggers** follow the setting too: the routine is created under the name the
+setting gives it (which is also the name its `COMMENT ON` uses — the two used to disagree), the
+trigger, the function it calls and the table it is on are all named the same way, and the
+statements inside the body go through the same transformation as a view. Two names in a body are
+never renamed: `NEW` and `OLD` are variables of PL/pgSQL and are always folded to lower case, so
+writing `"NEW"` for one under `upper` would look for a variable which is not there. The *field* of
+such a record is the column of the table the trigger is on and does follow the setting —
+`NEW."total"` with `lower`, `NEW."TOTAL"` with `upper`.
+
 Treat the migration database as read‑only metadata. You can query it freely for analysis, but avoid modifying its tables directly unless instructed by the tool’s maintainers.
 
 ---

@@ -68,6 +68,15 @@ UNDELIMITED_FOLDING = {
 }
 
 
+## The names inside a routine which are not objects of this migration and must never be
+## rewritten: the records a trigger is given, and the variables PostgreSQL sets in one. A
+## PL/pgSQL record is a variable, so it is folded to lower case whatever names_case_handling
+## says - writing "NEW" for it under `upper` would look for a variable which is not there.
+PLPGSQL_RESERVED = frozenset(('new', 'old', 'tg_op', 'tg_name', 'tg_when', 'tg_level',
+                              'tg_relid', 'tg_relname', 'tg_table_name', 'tg_table_schema',
+                              'tg_nargs', 'tg_argv', 'found', 'sqlstate', 'sqlerrm'))
+
+
 def fold_undelimited(name, quoted, source_db_type):
     """
     The name an object really has in the source.
@@ -86,9 +95,17 @@ def fold_undelimited(name, quoted, source_db_type):
     return name
 
 
-def rename_identifier(identifier, convert, source_db_type):
-    """One identifier, spelled as the target has it and delimited so it stays that way."""
+def rename_identifier(identifier, convert, source_db_type, keep=frozenset()):
+    """
+    One identifier, spelled as the target has it and delimited so it stays that way.
+
+    A name in `keep` is left exactly as it is: it names something which is not an object of
+    this migration - the record of a trigger, a variable of PostgreSQL - and giving it the
+    case of a table would only stop it from being found.
+    """
     if not isinstance(identifier, exp.Identifier) or not identifier.name:
+        return
+    if identifier.name.lower() in keep:
         return
     converted = convert(fold_undelimited(identifier.name, bool(identifier.args.get('quoted')),
                                          source_db_type))
@@ -99,7 +116,7 @@ def rename_identifier(identifier, convert, source_db_type):
     identifier.set('quoted', True)
 
 
-def convert_identifiers(sql, convert, source_db_type='', dialect='postgres'):
+def convert_identifiers(sql, convert, source_db_type='', dialect='postgres', keep=frozenset()):
     """
     Every table, column and alias of a statement, spelled the way the target has them.
 
@@ -124,32 +141,37 @@ def convert_identifiers(sql, convert, source_db_type='', dialect='postgres'):
             return sql, False
         for node in statement.walk():
             node = node[0] if isinstance(node, tuple) else node
-            apply_to_node(node, convert, source_db_type)
+            apply_to_node(node, convert, source_db_type, keep)
 
     return '\n'.join(statement.sql(dialect=dialect) for statement in statements), True
 
 
-def apply_to_node(node, convert, source_db_type):
+def apply_to_node(node, convert, source_db_type, keep=frozenset()):
     """The rules, one node at a time. Everything not named here is left as it is."""
     if isinstance(node, exp.Table):
         ## the table itself; 'db' and 'catalog' are the schema and are never converted
-        rename_identifier(node.args.get('this'), convert, source_db_type)
+        rename_identifier(node.args.get('this'), convert, source_db_type, keep)
 
     elif isinstance(node, exp.Column):
-        rename_identifier(node.args.get('this'), convert, source_db_type)
+        ## The field of a record - NEW.total inside a trigger - is the column of the table the
+        ## trigger is on, so it follows the case handling like any other column. The record
+        ## itself does not: it is a variable of PL/pgSQL and is always folded to lower case,
+        ## so writing "NEW" for it would look for a variable which is not there. rename_
+        ## identifier() leaves a name of the keep set alone, which is exactly that.
+        rename_identifier(node.args.get('this'), convert, source_db_type, keep)
         ## the qualifier of the column is an alias of the statement or the name of a table -
         ## either way it has to be spelled the way the thing it names now is
-        rename_identifier(node.args.get('table'), convert, source_db_type)
+        rename_identifier(node.args.get('table'), convert, source_db_type, keep)
 
     elif isinstance(node, exp.Alias):
-        rename_identifier(node.args.get('alias'), convert, source_db_type)
+        rename_identifier(node.args.get('alias'), convert, source_db_type, keep)
 
     elif isinstance(node, exp.TableAlias):
-        rename_identifier(node.args.get('this'), convert, source_db_type)
+        rename_identifier(node.args.get('this'), convert, source_db_type, keep)
         for column in node.args.get('columns') or []:
-            rename_identifier(column, convert, source_db_type)
+            rename_identifier(column, convert, source_db_type, keep)
 
     elif isinstance(node, exp.Schema):
         ## the column list of a CTE header or of a CREATE statement
         for expression in node.expressions:
-            rename_identifier(expression, convert, source_db_type)
+            rename_identifier(expression, convert, source_db_type, keep)

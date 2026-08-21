@@ -193,7 +193,7 @@ The matrix which the repair was measured against.
 
 Every connector converts the query of a view its own way - some hand back the query alone,
 some the whole CREATE VIEW text, some quote the identifiers and some do not (§2.1 of
-development/APPLICATION_QUERIES_CONVERSION_STRATEGY.md measured that). What has to be the same
+development/archive/APPLICATION_QUERIES_CONVERSION_STRATEGY.md measured that). What has to be the same
 for all of them is the answer: after the conversion, a table of the target is named the way
 names_case_handling named it.
 
@@ -326,3 +326,133 @@ def test_the_whole_round_trip_of_a_statement_keeps_its_parameters():
     restored, warnings = binds.restore(final, 'original')
     assert restored.endswith('LIKE ?')
     assert not warnings
+
+
+## ---------------------------------------------------------------- routines and triggers
+
+"""
+The last of it: the routines and the triggers.
+
+Their bodies are PL/pgSQL and no parser reads one as a single statement, but the statements
+*inside* a routine of the Transact-SQL family already go through the statement converter of
+the connector - so they go through the same transformation as a view, one statement at a time.
+
+Two names in such a body are not objects of this migration and must never be renamed: NEW and
+OLD. They are variables of PL/pgSQL, which is to say they are always folded to lower case, so
+writing "NEW" for one under `upper` would look for a variable which is not there. The *field*
+of such a record is a different matter: it is the column of the table the trigger is on, and it
+follows the case handling like any other column.
+"""
+
+from credativ_pg_migrator.identifier_case import PLPGSQL_RESERVED
+
+
+def in_a_routine(sql, case='lower', source_db_type='mssql'):
+    out, ok = identifier_case.convert_identifiers(sql, convert_for(case), source_db_type,
+                                                  keep=PLPGSQL_RESERVED)
+    assert ok, f"the statement could not be read: {sql}"
+    return out
+
+
+def test_the_record_of_a_trigger_is_not_renamed():
+    """NEW is a variable of PL/pgSQL and is folded to lower case whatever the setting says."""
+    out = in_a_routine('SELECT NEW.OrderId', case='upper')
+    assert out.startswith('SELECT NEW.')
+    assert '"NEW"' not in out
+
+
+def test_the_field_of_a_record_follows_the_case_handling():
+    """It is the column of the table the trigger is on."""
+    assert 'NEW."orderid"' in in_a_routine('SELECT NEW.OrderId')
+    assert 'NEW."ORDERID"' in in_a_routine('SELECT NEW.OrderId', case='upper')
+
+
+def test_the_old_record_is_treated_the_same_way():
+    out = in_a_routine('UPDATE Totals SET Amount = OLD.Amount WHERE Id = NEW.Id')
+    assert 'OLD."amount"' in out and 'NEW."id"' in out
+    assert '"totals"' in out and '"amount" =' in out
+
+
+@pytest.mark.parametrize('name', ['TG_OP', 'TG_TABLE_NAME', 'FOUND', 'SQLSTATE'])
+def test_the_variables_postgresql_sets_are_not_renamed(name):
+    assert name in in_a_routine(f'SELECT {name}', case='upper')
+
+
+def test_a_table_of_the_body_is_named_as_the_target_has_it():
+    out = in_a_routine('INSERT INTO AuditLog (OrderId, ChangedAt) SELECT NEW.OrderId, NEW.ChangedAt')
+    assert '"auditlog"' in out
+    assert '"orderid"' in out and '"changedat"' in out
+
+
+## ---------------------------------------------------------------- the whole trigger of a connector
+
+
+def ms_sql_trigger(case):
+    from credativ_pg_migrator.connectors.ms_sql_connector import MsSQLConnector
+    config = ConnectorConfig(case, 'mssql')
+    connector = MsSQLConnector.__new__(MsSQLConnector)
+    connector.config_parser = config
+    connector._udt_map_cache = {}
+    trigger_sql = ("CREATE TRIGGER TR_AuditSales ON SalesOrders FOR INSERT AS\n"
+                   "BEGIN\n"
+                   "  INSERT INTO AuditLog (OrderId, ChangedAt) "
+                   "SELECT i.OrderId, getdate() FROM inserted i\n"
+                   "END")
+    ## the planner hands the target names over already converted
+    return connector.convert_trigger({
+        'source_schema_name': 'dbo', 'source_table_name': 'SalesOrders',
+        'target_schema_name': 'migtest',
+        'target_table_name': config.convert_names_case('SalesOrders'),
+        'trigger_name': config.convert_names_case('TR_AuditSales'),
+        'trigger_sql': trigger_sql, 'table_list': [],
+        'target_db_type': 'postgresql', 'migrator_tables': None})
+
+
+@pytest.mark.parametrize('case,expected', [
+    ('lower', ('"tr_auditsales"', '"migtest"."salesorders"', '"auditlog"', '"orderid"')),
+    ('upper', ('"TR_AUDITSALES"', '"migtest"."SALESORDERS"', '"AUDITLOG"', '"ORDERID"')),
+])
+def test_a_trigger_names_everything_as_the_target_has_it(case, expected):
+    """
+    All four used to be the spelling of the source: the trigger, the function it calls, the
+    table it is on and every name in its body. A trigger whose body is wrong is worse than one
+    whose header is wrong - it is created without complaint and fails when it fires.
+    """
+    ddl = ' '.join(str(ms_sql_trigger(case)).split())
+    for fragment in expected:
+        assert fragment in ddl, f"{fragment} missing from {ddl}"
+
+
+def test_the_schema_of_a_trigger_is_never_converted():
+    assert '"migtest"' in ' '.join(str(ms_sql_trigger('upper')).split())
+    assert '"MIGTEST"' not in ' '.join(str(ms_sql_trigger('upper')).split())
+
+
+def test_the_trigger_and_the_function_it_calls_agree():
+    """A trigger which names a function nobody created is not created either."""
+    import re as _re
+    for case in ('lower', 'upper', 'keep'):
+        ddl = str(ms_sql_trigger(case))
+        created = _re.search(r'CREATE OR REPLACE FUNCTION\s+"[^"]+"\."([^"]+)"', ddl).group(1)
+        called = _re.search(r'EXECUTE FUNCTION\s+"[^"]+"\."([^"]+)"', ddl).group(1)
+        assert created == called, f"{case}: creates {created} and calls {called}"
+
+
+def test_the_generated_function_name_follows_the_setting_in_every_connector():
+    """
+    Each connector builds the name of the trigger function out of the name of the trigger.
+    Built without the case handling it came out as "TR_AUDITSALES_func" - consistent, because
+    both halves of the DDL use the same string, and still a name nobody meant.
+    """
+    import glob
+    import os
+    import re as _re
+    offenders = []
+    for path in sorted(glob.glob(os.path.join(REPO, 'credativ_pg_migrator', 'connectors',
+                                              '*_connector.py'))):
+        source = open(path).read()
+        for match in _re.finditer(r'^\s*\w*(?:func|function)_name\s*=\s*(.+)$', source, _re.M):
+            assignment = match.group(1)
+            if 'trigger_name' in assignment and 'convert_names_case' not in assignment:
+                offenders.append(f"{os.path.basename(path)}: {assignment.strip()[:70]}")
+    assert not offenders, 'built without the case handling: ' + '; '.join(offenders)

@@ -1876,7 +1876,11 @@ class MsSQLConnector(DatabaseConnector):
         trigger_code = trigger_code.strip()
 
         table_match = re.search(r'ON\s+(?:\[?(\w+)\]?\.)?\[?(\w+)\]?', trigger_code, re.IGNORECASE)
-        table_name = table_match.group(2) if table_match else "UNKNOWN_TABLE"
+        ## the table the trigger is on, named out of the text of the source - so the case
+        ## handling of the migration has to be applied to it, the same way the planner applies
+        ## it to the names it hands over
+        table_name = self.config_parser.convert_names_case(
+            table_match.group(2) if table_match else "UNKNOWN_TABLE")
 
         events = []
         if re.search(r'\bINSERT\b', trigger_code, re.IGNORECASE): events.append('INSERT')
@@ -1941,7 +1945,9 @@ class MsSQLConnector(DatabaseConnector):
 
         pg_body = "\n".join(final_stmts_clean)
 
-        func_name = f"tf_{trigger_name}"
+        ## the whole generated name follows the case handling, not only the part which came
+        ## from the trigger - "tf_TR_AUDITSALES" is consistent but reads like a defect
+        func_name = self.config_parser.convert_names_case(f"tf_{trigger_name}")
         func_schema = target_schema_name
         decl_section = "DECLARE\n" + "\n".join(declarations) if declarations else ""
 

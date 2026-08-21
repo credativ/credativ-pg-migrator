@@ -1021,12 +1021,20 @@ class Planner:
                     for _, trigger_details in triggers.items():
                         trigger_name = trigger_details['name']
 
+                        ## The target names are handed over already spelled the way
+                        ## names_case_handling spells them, so a connector which interpolates
+                        ## them into its DDL cannot get it wrong: ms_sql wrote
+                        ## CREATE TRIGGER "TR_AuditSales" ... ON "migtest"."SalesOrders" while
+                        ## the table is `salesorders`. The connectors which convert them again
+                        ## are unharmed - the conversion is idempotent. 'source_*' stays the
+                        ## spelling of the source, which is what a connector needs to find
+                        ## anything in the code it was given.
                         converted_code = self.source_connection.convert_trigger({
                                 'source_schema_name': self.config_parser.get_source_schema(),
                                 'source_table_name': table_info['table_name'],
                                 'target_schema_name': self.config_parser.get_target_schema(),
-                                'target_table_name': target_table_name,
-                                'trigger_name': trigger_name,
+                                'target_table_name': self.config_parser.convert_names_case(target_table_name),
+                                'trigger_name': self.config_parser.convert_names_case(trigger_name),
                                 'trigger_sql': trigger_details['sql'],
                                 'table_list': [],
                                 'target_db_type': self.config_parser.get_target_db_type(),

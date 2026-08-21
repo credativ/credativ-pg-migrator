@@ -2152,9 +2152,14 @@ class Orchestrator:
                             self.handle_error(e, 'fetching view names')
 
                         self.config_parser.print_log_message( 'DEBUG', f"orchestrator: run_migrate_funcprocs: Converting {funcproc_type} {funcproc_data['name']} code...")
+                        ## The routine is created with the name names_case_handling gives it -
+                        ## the COMMENT ON below has always used that spelling, so a routine used
+                        ## to be created under one name and commented under another, and the
+                        ## comment failed. 'source_funcproc_name' keeps the spelling of the
+                        ## source in the protocol.
                         converted_code = self.source_connection.convert_funcproc_code({
                             'funcproc_code': funcproc_code,
-                            'funcproc_name': funcproc_data['name'],
+                            'funcproc_name': self.config_parser.convert_names_case(funcproc_data['name']),
                             'target_db_type': self.config_parser.get_target_db_type(),
                             'source_schema_name': self.config_parser.get_source_schema(),
                             'target_schema_name': self.config_parser.get_target_schema(),

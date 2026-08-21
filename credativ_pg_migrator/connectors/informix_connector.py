@@ -3332,7 +3332,10 @@ class InformixConnector(DatabaseConnector):
                         f"informix_connector: convert_trigger: The header of a trigger could not be read, it is not migrated: {trig[:120]}")
                     continue
                 schema = header_match.group(1)
-                trigger_name = header_match.group(2).strip('"')
+                ## the name comes out of the text of the source, so the case handling of the
+                ## migration has to be applied to it here - every other connector is handed a
+                ## name which the planner already converted
+                trigger_name = self.config_parser.convert_names_case(header_match.group(2).strip('"'))
                 instead_of = bool(header_match.group(3))
                 operation = header_match.group(4).upper()
 
@@ -3346,7 +3349,10 @@ class InformixConnector(DatabaseConnector):
 
                 table_match = re.search(r'(?i)\son\s+"?([^".\s]+)"?\.\s*"?([^"\s(]+)"?', trig)
                 table_schema = table_match.group(1) if table_match else schema
-                table_name = table_match.group(2) if table_match else 'unknown_table'
+                ## the table the trigger is on is an object of the target and is named the way
+                ## names_case_handling named it
+                table_name = self.config_parser.convert_names_case(
+                    table_match.group(2) if table_match else 'unknown_table')
                 if table_schema == source_schema_name:
                     table_schema = target_schema_name
 
@@ -3399,7 +3405,7 @@ class InformixConnector(DatabaseConnector):
                         condition = self.map_trigger_correlation_names(when_condition, old_ref, new_ref)
                         body_lines = [f"    IF {condition} THEN"] + [f"    {line}" for line in body_lines] + ["    END IF;"]
 
-                    function_name = f"{trigger_name}_trigfunc{counter}"
+                    function_name = self.config_parser.convert_names_case(f"{trigger_name}_trigfunc{counter}")
                     func_code = (f'CREATE OR REPLACE FUNCTION "{target_schema_name}"."{function_name}"()\n'
                                  f'RETURNS trigger AS $$\n'
                                  f'BEGIN\n'

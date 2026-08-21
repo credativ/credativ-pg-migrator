@@ -2,6 +2,7 @@ import re
 import os
 import glob
 from typing import List, Dict, Any
+from credativ_pg_migrator import identifier_case
 
 class SourceLine:
     def __init__(self, line_number: int, content: str):
@@ -2572,6 +2573,37 @@ class TsqlParser:
             new_body_lines.append(line)
         self.body_lines = new_body_lines
 
+    def apply_identifier_case(self, converted_statement):
+        """
+        The names of a statement of a routine, spelled the way names_case_handling spelled the
+        objects they name.
+
+        This is the same repair the views were given, in the place where the statements inside
+        a routine are converted. Without it a trigger of a Sybase ASE or MS SQL Server
+        migration held `INSERT INTO "AuditLog" ("OrderId") SELECT NEW."OrderId"` while the
+        table is `auditlog` - valid PL/pgSQL which fails the moment the trigger fires, which
+        is worse than failing when it is created.
+
+        The records a trigger is given - NEW and OLD - are variables of PL/pgSQL and are always
+        folded to lower case, so they are never renamed; the *field* of such a record is the
+        column of the table and follows the case handling like any other column.
+
+        A statement which cannot be read is answered exactly as it came in: a name changed by
+        a search and replace inside a text nobody could parse is not a conversion.
+        """
+        if not converted_statement or not converted_statement.strip() or self.config_parser is None:
+            return converted_statement
+        converted, ok = identifier_case.convert_identifiers(
+            converted_statement,
+            self.config_parser.convert_names_case,
+            self.config_parser.get_source_db_type(),
+            keep=identifier_case.PLPGSQL_RESERVED)
+        if not ok:
+            self.log(f"the case of the names could not be applied to a statement of the routine - "
+                     f"it could not be read as PostgreSQL: {converted_statement[:120]}")
+            return converted_statement
+        return converted
+
     def pass_8d_convert_selects(self):
         """
         Pass 8d: Converts the statements of the routine with the statement converter, when one
@@ -2599,7 +2631,7 @@ class TsqlParser:
             temp_settings = self.settings.copy()
             temp_settings['view_code'] = declaration.group(2)
             try:
-                converted_query = self.view_converter(temp_settings)
+                converted_query = self.apply_identifier_case(self.view_converter(temp_settings))
                 if converted_query and converted_query.strip():
                     cursor['content'] = f"{declaration.group(1)}{converted_query.strip().rstrip(';')};"
             except Exception as e:
@@ -2616,7 +2648,7 @@ class TsqlParser:
                 temp_settings['view_code'] = original_content
 
                 try:
-                    converted = self.view_converter(temp_settings)
+                    converted = self.apply_identifier_case(self.view_converter(temp_settings))
 
                     if not converted or not converted.strip():
                         self.log(f"Conversion of a {command_kind} command returned nothing - the original is kept")

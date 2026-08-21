@@ -1396,7 +1396,7 @@ class OracleConnector(OracleQueryConversion, DatabaseConnector):
 
         target_trigger_name = self.config_parser.convert_names_case(trigger_name)
         target_table = self.config_parser.convert_names_case(target_table_name)
-        func_name = f"{target_trigger_name}_tgfn"
+        func_name = self.config_parser.convert_names_case(f"{target_trigger_name}_tgfn")
 
         func_ddl = (f'CREATE OR REPLACE FUNCTION "{target_schema_name}"."{func_name}"() RETURNS TRIGGER AS $$\n'
                     f'{body}\n$$ LANGUAGE plpgsql;')

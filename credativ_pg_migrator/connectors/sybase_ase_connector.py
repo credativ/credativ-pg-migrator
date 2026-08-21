@@ -4945,7 +4945,10 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
                 ## NOT CONVERTED - but nothing here answers with a text which was not
                 ## converted as if it had been.
                 error = ValueError(f"the statement could not be parsed as T-SQL: {first_line(e)}")
-                error.partial_code = converted_code
+                ## the text a caller keeps is the statement with its own operator, not with the
+                ## marker: PostgreSQL reads the marker as a comment and the outer join would be
+                ## an inner one, created without complaint
+                error.partial_code = query_outer_joins.unmark_tsql_outer_joins(converted_code)
                 raise error
 
             # double quote column names

@@ -43,6 +43,7 @@ from sqlglot import exp
 
 from credativ_pg_migrator.database_connector import first_line
 from credativ_pg_migrator.query_conversion import outer_joins
+from credativ_pg_migrator.query_conversion.outer_joins import outer_join_warnings
 
 
 ## The format codes of DATEFORMAT() and what to_char() of PostgreSQL calls them. 'HH' is the
@@ -442,12 +443,33 @@ class SqlAnywhereQueryConversion:
             error.partial_code = self.sql_anywhere_textual_conversion(code, settings)
             raise error
 
-        ast, report['unconverted_joins'] = outer_joins.convert_marked_outer_joins(ast)
+        converted_joins = set()
+        ast, report['unconverted_joins'] = outer_joins.convert_marked_outer_joins(
+            ast, converted_joins)
+        ## SQL Anywhere writes '*=' as the Transact-SQL compatibility syntax of Sybase ASE, and
+        ## reads it the way ASE does: a restriction on the inner table belongs to the join. In
+        ## the WHERE clause of PostgreSQL it is applied to the result of the join, where it
+        ## throws away exactly the rows the outer join added - the LEFT JOIN would be an inner
+        ## join again, valid and answering fewer rows. Only the joins this conversion made out
+        ## of a '*=' are touched: a join written as ANSI in the source means the same on both
+        ## sides, and its WHERE clause is left alone.
+        ast, moved = outer_joins.move_inner_table_predicates(ast, converted_joins)
+        if moved:
+            report['moved_predicates'] = moved
         ast = ast.transform(lambda node: self.rewrite_sql_anywhere_expression(node, report))
         converted = ast.sql(dialect='postgres')
-        ## a marker which is still standing says the outer join was not rewritten; it is
-        ## counted in the report and kept in the text, where the blockers find it
-        return self.finish_statement_code(converted, settings), report
+        ## A marker which is still standing says the outer join was not rewritten - and what
+        ## stands around it is the comma join it started from, which PostgreSQL creates as an
+        ## INNER join without complaint. The statement is refused rather than converted into
+        ## that, for the view path and the query path alike.
+        finished = self.finish_statement_code(converted, settings)
+        marker_message = outer_joins.unconverted_marker_message(finished)
+        if marker_message:
+            error = ValueError(marker_message)
+            error.outer_join_failure = True
+            error.partial_code = self.sql_anywhere_textual_conversion(code, settings)
+            raise error
+        return finished, report
 
     def finish_statement_code(self, code, settings):
         """
@@ -476,6 +498,12 @@ class SqlAnywhereQueryConversion:
         converted = re.sub(r'"([A-Za-z0-9_]+)"\s*\(', r'\1(', converted)
         converted = self.replace_outside_string_literals(
             converted, r'(?i)(?<![\w.])LIST\s*\(\s*([^\s,]+)\s*,', r'string_agg(\1::text,')
+        ## This path has no parse and therefore no way to rewrite an outer join, so the marking
+        ## the preparation did is undone again. Left in, PostgreSQL would read the marker as a
+        ## comment and create the comma join around it - an INNER join, without complaint,
+        ## answering fewer rows. The operator of the source fails loudly instead, which is what
+        ## a statement nothing could convert has to do.
+        converted = outer_joins.unmark_tsql_outer_joins(converted)
         return self.finish_statement_code(converted, settings)
 
     def convert_statement_code(self, settings: dict):
@@ -501,7 +529,7 @@ class SqlAnywhereQueryConversion:
 
         try:
             converted, report = self.convert_statement_with_report(settings)
-            for note in report['notes'] + report['warnings']:
+            for note in report['notes'] + report['warnings'] + outer_join_warnings(report):
                 self.config_parser.print_log_message(
                     'WARNING', f"sql_anywhere_connector: convert_view_code: {note}")
             if report['unconverted_joins']:
@@ -595,6 +623,7 @@ class SqlAnywhereQueryConversion:
                     'error': f"the conversion ended with an error: {first_line(e)}"}
 
         warnings.extend(report.get('warnings') or [])
+        warnings.extend(outer_join_warnings(report))
         if not (converted or '').strip():
             return {'code': '', 'converted': False, 'warnings': warnings,
                     'error': 'the conversion produced no statement at all'}

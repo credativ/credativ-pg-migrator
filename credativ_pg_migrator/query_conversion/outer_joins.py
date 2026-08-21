@@ -173,6 +173,24 @@ def in_a_set_clause(clauses, position):
     return nearest == 'SET'
 
 
+MARKER_PATTERN = re.compile(r'=\s*/\*\s*(left|right)_outer\s*\*/')
+
+
+def unmark_tsql_outer_joins(code):
+    """
+    The markers turned back into the '*=' and '=*' they were made from.
+
+    Every path which hands a statement back unconverted goes through here. A marker left in
+    such a text is the worst of the three possible outcomes: PostgreSQL reads it as a comment,
+    so what remains is an ordinary equality in a comma join - an INNER join, created without
+    complaint, answering fewer rows. The operator of the source is neither valid PostgreSQL nor
+    silent: it fails loudly, and it is what the developer wrote.
+    """
+    if not code or '_outer */' not in code:
+        return code
+    return MARKER_PATTERN.sub(lambda match: '*=' if match.group(1) == 'left' else '=*', code)
+
+
 def null_supplying_aliases(select_node, only_joins=None):
     """
     The tables of one SELECT whose rows an outer join may leave as NULL.
@@ -325,6 +343,115 @@ def move_inner_table_predicates(expression, only_joins=None):
         else:
             select_node.set('where', None)
     return expression, moved
+
+
+def marked_columns(node):
+    """The columns of a condition which carry Oracle's '(+)', as sqlglot models it."""
+    return [column for column in node.find_all(exp.Column) if column.args.get('join_mark')]
+
+
+def convert_join_marked_predicates(expression, converted_joins=None):
+    """
+    Oracle's '(+)' written on a condition which the equality rewrite above does not reach.
+
+    ORACLE ONLY, and the opposite mechanism to move_inner_table_predicates(): there the
+    dialect gives no marker and the reading has to be inferred from which table a condition
+    restricts, here Oracle writes the marker on the column itself and says which of the two
+    readings it means. So nothing is inferred - only what carries a '(+)' is moved, and a
+    condition without one stays in the WHERE clause, where Oracle applies it too.
+
+        WHERE c.id = o.cid(+) AND o.status(+) = 'X'   -> the status is part of the join
+        WHERE c.id = o.cid(+) AND o.status = 'X'      -> the status is a filter, and it turns
+                                                        the outer join into an inner one on
+                                                        Oracle exactly as it does on PostgreSQL
+
+    sqlglot parses '(+)' into `join_mark` on the column, which survives even inside a call -
+    so 'UPPER(o.cid(+)) = c.id', which the textual marking of the connector cannot reach and
+    which was reported as an outer join it could not rewrite, is handled here as well.
+
+    What is refused rather than guessed: a condition whose marks name more than one table, a
+    condition whose marked table is in no join of the statement, and a mark under an OR, which
+    Oracle itself refuses with ORA-01719.
+
+    Returns (expression, moved, unconverted). A mark left anywhere afterwards is counted in
+    'unconverted': the generator of PostgreSQL drops it without a word, which would turn the
+    outer join into an inner one, so the caller refuses such a statement.
+    """
+    moved = []
+    unconverted = 0
+    for select_node in expression.find_all(exp.Select):
+        where = select_node.args.get('where')
+        if where is None or where.this is None:
+            continue
+        joins = select_node.args.get('joins') or []
+        anchor = from_anchor(select_node)
+        join_by_alias = {}
+        for join in joins:
+            table = join.this
+            if table is not None and table.alias_or_name:
+                join_by_alias[table.alias_or_name] = join
+
+        kept = []
+        moved_here = False
+        for condition in conjuncts(where.this):
+            marked = marked_columns(condition)
+            if not marked:
+                kept.append(condition)
+                continue
+            if isinstance(condition, exp.Or) or any(
+                    isinstance(node, exp.Or) for node in condition.find_all(exp.Or)):
+                ## Oracle refuses this itself - ORA-01719 - so a statement which holds it did
+                ## not run on the source either. It is not converted rather than guessed at.
+                unconverted += 1
+                kept.append(condition)
+                continue
+            aliases = {column.table for column in marked if column.table}
+            if len(aliases) != 1:
+                unconverted += 1
+                kept.append(condition)
+                continue
+            alias = next(iter(aliases))
+
+            join_kind = 'LEFT'
+            target_join = join_by_alias.get(alias)
+            if target_join is None and alias == anchor:
+                ## the marked table is the anchor of the FROM clause, so the join of the
+                ## table it is compared with is the one which has to keep its rows
+                other = {column.table for column in condition.find_all(exp.Column)
+                         if column.table and column.table != alias}
+                target_join = next((join_by_alias[name] for name in other if name in join_by_alias), None)
+                join_kind = 'RIGHT'
+            if target_join is None:
+                unconverted += 1
+                kept.append(condition)
+                continue
+
+            piece = protect(condition.copy())
+            for column in marked_columns(piece):
+                column.set('join_mark', False)
+            existing_on = target_join.args.get('on')
+            target_join.set('side', target_join.args.get('side') or join_kind)
+            target_join.set('on', exp.And(this=existing_on, expression=piece)
+                            if existing_on is not None else piece)
+            if converted_joins is not None:
+                converted_joins.add(id(target_join))
+            moved.append(condition.sql(dialect='oracle'))
+            moved_here = True
+
+        if not moved_here:
+            continue
+        if kept:
+            rebuilt = protect(kept[0].copy())
+            for condition in kept[1:]:
+                rebuilt = exp.And(this=rebuilt, expression=protect(condition.copy()))
+            where.set('this', rebuilt)
+        else:
+            select_node.set('where', None)
+
+    ## anything still carrying a mark could not be attributed - the generator of PostgreSQL
+    ## would drop it and answer an inner join
+    unconverted += len(marked_columns(expression))
+    return expression, moved, unconverted
 
 
 def convert_marked_outer_joins(expression, converted_joins=None):

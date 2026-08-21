@@ -110,16 +110,19 @@ def test_an_outer_join_condition_under_an_or_is_refused(oracle):
     assert 'outer join' in answer['error']
 
 
-def test_an_outer_join_marked_inside_a_call_is_refused(oracle):
+def test_an_outer_join_marked_inside_a_call_is_converted(oracle):
     """
-    'UPPER(o.cid(+))' is not the shape the marking recognises. The parser drops the (+)
-    without a word, and the join it belonged to is an inner join from then on - so the
-    statement is counted as unconverted instead.
+    'UPPER(o.cid(+))' is not a shape the textual marking recognises, and it used to be counted
+    as an outer join which could not be rewritten. sqlglot keeps the '(+)' on the column of the
+    parsed statement even inside a call, so the condition can be attributed there: it carries
+    the marker, so it belongs to the join, and it moves into the ON clause.
     """
     answer = converted(oracle, "SELECT c.id FROM customers c, orders o "
                                "WHERE UPPER(c.id) = UPPER(o.cid(+))")
-    assert answer['converted'] is False
-    assert 'outer join' in answer['error']
+    assert answer['converted'] is True, answer['error']
+    assert 'LEFT JOIN' in answer['code']
+    assert '(+)' not in answer['code']
+    assert 'ON UPPER(c.id) = UPPER(o.cid)' in answer['code']
 
 
 def test_a_plus_sign_inside_a_literal_is_not_an_outer_join(oracle):

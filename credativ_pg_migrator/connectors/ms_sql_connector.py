@@ -1348,7 +1348,8 @@ class MsSQLConnector(DatabaseConnector):
             expressions = sqlglot.parse(view_code, read=CustomTSQL)
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"ms_sql_connector: transform_sybase_joins: Failed to parse view code: {e}")
-            raise ValueError(f"-- ERROR parsing view: {e}\n/*\n{view_code}\n*/") from e
+            raise ValueError(f"-- ERROR parsing view: {e}\n/*\n"
+                             f"{query_outer_joins.unmark_tsql_outer_joins(view_code)}\n*/") from e
 
         transformed_sqls = []
         for expression in expressions:

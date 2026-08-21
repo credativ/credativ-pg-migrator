@@ -37,7 +37,7 @@ tests, and no test depends on the order of the others.
 | configuration & logging | `pyyaml`, `jsonschema`, `pytest` | the 5 `test_config_*` / `test_logging_*` / `test_object_*` files, and `test_schema_names.py` |
 | query conversion | `sqlglot`, `pytest` | the 6 `test_query_*` files and the `test_*_query_conversion.py` of Db2, Oracle and SQL Anywhere |
 | anonymization, Db2 CSV | nothing beyond the standard library | 3 files |
-| everything else | the package's own dependencies — `psycopg2`, `tabulate`, `jaydebeapi`, `pyodbc` | 21 files, `test_informix_query_conversion.py`, `test_mysql_query_conversion.py`, `test_ms_sql_query_conversion.py` and `test_sybase_query_conversion.py` and `test_tsql_outer_joins.py` among them |
+| everything else | the package's own dependencies — `psycopg2`, `tabulate`, `jaydebeapi`, `pyodbc` | 21 files, `test_informix_query_conversion.py`, `test_mysql_query_conversion.py`, `test_ms_sql_query_conversion.py` and `test_sybase_query_conversion.py`, `test_tsql_outer_joins.py` and `test_oracle_outer_joins.py` among them |
 
 The third group imports the connectors, which import their drivers at module level, so
 those files fail to **collect** if the drivers are absent — the message is
@@ -652,12 +652,35 @@ in the WHERE clause, the `TRUE` left behind is taken out, and a condition standi
 shows is one of the cases. Then `TOP`, the `+`, the function mapping, the schema replacement,
 and the gates in this dialect.
 
-### `test_tsql_outer_joins.py` — 55 tests
+### `test_oracle_outer_joins.py` — 16 tests
 
-**Purpose.** The `*=` and `=*` outer joins of the Transact-SQL family, for **both** connectors
-and **both** paths. Sybase ASE and MS SQL Server are one family and wrote the same operator, so
-every case runs against both connectors and against the view path as well as the query path;
-this file is what keeps the two from drifting apart again.
+**Purpose.** Oracle's `(+)`, and the one thing which makes it different from every other
+dialect this migrator reads.
+
+**Covers.** In the Transact-SQL family the marker sits on the join operator and says nothing
+about the other conditions, so which of them belongs to the join has to be inferred. Oracle
+writes the marker on the column, condition by condition, and therefore says which of the two
+readings it means — so nothing is inferred here: `AND o.status(+) = 'X'` moves into the `ON`
+clause and `AND o.status = 'X'` stays in the `WHERE` clause, where Oracle applies it too. Both
+halves are asserted, because getting either wrong produces a statement which is valid, looks
+healthy and answers other rows. Then the shapes the textual marking never reached and which
+were counted as outer joins that could not be rewritten: a marked comparison, a marked `IN`
+list, and a marker inside a call (`UPPER(o.cid(+))`) — the parsed statement keeps the marker on
+the column, so all three are attributed now. A `(+)` under an `OR` is still refused, which is
+what Oracle itself does with ORA-01719. And the view path, which converts and moves the same
+way.
+
+### `test_tsql_outer_joins.py` — 79 tests
+
+**Purpose.** The `*=` and `=*` outer joins of the Transact-SQL family, for **all three**
+connectors and **both** paths. Sybase ASE, MS SQL Server and SQL Anywhere wrote the same
+operator and read it the same way — SQL Anywhere has it as the Transact-SQL compatibility
+syntax of ASE — so every case runs against all three and against the view path as well as the
+query path; this file is what keeps them from drifting apart again. The assertions are made on
+the statement without its quoting, because the three do not agree about quoting identifiers or
+about the schema of the source and none of that is what the file is about; the view helper
+gives each connector the shape its own view path reads (§2.1 of the strategy measured that they
+differ).
 
 **Covers.** The join itself — `*=` as a `LEFT JOIN`, `=*` as a `RIGHT JOIN`, the asterisk
 standing next to the table whose rows are kept, two joins in one statement, and the operator

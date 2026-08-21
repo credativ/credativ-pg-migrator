@@ -201,13 +201,13 @@ class OracleQueryConversion:
         sql = re.sub(r'([\w."]+)\s*\(\s*\+\s*\)\s*=\s*([\w."]+)', r'\1 = /* right_outer */ \2', sql)
         return sql
 
-    def _convert_marked_outer_joins(self, expression):
+    def _convert_marked_outer_joins(self, expression, converted_joins=None):
         """
         The marked conditions of the WHERE clause as the joins of PostgreSQL. The work is the
         same for every dialect which writes its outer joins that way and stands in
         query_conversion/outer_joins.py; only the marking of '(+)' above is Oracle.
         """
-        return outer_joins.convert_marked_outer_joins(expression)
+        return outer_joins.convert_marked_outer_joins(expression, converted_joins)
 
     def _strip_listagg_on_overflow(self, sql):
         """Remove Oracle LISTAGG's ON OVERFLOW clause, which has no PostgreSQL equivalent
@@ -412,10 +412,6 @@ class OracleQueryConversion:
         ## Rewrite TRANSLATE(expr USING [N]CHAR_CS) - sqlglot cannot parse the USING form.
         preprocessed = self._strip_translate_using(preprocessed)
         marked = self._preprocess_oracle_outer_joins(preprocessed)
-        ## A '(+)' which is still standing was written somewhere the marking does not reach -
-        ## inside a call, as in 'UPPER(o.cid(+))'. The parser drops it without a word and the
-        ## outer join becomes an inner one, so it is counted here instead.
-        report['unmarked_joins'] = self.sql_without_literals_and_comments(marked).count('(+)')
 
         try:
             ast = sqlglot.parse_one(marked, read="oracle")
@@ -429,7 +425,20 @@ class OracleQueryConversion:
             error.partial_code = self.finish_statement_code(code, settings)
             raise error
 
-        ast, report['unconverted_joins'] = self._convert_marked_outer_joins(ast)
+        converted_joins = set()
+        ast, report['unconverted_joins'] = self._convert_marked_outer_joins(ast, converted_joins)
+        ## A '(+)' which the textual marking above does not reach - one written on a condition
+        ## which is not the join itself ('o.status(+) = ''X''') or one written inside a call
+        ## ('UPPER(o.cid(+))'). sqlglot keeps it on the column, so it can be attributed from
+        ## the parsed statement; Oracle writes the marker itself, so nothing is inferred here.
+        ## Anything still carrying one afterwards is counted: the generator of PostgreSQL drops
+        ## it without a word, and the outer join would become an inner one.
+        ast, moved, report['unmarked_joins'] = outer_joins.convert_join_marked_predicates(
+            ast, converted_joins)
+        if moved:
+            ## a warning and not a blocker - 'notes' is the list of reasons a statement may
+            ## not be offered as converted, and this one was converted
+            report['moved_predicates'] = moved
         ast = ast.transform(lambda node: self.rewrite_oracle_expression(node, report))
         converted = ast.sql(dialect="postgres")
         ## Strip any outer-join markers that could not be converted - they are counted in the
@@ -495,6 +504,12 @@ class OracleQueryConversion:
             for note in report['notes']:
                 self.config_parser.print_log_message(
                     'WARNING', f"oracle_connector: convert_view_code: view {view_label}: {note}")
+            for moved in report.get('moved_predicates') or []:
+                self.config_parser.print_log_message(
+                    'WARNING', f"oracle_connector: convert_view_code: view {view_label}: {moved} "
+                               f"carries the outer join operator '(+)' and was moved into the ON "
+                               f"clause of the join - in the WHERE clause it would throw away the "
+                               f"rows the outer join added.")
             if report['unconverted_joins'] or report['unmarked_joins']:
                 self.config_parser.print_log_message('WARNING', f"oracle_connector: convert_view_code: view {view_label} has {report['unconverted_joins'] + report['unmarked_joins']} Oracle (+) outer-join condition(s) that could not be converted to ANSI joins (they remain as inner-join conditions). Manual review required.")
         except ValueError as e:
@@ -596,6 +611,15 @@ class OracleQueryConversion:
         if not (converted or '').strip():
             return {'code': '', 'converted': False, 'warnings': warnings,
                     'error': 'the conversion produced no statement at all'}
+
+        moved = report.get('moved_predicates') or []
+        if moved:
+            warnings.append(
+                f"{', '.join(moved)} carr{'y' if len(moved) > 1 else 'ies'} the outer join "
+                f"operator '(+)', which says the condition belongs to the join and not to the "
+                f"rows the join answers. It was moved into the ON clause, which is where "
+                f"PostgreSQL asks the same question - left in the WHERE clause it would throw "
+                f"away the rows the outer join added.")
 
         blockers = self.oracle_conversion_blockers(converted, report)
         if blockers:

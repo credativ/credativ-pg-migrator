@@ -15,18 +15,22 @@
 #   credativ-pg-migrator --config query_conversion.yaml --convert-queries
 #
 # The whole configuration of the migration is kept in the file, because the
-# conversion uses it: sql_functions_mapping, remote_objects_substitution and
+# conversion uses it: remote_objects_substitution, data_types_substitution and
 # the schema names are the same ones the views of the migration were converted
-# with. Use the configuration the migration was run with, with this block
-# added - then the statements are converted exactly as the views were.
+# with, together with the function mapping the connector of the source carries
+# (get_sql_functions_mapping() - part of the migrator, not a setting). Use the
+# configuration the migration was run with, with this block added - then the
+# statements are converted exactly as the views were.
 #
 # ONLY SELECT. A statement which writes is never converted and never sent to
 # either database. It stands in the output file as a comment, with the reason.
 #
-# SOURCES: implemented for MS SQL Server and Sybase ASE. Any other source stops
-# the step at the start with "query conversion is not implemented for ..." -
-# the statements are not passed through unconverted, because that would look
-# like a conversion without being one.
+# SOURCES: implemented for MS SQL Server, Sybase ASE, Informix, DB2 (LUW, z/OS
+# and i), MySQL, MariaDB, Oracle and SQL Anywhere - every source the migrator
+# reads except PostgreSQL and SQLite. Those two stop the step at the start with
+# "query conversion is not implemented for ..." - the statements are not passed
+# through unconverted, because that would look like a conversion without being
+# one.
 # ============================================================================
 
 workflow: "standard"
@@ -112,7 +116,10 @@ query_conversion:
   # the same time.
   parameter_output: "original"
 
-  # How much of the converted statement is proven against the target:
+  # How much of the converted statement is proven against the target. Write it
+  # in quotes: YAML reads a bare off as the boolean false, and while the
+  # migrator reads that back as "off", quoting is what makes the file say what
+  # it means to every reader of it.
   #   off     - nothing is sent to the target
   #   parse   - PREPARE: syntax, every table, column and function, the types
   #   explain - the above, plus that a plan can be produced
@@ -136,7 +143,7 @@ query_conversion:
     suffix: "_pg"               # queries.sql -> converted/queries_pg.sql
     overwrite: false            # an existing file is not replaced silently
     include_original: true      # the statement of the source in the comment block
-    sidecar: "json"             # json | csv | off - one record per statement
+    sidecar: "json"             # "json" | "csv" | "off" - one per statement
 
 summary:
   top_migrated_tables: 10

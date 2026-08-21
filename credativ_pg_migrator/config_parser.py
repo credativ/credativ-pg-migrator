@@ -59,6 +59,8 @@ class ConfigParser:
         ('migration', 'names_case_handling'),
         ('migration', 'packages_as'),
         ('migration', 'validate_objects'),
+        ('query_conversion', 'target_test'),
+        ('query_conversion', 'output', 'sidecar'),
     )
 
     @classmethod
@@ -214,6 +216,17 @@ class ConfigParser:
             for entry in data_types_substitution:
                 if not isinstance(entry, (list, tuple)) or len(entry) != 5:
                     raise ValueError("Please update your config file. Each entry in data_types_substitution must have 5 elements - [table_name, column_name, source_type, target_type, comment].")
+
+        ## Read, echoed into the mapping report and applied to nothing. Saying so at the
+        ## start is the difference between a setting which does nothing and a setting which
+        ## looks as though it had worked - the report shows the entries either way.
+        forced_column_mappings = self.get_forced_column_mappings()
+        if forced_column_mappings:
+            self.print_log_message('WARNING',
+                f"config_parser: validate_config: mapping.forced_column_mappings names "
+                f"{len(forced_column_mappings)} column pair(s), which are NOT applied to the column "
+                f"matching - they are only written into the mapping report. Correct a column match "
+                f"with mapping.heuristics, or by renaming the column in the target.")
 
         self.validate_schema_names()
         self.validate_anonymization_config()
@@ -1140,7 +1153,13 @@ class ConfigParser:
         return self.get_query_conversion_config().get('parameter_output', 'original')
 
     def get_query_conversion_target_test(self):
-        return self.get_query_conversion_config().get('target_test', 'explain')
+        # 'off', written unquoted, reaches this as False - see resolve_off_on_value().
+        settings = self.get_query_conversion_config()
+        if 'target_test' not in settings:
+            return 'explain'
+        return self.resolve_off_on_value(settings.get('target_test'),
+                                         self.QUERY_CONVERSION_TARGET_TEST_STANDARD,
+                                         self.QUERY_CONVERSION_TARGET_TEST_ALIASES, 'explain')
 
     def get_query_conversion_timeout(self):
         return self.get_query_conversion_config().get('timeout', '30s')
@@ -1170,7 +1189,13 @@ class ConfigParser:
         return bool(self.get_query_conversion_output().get('include_original', True))
 
     def get_query_conversion_output_sidecar(self):
-        return self.get_query_conversion_output().get('sidecar', 'json')
+        # 'off', written unquoted, reaches this as False - see resolve_off_on_value().
+        output = self.get_query_conversion_output()
+        if 'sidecar' not in output:
+            return 'json'
+        return self.resolve_off_on_value(output.get('sidecar'),
+                                         self.QUERY_CONVERSION_SIDECAR_STANDARD,
+                                         self.QUERY_CONVERSION_SIDECAR_ALIASES, 'json')
 
     def get_protocol_name_queries(self):
         return f"{self.get_protocol_name()}_queries"
@@ -1258,6 +1283,20 @@ class ConfigParser:
         'false': 'off', 'no': 'off', 'none': 'off', 'skip': 'off',
     }
 
+    ## Both of these take the word 'off', which PyYAML reads as the boolean False - see
+    ## resolve_off_on_value() for why they need aliases at all.
+    QUERY_CONVERSION_TARGET_TEST_STANDARD = ('off', 'parse', 'explain')
+    QUERY_CONVERSION_TARGET_TEST_ALIASES = {
+        'true': 'explain', 'yes': 'explain', 'on': 'explain',
+        'false': 'off', 'no': 'off', 'none': 'off', 'skip': 'off',
+    }
+
+    QUERY_CONVERSION_SIDECAR_STANDARD = ('json', 'csv', 'off')
+    QUERY_CONVERSION_SIDECAR_ALIASES = {
+        'true': 'json', 'yes': 'json', 'on': 'json',
+        'false': 'off', 'no': 'off', 'none': 'off', 'skip': 'off',
+    }
+
     PACKAGES_AS_STANDARD = ('functions', 'schemas')
     PACKAGES_AS_ALIASES = {
         'function': 'functions', 'prefixed_functions': 'functions', 'prefix': 'functions',
@@ -1276,6 +1315,28 @@ class ConfigParser:
         if text in standard_values:
             return text
         return aliases.get(text)
+
+    @classmethod
+    def resolve_off_on_value(cls, value, standard_values, aliases, on_value):
+        """
+        The standard value a written value stands for, for a setting whose values include
+        the word 'off'.
+
+        The configuration is read with PyYAML, which follows YAML 1.1: an unquoted off, on,
+        yes and no are the booleans False and True there, not the words they were written
+        as. A setting which takes 'off' therefore has to read False as 'off' - otherwise
+        the documented value, written the way it reads best, is refused at the start of the
+        run. True stands for the value the setting has when it is on, and a key left empty
+        asks for nothing and is 'off' as well.
+
+        A value which is neither a standard value nor an alias is returned unchanged, so
+        that the code which uses it names it in its own message.
+        """
+        if value is None or value is False:
+            return 'off'
+        if value is True:
+            return on_value
+        return cls.resolve_standard_value(value, standard_values, aliases) or value
 
     OBJECT_FILTER_KEYS = {
         'table':    ('include_tables', 'exclude_tables'),

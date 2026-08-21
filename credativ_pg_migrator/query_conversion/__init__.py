@@ -22,8 +22,6 @@ The step runs after a migration, over the migrated target - it creates nothing a
 data. It reads files of statements, converts every SELECT with the same connector code which
 converts the views, tests the result against the target and writes files a developer reads,
 with the outcome of each test in the file.
-
-The design is described in development/APPLICATION_QUERIES_CONVERSION_STRATEGY.md.
 """
 
 from credativ_pg_migrator.query_conversion.workflow import QueryConverter

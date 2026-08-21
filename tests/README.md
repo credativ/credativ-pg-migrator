@@ -1,6 +1,6 @@
 # credativ-pg-migrator — test suite
 
-567 test functions in 35 files. **No test in this directory needs a database, a driver
+586 test functions in 37 files. **No test in this directory needs a database, a driver
 connection, or a network.** Everything that would talk to a server is either constructed
 with `Class.__new__(Class)` and fed a fake config, or replaced with `unittest.mock`. A
 full run touches nothing outside the repository and finishes in seconds.
@@ -191,6 +191,25 @@ gate directly in front of the `DROP SCHEMA`.
 
 ---
 
+### `test_off_valued_settings.py` — 9 functions, 32 tests
+
+**Purpose.** The three settings whose values include the word `off` are read as the words
+they were written as. The configuration is read with PyYAML, which follows YAML 1.1: an
+unquoted `off`, `on`, `yes` and `no` are booleans there, so `target_test: off` — the
+documented value of a documented option, written the way it reads best — arrived as
+`False` and stopped the run at the start.
+
+**Covers.** `migration.validate_objects`, `query_conversion.target_test` and
+`query_conversion.output.sidecar`, each written as the bare word, quoted, as `no`/`false`,
+as `on`/`true`, in capitals and left empty; the defaults when the key is absent; that an
+unquoted `off` passes the startup schema check; that a value the migrator cannot carry out
+still stops the run; and that a typo, run with `--ignore-config-schema-errors`, reaches
+`probe_statements()` unchanged instead of being turned into the default. The configuration
+is written as text, not dumped from a dict — `yaml.safe_dump` quotes `off` by itself, which
+is the whole trap.
+
+**Expected result.** All pass. Needs `jsonschema` for the startup check.
+
 ## 2. Anonymization
 
 ### `test_anonymization_unknown_method.py` — 9 tests
@@ -221,6 +240,22 @@ call for the server, not the data) and a NULL are not measured.
 **Expected result.** All pass.
 
 ---
+
+### `test_anonymization_method_parameters.py` — 10 functions, 41 tests
+
+**Purpose.** A method parameter written as text is read as what it says. Every parameter
+comes out of YAML and a form-driven editor writes each of them as a string, so
+`pass_original: "false"` was a non-empty string, therefore truthy, and
+`postgres_anon_native` passed the original value into the call of the `anon` extension —
+in the one workflow whose point is that the original value does not travel.
+
+**Covers.** `pass_original` written as `false`, `"false"`, `no`, `off`, `0`, empty and as
+each of their opposites, with the arguments kept in both cases; the `flag()` helper against
+every spelling YAML itself would read as a boolean; `out_type` as `int` and as `integer`
+(the two documents named different ones), read case-insensitively; that the hash stays
+deterministic and salted; and `prefix_len` / `suffix_len` of `partial_mask` given as text.
+
+**Expected result.** All pass. No standard-library dependency.
 
 ## 3. Source connectors
 

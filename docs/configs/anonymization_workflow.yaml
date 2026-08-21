@@ -99,7 +99,7 @@ migration:
 #   custom_german_bank       German bank data, params: part (e.g. combined)
 #   consistent_integer_mask  the same input always gives the same output
 #   static_mask              every character replaced, params: mask_char
-#   deterministic_hash_mask  hash, params: salt, out_type (string / integer)
+#   deterministic_hash_mask  hash, params: salt, out_type (string / integer, int)
 #   numeric_noise            value +/- a ratio, params: ratio (0.10 = 10 %)
 #   partial_mask             keep the ends, params: prefix_len, suffix_len,
 #                            mask_str

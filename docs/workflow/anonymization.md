@@ -145,7 +145,7 @@ The following methods are pre-registered and ready for use in your configuration
    - **Description:** Generates a deterministic SHA256 hash of the input value.
    - **Parameters:**
      - `salt` (optional): A string to append to the value before hashing.
-     - `out_type` (optional): `string` for the hex digest, or `int` for a numerical representation. Default is `string`.
+     - `out_type` (optional): `string` for the hex digest, or `int` (`integer` is read the same way) for a numerical representation. Read case-insensitively. Default is `string`.
 
 9. **`numeric_noise`**
    - **Description:** Adjusts a numeric value by adding or subtracting a randomized percentage of the original value, obscuring the exact number while keeping it proportionally accurate.

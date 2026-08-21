@@ -144,7 +144,7 @@ class QueryConverter:
             raise ValueError(
                 f"Query conversion is not implemented for source type '{self.source_db_type}'. "
                 f"The statements are not passed through unconverted - that would look like a "
-                f"conversion without being one. See development/APPLICATION_QUERIES_CONVERSION_STRATEGY.md.")
+                f"conversion without being one.")
 
         target = self.load_connector('target')
         try:

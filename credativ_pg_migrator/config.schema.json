@@ -1407,14 +1407,49 @@
           "description": "How the markers are written back into the converted statement. 'original' gives back what the application holds today, 'numeric' writes $1..$n for an application which is being ported to a PostgreSQL driver at the same time."
         },
         "target_test": {
-          "type": "string",
-          "enum": [
+          "default": "explain",
+          "description": "How much of the converted statement is proven against the target. 'parse' sends PREPARE - syntax, every table, column and function, and the types. 'explain' adds that a plan can be produced. Both run inside a read only transaction which is rolled back; neither reads any data. A statement with bind parameters is always tested with PREPARE, because EXPLAIN of one is refused by PostgreSQL as well. Read case-insensitively; false and null are accepted as 'off', true as 'explain'.",
+          "anyOf": [
+            {
+              "title": "standard values",
+              "description": "The values to use. 'off', 'parse', 'explain'.",
+              "enum": [
+                "off",
+                "parse",
+                "explain"
+              ]
+            },
+            {
+              "title": "accepted aliases",
+              "description": "Synonyms accepted for compatibility, each read as the standard value it stands for. Prefer the standard value. The configuration is read with PyYAML, which follows YAML 1.1, so an unquoted off is the boolean false and an unquoted on is true: false and null are read as 'off', true as 'explain'.",
+              "enum": [
+                "false",
+                "no",
+                "none",
+                "on",
+                "skip",
+                "true",
+                "yes",
+                true,
+                false,
+                null
+              ]
+            }
+          ],
+          "x-standard-values": [
             "off",
             "parse",
             "explain"
           ],
-          "default": "explain",
-          "description": "How much of the converted statement is proven against the target. 'parse' sends PREPARE - syntax, every table, column and function, and the types. 'explain' adds that a plan can be produced. Both run inside a read only transaction which is rolled back; neither reads any data. A statement with bind parameters is always tested with PREPARE, because EXPLAIN of one is refused by PostgreSQL as well."
+          "x-aliases": {
+            "true": "explain",
+            "yes": "explain",
+            "on": "explain",
+            "false": "off",
+            "no": "off",
+            "none": "off",
+            "skip": "off"
+          }
         },
         "timeout": {
           "type": "string",
@@ -1467,18 +1502,65 @@
               "description": "Whether the statement of the source is written into the comment block above the converted one."
             },
             "sidecar": {
-              "type": "string",
-              "enum": [
+              "default": "json",
+              "description": "A machine readable file next to the output file, holding one record per statement - what a CI job or a script which patches application sources reads. 'off' writes none. Read case-insensitively; false and null are accepted as 'off', true as 'json'.",
+              "anyOf": [
+                {
+                  "title": "standard values",
+                  "description": "The values to use. 'json', 'csv', 'off'.",
+                  "enum": [
+                    "json",
+                    "csv",
+                    "off"
+                  ]
+                },
+                {
+                  "title": "accepted aliases",
+                  "description": "Synonyms accepted for compatibility, each read as the standard value it stands for. Prefer the standard value. The configuration is read with PyYAML, which follows YAML 1.1, so an unquoted off is the boolean false and an unquoted on is true: false and null are read as 'off', true as 'json'.",
+                  "enum": [
+                    "false",
+                    "no",
+                    "none",
+                    "on",
+                    "skip",
+                    "true",
+                    "yes",
+                    true,
+                    false,
+                    null
+                  ]
+                }
+              ],
+              "x-standard-values": [
                 "json",
                 "csv",
                 "off"
               ],
-              "default": "json",
-              "description": "A machine readable file next to the output file, holding one record per statement - what a CI job or a script which patches application sources reads."
+              "x-aliases": {
+                "true": "json",
+                "yes": "json",
+                "on": "json",
+                "false": "off",
+                "no": "off",
+                "none": "off",
+                "skip": "off"
+              }
             }
           }
         }
-      }
+      },
+      "x-applies-to-engines": [
+        "mssql",
+        "sybase_ase",
+        "informix",
+        "ibm_db2_luw",
+        "ibm_db2_zos",
+        "ibm_db2_i",
+        "mysql",
+        "mariadb",
+        "oracle",
+        "sql_anywhere"
+      ]
     },
     "mapping": {
       "type": "object",

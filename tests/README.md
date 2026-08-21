@@ -35,9 +35,9 @@ tests, and no test depends on the order of the others.
 | group | needs | files |
 |---|---|---|
 | configuration & logging | `pyyaml`, `jsonschema`, `pytest` | the 5 `test_config_*` / `test_logging_*` / `test_object_*` files, and `test_schema_names.py` |
-| query conversion | `sqlglot`, `pytest` | the 4 `test_query_*` files and the `test_*_query_conversion.py` of Db2, Oracle and SQL Anywhere |
+| query conversion | `sqlglot`, `pytest` | the 6 `test_query_*` files and the `test_*_query_conversion.py` of Db2, Oracle and SQL Anywhere |
 | anonymization, Db2 CSV | nothing beyond the standard library | 3 files |
-| everything else | the package's own dependencies — `psycopg2`, `tabulate`, `jaydebeapi` | 19 files, `test_informix_query_conversion.py` and `test_mysql_query_conversion.py` among them |
+| everything else | the package's own dependencies — `psycopg2`, `tabulate`, `jaydebeapi`, `pyodbc` | 21 files, `test_informix_query_conversion.py`, `test_mysql_query_conversion.py`, `test_ms_sql_query_conversion.py` and `test_sybase_query_conversion.py` among them |
 
 The third group imports the connectors, which import their drivers at module level, so
 those files fail to **collect** if the drivers are absent — the message is
@@ -613,6 +613,69 @@ parser reads and answers differently: `LOCATE`, whose arguments are the other wa
 `DATEFORMAT` code by code, `LIST`, the constructs which stop the conversion, the `+` which
 concatenates — reported from the parsed statement, so that the '+' in the comment above a
 statement does not fire it — and the six entries of the function mapping which were defects.
+
+### `test_ms_sql_query_conversion.py` — 20 tests
+
+**Purpose.** The conversion of MS SQL Server, which was the first source of the step and had
+no tests of its own until the review of 2026-08-21. `convert_statement_code()` is what the
+view path and the query path both call, so what stands here holds for the views of a
+migration as well.
+
+**Covers.** The contract of `convert_query_code()` - four keys, and a statement which cannot
+be parsed answered with `converted: False` and an empty `code`, never with the text it was
+given. That the user defined types of the source are read **once** per connector and no
+longer once per statement: this is the only conversion in the tree which asks a database
+while it converts, and the query conversion converts a whole file of them with a pool of
+workers over one connector. `TOP`, the `+` which concatenates, the function mapping, the
+niladic functions which must not come out as calls, `datepart`, and the schema of the source
+replaced by the schema of the target. And the limitation which is recorded rather than
+discovered: `*=`, which sybase_ase rewrites and this connector does not, so such a statement
+is reported - never handed back unconverted.
+
+### `test_sybase_query_conversion.py` — 21 tests
+
+**Purpose.** The conversion of Sybase ASE - the source the whole step was designed for, and
+the other one which had no tests of its own. It needs no server: the conversion is a
+transformation of text.
+
+**Covers.** The outer join above all. Sybase writes it in the WHERE clause as `*=` and `=*`,
+no parser reads that, and the rewrite turns the marked equality into a `LEFT` or `RIGHT
+JOIN`. That rewrite had been written against a model of `sqlglot` in which the tables behind
+the comma of a FROM clause stood in `From.expressions`; they are implicit joins on the SELECT
+now, so the table was never found and **every** `*=` statement went through with the marker
+still in it - a view kept it in its text and a query of an application was reported as one
+whose outer join could not be rewritten. It goes through
+`query_conversion/outer_joins.py` now, the module Oracle and SQL Anywhere use. Asserted in
+both directions: the join becomes a `LEFT JOIN`, the conditions which are not the join stay
+in the WHERE clause, the `TRUE` left behind is taken out, and a condition standing under an
+`OR` is still refused rather than answered with fewer rows. The example §10.2 of the strategy
+shows is one of the cases. Then `TOP`, the `+`, the function mapping, the schema replacement,
+and the gates in this dialect.
+
+### `test_query_gates_literals.py` — 34 tests
+
+**Purpose.** The textual gates and the parts of a statement they may read.
+
+**Covers.** Gate 2 decides from the text, because a statement the parser could not read still
+has to be refused when it writes - and four of the five gates read the whole text, including
+string literals and comments. `SELECT id FROM customer -- the report for update of the
+pricing sheet` was answered with "the statement takes row locks" and was never converted and
+never tested. Every case stands in both directions: the word inside a literal or a comment
+must not refuse, the same word standing in the SQL must still refuse. Also the functions
+whose effects the migrator does not know, which are named in a warning rather than refused,
+and the tables the converted statement carries without a schema, which the target test
+resolves through a `search_path` the application may not have.
+
+### `test_query_output_paths.py` — 7 tests
+
+**Purpose.** The output paths of the run, decided before the first file is read.
+
+**Covers.** An output which would be written over its own input, an output which exists
+already and may not be replaced, and two input files whose outputs would land on the same
+path. None of these needs a conversion to be answered; they used to be answered by the
+writer, which runs after a file has been converted and tested, so an existing output file on
+the first of twenty inputs threw that file's work away and stopped the run before the rest
+were read. Also that the check itself writes nothing.
 
 ### `test_query_conversion_workflow.py` — 27 functions, 31 tests
 

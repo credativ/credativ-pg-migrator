@@ -27,6 +27,7 @@ import sys
 from tabulate import tabulate
 import sqlglot
 from credativ_pg_migrator.connectors.tsql_parser import TsqlParser
+from credativ_pg_migrator.query_conversion import outer_joins as query_outer_joins
 from sqlglot import exp, TokenType
 from sqlglot.dialects import TSQL
 import time
@@ -4845,71 +4846,30 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
 
 
         def transform_sybase_joins(expression):
-            # Check for EQ nodes with outer join comments
-            outer_joins = []
-            for node in expression.find_all(sqlglot.exp.EQ):
-                if node.comments and any('left_outer' in c for c in node.comments):
-                    outer_joins.append((node, 'LEFT'))
-                elif node.comments and any('right_outer' in c for c in node.comments):
-                    outer_joins.append((node, 'RIGHT'))
+            """
+            The '*=' and '=*' outer joins, rewritten by the shared module.
 
-            for node, join_type in outer_joins:
-                # LEFT JOIN: A *= B -> left=A, right=B (preserves A, B is null supplying)
-                # RIGHT JOIN: A =* B -> left=A, right=B (preserves B, A is null supplying)
+            This used to be an implementation of its own, written against a model of sqlglot
+            in which the tables behind the comma of a FROM clause stood in
+            `From.expressions`. They do not any more - the extra tables are implicit joins on
+            the SELECT - so the table the marked condition named was never found, the rewrite
+            gave up on every statement and the marker went through to the end. A view kept
+            the '/* left_outer */' in its text and a statement of an application was reported
+            as one whose outer join could not be rewritten. Every Sybase ASE statement written
+            with '*=' was affected, which is the shape the strategy names as the example of
+            what this step is for.
 
-                null_supplying_col = node.right if join_type == 'LEFT' else node.left
-
-                # Identify target table from null supplying column
-                target_alias = ""
-                if isinstance(null_supplying_col, sqlglot.exp.Column):
-                     target_alias = null_supplying_col.table
-
-                if not target_alias:
-                    continue
-
-                select_node = node.find_ancestor(sqlglot.exp.Select)
-                if not select_node:
-                    continue
-
-                # Find target table in FROM clause
-                target_table_node = None
-                from_clause = select_node.args.get('from')
-                if from_clause:
-                     for child in from_clause.expressions:
-                         # 1. Direct match (Table or Aliased Subquery)
-                         if child.alias_or_name == target_alias:
-                             target_table_node = child
-                             break
-
-                         # 2. Wrapper match (Subquery/Paren without explicit alias, containing the table)
-                         # e.g. FROM (table) -> child is Subquery/Paren
-                         child_tables = list(child.find_all(sqlglot.exp.Table))
-                         if len(child_tables) == 1 and child_tables[0].alias_or_name == target_alias:
-                             target_table_node = child
-                             break
-
-                if target_table_node:
-                    # Remove from FROM clause
-                    from_clause.expressions.remove(target_table_node)
-
-                    # Create JOIN
-                    join_condition = node.copy()
-                    join_condition.comments = None
-
-                    join = sqlglot.exp.Join(
-                        this=target_table_node,
-                        kind="LEFT",
-                        on=join_condition
-                    )
-
-                    # Add to Select joins
-                    if "joins" not in select_node.args:
-                        select_node.args["joins"] = []
-                    select_node.args["joins"].append(join)
-
-                    # Replace condition in WHERE with TRUE
-                    node.replace(sqlglot.exp.Boolean(this=True))
-
+            The shared module is the one Oracle's '(+)' and SQL Anywhere's '*=' already go
+            through, and it is written for the model sqlglot has. Returns the expression; a
+            condition it could not attribute keeps its marker, and the caller refuses such a
+            statement rather than offering it as converted.
+            """
+            expression, unconverted = query_outer_joins.convert_marked_outer_joins(expression)
+            if unconverted:
+                self.config_parser.print_log_message(
+                    'WARNING', f"sybase_ase_connector: convert_statement_code: {unconverted} outer "
+                               f"join(s) written '*=' or '=*' could not be attributed to a table of "
+                               f"the FROM clause and were not rewritten.")
             return expression
 
         def replace_cast_types(node):
@@ -5006,6 +4966,10 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
             parsed_code = parsed_code.transform(self.keep_source_variables)
             converted_code = parsed_code.sql(dialect='postgres')
             converted_code = converted_code.replace("()()", "()")
+            ## the 'TRUE' the outer join rewrite leaves where a condition moved into an ON
+            ## clause - "WHERE TRUE AND x" is "WHERE x", and the shorter one is what a
+            ## developer has to read
+            converted_code = query_outer_joins.tidy_boolean_placeholders(converted_code)
 
             converted_code = self.apply_sql_functions_mapping(converted_code, settings)
 

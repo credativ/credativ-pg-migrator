@@ -28,6 +28,7 @@ query_conversion.run_after_migration is true.
 """
 
 import concurrent.futures
+import datetime
 import glob
 import importlib
 import os
@@ -35,6 +36,7 @@ import threading
 import time
 
 from credativ_pg_migrator.constants import MigratorConstants
+from credativ_pg_migrator.database_connector import first_line
 from credativ_pg_migrator.migrator_logging import MigratorLogger
 from credativ_pg_migrator.query_conversion import classifier
 from credativ_pg_migrator.query_conversion import parameters as parameters_module
@@ -98,6 +100,13 @@ class QueryConverter:
         self.target_schema = config_parser.get_target_schema()
         self.migrator_tables = migrator_tables
         self.local = threading.local()
+        ## every connection opened by a worker, so that the run can close them itself
+        self.worker_connections = []
+        self.worker_sources = []
+        self.connections_lock = threading.Lock()
+        ## the protocol table keeps the rows of the runs before this one, so a run has to say
+        ## which one it is
+        self.run_started = None
         self.results = []
 
     ## ------------------------------------------------------------------ connectors
@@ -111,6 +120,24 @@ class QueryConverter:
         connector_class = getattr(importlib.import_module(module_name), class_name)
         return connector_class(self.config_parser, direction)
 
+    def source_connection(self):
+        """
+        One connector for the source per worker.
+
+        Most sources convert a statement without asking anything: the conversion is a
+        transformation of text and the connector is only the place it lives. MS SQL Server is
+        the exception - its conversion reads the user defined types of the source - and a
+        connector is not written to be used by several threads at once. One per worker is what
+        the target already gets and costs nothing where nothing is asked.
+        """
+        connection = getattr(self.local, 'source', None)
+        if connection is None:
+            connection = self.load_connector('source')
+            self.local.source = connection
+            with self.connections_lock:
+                self.worker_sources.append(connection)
+        return connection
+
     def target_connection(self):
         """One connection to the target per worker - a connection is not shared by threads."""
         connection = getattr(self.local, 'target', None)
@@ -118,16 +145,53 @@ class QueryConverter:
             connection = self.load_connector('target')
             connection.connect()
             self.local.target = connection
+            ## the thread which opened it is the only one which can close it - self.local
+            ## answers the caller's thread and nobody else's - so the connection is registered
+            ## here and closed by that thread when the pool is done with it. Without the
+            ## register, close_target_connection() ran in the main thread at the end of a file
+            ## and closed the connection of the main thread alone: a run over many files opened
+            ## files x workers connections, each of them released only when the garbage
+            ## collector reached the dead thread rather than by disconnect().
+            with self.connections_lock:
+                self.worker_connections.append(connection)
         return connection
 
     def close_target_connection(self):
+        """The target connection of the calling thread, closed and forgotten."""
         connection = getattr(self.local, 'target', None)
         if connection is not None:
+            self.disconnect_target(connection)
+            self.local.target = None
+
+    def disconnect_target(self, connection):
+        try:
+            connection.disconnect()
+        except Exception:
+            pass
+        with self.connections_lock:
+            if connection in self.worker_connections:
+                self.worker_connections.remove(connection)
+
+    def close_worker_connections(self):
+        """
+        Every target connection this run opened, closed - the one of the calling thread and
+        the ones of the workers of the pool which has just been shut down.
+
+        A pool is built per input file and its threads are gone when it is; their thread local
+        storage goes with them and takes the last reference to the connection with it, so
+        nothing but the garbage collector would ever have closed them.
+        """
+        self.close_target_connection()
+        with self.connections_lock:
+            remaining = self.worker_connections + self.worker_sources
+            self.worker_connections = []
+            self.worker_sources = []
+        self.local.source = None
+        for connection in remaining:
             try:
                 connection.disconnect()
             except Exception:
                 pass
-            self.local.target = None
 
     ## ------------------------------------------------------------------ prerequisites
 
@@ -162,6 +226,72 @@ class QueryConverter:
                 f"conversion tests every converted statement against the migrated objects, so it "
                 f"is run after a migration, not before one.")
         self.print_log_message('INFO', f"Target schema \"{self.target_schema}\" holds {objects} table(s) and view(s).")
+        self.check_protocol_matches_config()
+
+    def check_protocol_matches_config(self):
+        """
+        §3.1(d)2 - the step has to be given the configuration the migration was run with.
+
+        Reading the map of one migration while testing against the schema of another produces
+        confident, wrong output, and it is cheap to notice: the protocol table of the tables
+        records the schemas the migration really wrote. The strategy suggested the main table
+        for this, which turned out to record only the tasks and their timings, so the check is
+        made against the tables instead.
+
+        It stops on a mismatch and says nothing when there is no protocol schema to ask - that
+        is the reduced mode of §3.1(c), which the header of every output file already states.
+        """
+        if self.migrator_tables is None:
+            self.print_log_message(
+                'INFO', 'query_conversion: no connection to the migrator database - the '
+                        'configuration is not compared against the protocol tables of a migration.')
+            return
+        table_name = self.config_parser.get_protocol_name_tables()
+        protocol_schema = self.migrator_tables.protocol_schema
+        try:
+            cursor = self.migrator_tables.protocol_connection.connection.cursor()
+            cursor.execute(f'''
+                SELECT DISTINCT source_schema_name, target_schema_name
+                FROM "{protocol_schema}"."{table_name}"
+                WHERE target_schema_name IS NOT NULL
+            ''')
+            rows = cursor.fetchall()
+            cursor.close()
+        except Exception as e:
+            self.print_log_message(
+                'INFO', f"query_conversion: the protocol tables of a migration could not be read "
+                        f"({first_line(e)}) - the configuration is not compared against them, and "
+                        f"the names of the source are used as they are.")
+            return
+
+        if not rows:
+            self.print_log_message(
+                'INFO', 'query_conversion: the protocol tables hold no migrated table - the '
+                        'configuration is not compared against them.')
+            return
+
+        targets = sorted({(row[1] or '').strip() for row in rows if row[1]})
+        if not any(target.lower() == (self.target_schema or '').lower() for target in targets):
+            raise ValueError(
+                f"The protocol tables in \"{protocol_schema}\" record a migration into "
+                f"{', '.join(chr(34) + target + chr(34) for target in targets)}, and this "
+                f"configuration names \"{self.target_schema}\" as the target schema. Reading the "
+                f"map of one migration while testing against the schema of another produces "
+                f"output which looks right and is not. Run the step with the configuration the "
+                f"migration was run with, or point migrator.protocol_schema at the run which "
+                f"produced \"{self.target_schema}\".")
+
+        sources = sorted({(row[0] or '').strip() for row in rows if row[0]})
+        if sources and not any(source.lower() == (self.source_schema or '').lower() for source in sources):
+            self.print_log_message(
+                'WARNING', f"query_conversion: the protocol tables record a migration out of "
+                           f"{', '.join(sources)}, and this configuration names "
+                           f"'{self.source_schema}' as the source schema. The target matches, so "
+                           f"the run goes on - but a statement which names an object of another "
+                           f"schema is converted with the schema of this configuration.")
+        self.print_log_message(
+            'INFO', f"query_conversion: the protocol tables in \"{protocol_schema}\" record the "
+                    f"migration into \"{self.target_schema}\" which this run is asked about.")
 
     def count_target_objects(self, target):
         cursor = target.connection.cursor()
@@ -213,12 +343,13 @@ class QueryConverter:
 
     ## ------------------------------------------------------------------ one statement
 
-    def convert_statement(self, statement, total, source_connection):
+    def convert_statement(self, statement, total):
         """
         One statement from the file to the answer: the gates, the parameters, the conversion
         of the connector, the gate on the result and the test against the target.
         """
         result = StatementResult(statement, total)
+        result.task_started = datetime.datetime.now()
 
         ## The bind parameters are taken out before anything parses the statement: '%s' and
         ## '%(name)s' are not SQL in any dialect, so a statement holding them cannot be read
@@ -230,9 +361,12 @@ class QueryConverter:
         ## the connector rewrites what no parser of its dialect can read - the '*=' outer
         ## join of Sybase ASE - so that a statement its own conversion handles is not
         ## reported as one the migrator cannot read
+        source_connection = self.source_connection()
         parse_text = source_connection.prepare_query_for_parsing(bind_parameters.conversion_statement)
         classification = classifier.classify(statement.text, self.source_db_type,
                                              parse_text=parse_text)
+        result.statement_kind = classification.kind
+        result.gate_refused = f"gate {classification.gate}" if classification.gate else None
         if classification.verdict == 'refused':
             result.status = SKIPPED
             result.reason = classification.reason
@@ -247,10 +381,23 @@ class QueryConverter:
         result.warnings.extend(parameter_warnings)
         result.parameters_line = bind_parameters.describe()
 
+        ## §7.4 - the same substitution list the view path is given, from the same key of the
+        ## configuration. It was applied by three connectors of the ten inside their own body
+        ## converter and by nobody else, so a name over a database link went into the output
+        ## of the other seven unchanged. It runs here, on the text of the source dialect and
+        ## before any parse, which is where those three run it too - their pass then finds
+        ## nothing left to replace instead of replacing twice.
+        query_code, substituted = source_connection.apply_remote_objects_substitution(
+            bind_parameters.conversion_statement)
+        for substitution in substituted:
+            result.warnings.append(
+                f"remote_objects_substitution replaced {substitution} - the converted statement "
+                f"reads the object of the target, not the one the text of the application names")
+
         answer = source_connection.convert_query_code({
             ## the converter sees the statement with the parameters replaced by an identifier
             ## it carries through unharmed; PostgreSQL sees $1..$n further down
-            'query_code': bind_parameters.conversion_statement,
+            'query_code': query_code,
             'source_schema_name': self.source_schema,
             'target_schema_name': self.target_schema,
             'target_db_type': self.target_db_type,
@@ -272,8 +419,24 @@ class QueryConverter:
         if not after.is_select:
             result.status = SKIPPED
             result.reason = after.reason
+            result.gate_refused = 'gate 4'
             self.print_log_message('WARNING', f"query_conversion: [{statement.ordinal}] {statement.location}: refused after conversion - {after.reason}")
             return result
+
+        ## §7.3 is not implemented yet, so a name the statement carries without a schema is
+        ## written out as it stands - and the target test resolves it through the search_path
+        ## it sets itself, which the application does not necessarily have. Saying so is what
+        ## can be done before the name map exists: an OK which rests on a search_path must not
+        ## be read as an OK which does not.
+        unqualified = classifier.unqualified_tables(after.parsed)
+        if unqualified:
+            result.warnings.append(
+                f"the converted statement names {', '.join(unqualified[:5])}"
+                f"{', ...' if len(unqualified) > 5 else ''} without a schema. The target test "
+                f"resolved {'them' if len(unqualified) > 1 else 'it'} with "
+                f"search_path = \"{self.target_schema}\"; the application has to set the same "
+                f"search_path, or the name has to be written out as "
+                f"\"{self.target_schema}\".\"{unqualified[0].lower()}\".")
 
         result.converted_sql = converted
         restored, restore_warnings = bind_parameters.restore(
@@ -351,12 +514,14 @@ class QueryConverter:
     ## ------------------------------------------------------------------ the run
 
     def run(self):
+        self.run_started = datetime.datetime.now()
         self.print_log_message('INFO', '=========================================')
         self.print_log_message('INFO', '      Starting Query Conversion          ')
         self.print_log_message('INFO', '=========================================')
 
-        source_connection = self.load_connector('source')
-        self.check_prerequisites(source_connection)
+        ## the connector of the main thread, which is what the capability gate is asked; every
+        ## worker makes one of its own further down
+        self.check_prerequisites(self.source_connection())
 
         files = self.input_files()
         if not files:
@@ -388,18 +553,44 @@ class QueryConverter:
             ],
         }
 
+        ## Every output path is decided before the first file is read. It used to be checked
+        ## by the writer, which runs after a file has been converted and tested - so an output
+        ## file which existed already, on the first of twenty input files, threw the work of
+        ## that file away and stopped the run before the other nineteen. Nothing here needs a
+        ## conversion to be answered, so it is answered while it still costs nothing.
+        writer.check_all_paths(files)
+
         stop_on_error = (self.config_parser.get_query_conversion_on_error() == 'stop')
         written = []
-        for path in files:
-            results = self.convert_file(path, source_connection, stop_on_error)
-            self.results.extend(results)
-            output_file, sidecar = writer.write(path, results, header)
-            written.append(output_file)
-            if sidecar:
-                written.append(sidecar)
+        stopped = None
+        try:
+            for path in files:
+                results = self.convert_file(path)
+                self.results.extend(results)
+                output_file, sidecar = writer.write(path, results, header)
+                written.append(output_file)
+                if sidecar:
+                    written.append(sidecar)
+                ## on_error: stop ends the run - but not before the file which holds the answer
+                ## has been written. The statements were all converted by the time the first
+                ## failure is known, and a pipeline which gates on this needs the file which
+                ## names what failed more than any other caller does.
+                if stop_on_error:
+                    stopped = next((result for result in results if result.is_failure), None)
+                    if stopped is not None:
+                        break
+        finally:
+            ## whatever ended the loop, the connections this run opened are its own to close
+            self.close_worker_connections()
 
         self.record_protocol()
         self.print_summary(written, header)
+
+        if stopped is not None:
+            raise ValueError(
+                f"{stopped.statement.location}: {stopped.status} - {stopped.reason}. "
+                f"query_conversion.on_error is 'stop'. {os.path.basename(written[0]) if written else 'The output'} "
+                f"and the protocol table hold everything which was converted up to here.")
 
         failures = [result for result in self.results if result.is_failure]
         return failures
@@ -425,7 +616,7 @@ class QueryConverter:
         })
         self.print_log_message('INFO', '\n' + summary)
 
-    def convert_file(self, path, source_connection, stop_on_error):
+    def convert_file(self, path):
         text = self.read_file(path)
         statements = split_statements(
             text, self.config_parser.get_query_conversion_statement_separator(), input_file=path)
@@ -438,14 +629,17 @@ class QueryConverter:
 
         def work(index_statement):
             index, statement = index_statement
+            started = datetime.datetime.now()
             try:
-                return index, self.convert_statement(statement, total, source_connection)
+                result = self.convert_statement(statement, total)
             except Exception as e:
                 result = StatementResult(statement, total)
                 result.status = NOT_CONVERTED
                 result.reason = f"the conversion of this statement ended with an error: {e}"
+                result.task_started = started
                 self.print_log_message('ERROR', f"query_conversion: {statement.location}: {e}")
-                return index, result
+            result.task_completed = datetime.datetime.now()
+            return index, result
 
         ## a statement which stands in the file more than once is converted and tested once
         unique = []
@@ -482,14 +676,7 @@ class QueryConverter:
             repeated.identical_to = first.ordinal
             results[index] = repeated
 
-        self.close_target_connection()
-
-        if stop_on_error:
-            for result in results:
-                if result.is_failure:
-                    raise ValueError(
-                        f"{result.statement.location}: {result.status} - {result.reason}. "
-                        f"query_conversion.on_error is 'stop'.")
+        self.close_worker_connections()
         return results
 
     ## ------------------------------------------------------------------ protocol
@@ -502,7 +689,9 @@ class QueryConverter:
         try:
             self.migrator_tables.create_table_for_queries()
             for result in self.results:
-                self.migrator_tables.insert_query(result.as_dict())
+                row = result.as_dict()
+                row['run_started'] = self.run_started
+                self.migrator_tables.insert_query(row)
         except Exception as e:
             self.print_log_message('WARNING', f"query_conversion: the run could not be recorded in the "
                                               f"protocol table: {e}")

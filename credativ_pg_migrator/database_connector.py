@@ -579,6 +579,38 @@ class DatabaseConnector(ABC):
             index += 1
         return ''.join(masked)
 
+    def apply_remote_objects_substitution(self, code: str):
+        """
+        The names of `remote_objects_substitution` replaced by the names they stand for.
+
+        A statement of an application reaches the same database links and four part names the
+        query of a view does, so it is given the same substitution list from the same key of
+        the configuration. Returns (code, applied) - the second is what really fired, which the
+        query conversion writes into the block of the statement: a query which now reads
+        another object than the one its text names is something the developer has to be told.
+
+        It runs on the text of the source dialect, before anything parses it, which is where
+        the view path of sybase_ase and of the two Db2 flavours which have it run it as well.
+        The query conversion applies it first, so their own pass finds nothing left to do
+        rather than doing it twice.
+        """
+        applied = []
+        if not code:
+            return code, applied
+        substitutions = self.config_parser.get_remote_objects_substitution()
+        if not substitutions:
+            return code, applied
+        iterator = substitutions.items() if isinstance(substitutions, dict) else substitutions
+        for source_object, target_object in iterator:
+            if not source_object or not target_object:
+                continue
+            replaced, count = re.subn(re.escape(source_object), target_object, code,
+                                      flags=re.IGNORECASE)
+            if count:
+                code = replaced
+                applied.append(f"{source_object} -> {target_object}")
+        return code, applied
+
     def apply_sql_functions_mapping(self, code: str, settings: dict) -> str:
         """
         Applies the SQL functions mapping to the provided code string using regular expressions.

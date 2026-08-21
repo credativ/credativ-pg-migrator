@@ -24,6 +24,7 @@ from credativ_pg_migrator.connectors.tsql_parser import TsqlParser
 from credativ_pg_migrator.jvm_helper import detach_thread_from_jvm
 import re
 import struct
+import threading
 import traceback
 import time
 import datetime
@@ -224,6 +225,12 @@ class CustomTSQL(TSQL):
             return "\\n".join(stmts)
 
         TRANSFORMS[Block] = _block_handler
+
+## Read once per connector and shared by the workers of the query conversion - see
+## _get_udt_map(). A lock created on the instance would itself have to be created under a
+## lock; there is one fetch per run behind this one, so a module level lock costs nothing.
+UDT_MAP_LOCK = threading.Lock()
+
 
 class MsSQLConnector(DatabaseConnector):
     def __init__(self, config_parser, source_or_target):
@@ -2139,12 +2146,29 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
             return {}
 
     def _get_udt_map(self):
-        """ Helper to get a map of UDT name -> definition for conversion logic """
-        udts_full = self.fetch_user_defined_types('dbo')
-        udt_map = {}
-        for k, v in udts_full.items():
-            udt_map[v['type_name']] = v
-        return udt_map
+        """
+        A map of UDT name -> definition for the conversion, read from the source once.
+
+        It used to be read on every call, and convert_statement_code() calls it for every
+        statement it converts. The query conversion converts a whole file of them, with a
+        pool of workers over one connector - so this was a round trip to the source database
+        per statement, and fetch_user_defined_types() connects and disconnects around its
+        query, which one worker did while another was using the same connection. The answer
+        does not change during a run: it is read once, under a lock, and kept.
+        """
+        cached = getattr(self, '_udt_map_cache', None)
+        if cached is not None:
+            return cached
+        with UDT_MAP_LOCK:
+            cached = getattr(self, '_udt_map_cache', None)
+            if cached is not None:
+                return cached
+            udts_full = self.fetch_user_defined_types('dbo')
+            udt_map = {}
+            for k, v in udts_full.items():
+                udt_map[v['type_name']] = v
+            self._udt_map_cache = udt_map
+            return udt_map
 
     def get_sequence_current_value(self, sequence_name: str):
         pass

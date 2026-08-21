@@ -15,6 +15,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import json
+import os
 import re
 import uuid
 import psycopg2
@@ -3102,19 +3103,29 @@ class MigratorTables:
         of the migrator metadata may not be there any more. It is created when it is missing -
         created, never dropped: create_protocol(), which does drop it, belongs to the planner
         of a migration and is not called from here.
+
+        It really is never dropped now. It used to be dropped and rebuilt at the start of every
+        run, which took the record of the run before it with it - the record §13.3 of the
+        strategy needs as the resume point of an incremental re-run, and the history a user
+        compares two runs against. A run is told apart from the ones before it by run_started,
+        and the columns which were missing against §11 of the strategy - statement_kind,
+        gate_refused, unresolved_objects, task_started, task_completed - are added to a table
+        which was created by an older version.
         """
         table_name = self.config_parser.get_protocol_name_queries()
         self.protocol_connection.execute_query(f"""CREATE SCHEMA IF NOT EXISTS "{self.protocol_schema}" """)
-        self.protocol_connection.execute_query(self.drop_table_sql.format(protocol_schema=self.protocol_schema, table_name=table_name))
         self.protocol_connection.execute_query(f"""
             CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
             (id SERIAL PRIMARY KEY,
+            run_started TIMESTAMP,
             input_file TEXT,
             statement_ordinal INTEGER,
             line_from INTEGER,
             line_to INTEGER,
             statement_name TEXT,
             statement_hash TEXT,
+            statement_kind TEXT,
+            gate_refused TEXT,
             status TEXT,
             reason TEXT,
             source_sql TEXT,
@@ -3125,12 +3136,26 @@ class MigratorTables:
             target_test_message TEXT,
             target_test_duration_ms NUMERIC,
             warnings TEXT,
+            unresolved_objects TEXT,
             identical_to INTEGER,
             task_created TIMESTAMP DEFAULT clock_timestamp(),
+            task_started TIMESTAMP,
+            task_completed TIMESTAMP,
             success BOOLEAN,
             message TEXT
             )
         """)
+        ## a table left behind by an older version is brought up to the shape above rather than
+        ## being dropped - the rows in it are the history this change exists to keep
+        for column, definition in (('run_started', 'TIMESTAMP'),
+                                   ('statement_kind', 'TEXT'),
+                                   ('gate_refused', 'TEXT'),
+                                   ('unresolved_objects', 'TEXT'),
+                                   ('task_started', 'TIMESTAMP'),
+                                   ('task_completed', 'TIMESTAMP')):
+            self.protocol_connection.execute_query(
+                f"""ALTER TABLE "{self.protocol_schema}"."{table_name}"
+                    ADD COLUMN IF NOT EXISTS {column} {definition}""")
         self.config_parser.print_log_message('DEBUG', f"migrator_tables: create_table_for_queries: Created protocol table {table_name} for converted queries.")
         self.apply_comments([table_name])
 
@@ -3140,26 +3165,34 @@ class MigratorTables:
         table_name = self.config_parser.get_protocol_name_queries()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (input_file, statement_ordinal, line_from, line_to, statement_name, statement_hash,
+            (run_started, input_file, statement_ordinal, line_from, line_to, statement_name,
+             statement_hash, statement_kind, gate_refused,
              status, reason, source_sql, target_sql,
              source_test_result, source_test_message,
              target_test_result, target_test_message, target_test_duration_ms,
-             warnings, identical_to, success, message)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             warnings, unresolved_objects, identical_to,
+             task_started, task_completed, success, message)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s)
         """
         source_test = settings.get('source_test') or {}
         target_test = settings.get('target_test') or {}
         warnings = settings.get('warnings') or []
+        unresolved = settings.get('unresolved_objects') or []
         params = (
+            settings.get('run_started'),
             settings.get('input_file'), settings.get('ordinal'),
             settings.get('line_from'), settings.get('line_to'),
             settings.get('name'), settings.get('sha256'),
+            settings.get('statement_kind'), settings.get('gate_refused'),
             settings.get('status'), settings.get('reason'),
             settings.get('source_sql'), settings.get('target_sql'),
             source_test.get('result'), source_test.get('message'),
             target_test.get('result'), target_test.get('message'), target_test.get('duration_ms'),
             '\n'.join(warnings) if warnings else None,
+            '\n'.join(unresolved) if unresolved else None,
             settings.get('identical_to'),
+            settings.get('task_started'), settings.get('task_completed'),
             settings.get('status') in ('CONVERTED', 'UNCHANGED'),
             settings.get('reason') or None)
         try:
@@ -4667,6 +4700,64 @@ class MigratorTables:
             success_str = str(comments_total) if not self.config_parser.is_dry_run() else '-'
             failed_str = '0' if not self.config_parser.is_dry_run() else '-'
             lines.append(f"{'Comments':<24} | {comments_total:>6} | {success_str:>7} | {failed_str:>6} | ")
+        except Exception:
+            self.protocol_connection.connection.rollback()
+
+        ## The statements of an application, when the run converted any. The table holds the
+        ## rows of earlier runs too, so only the run which has just finished is counted - the
+        ## newest run_started in it. Nothing is printed when the step did not run, which is
+        ## the normal case: query_conversion.run_after_migration is false by default.
+        try:
+            queries_table = self.config_parser.get_protocol_name_queries()
+            cursor.execute(f"""
+                SELECT status, count(*)
+                FROM "{self.protocol_schema}"."{queries_table}"
+                WHERE run_started = (SELECT max(run_started)
+                                     FROM "{self.protocol_schema}"."{queries_table}")
+                GROUP BY status
+            """)
+            query_counts = {row[0]: row[1] for row in cursor.fetchall()}
+            if query_counts:
+                cursor.execute(f"""
+                    SELECT count(DISTINCT input_file)
+                    FROM "{self.protocol_schema}"."{queries_table}"
+                    WHERE run_started = (SELECT max(run_started)
+                                         FROM "{self.protocol_schema}"."{queries_table}")
+                """)
+                query_files = cursor.fetchone()[0]
+                lines.append("")
+                lines.append("[ QUERY CONVERSION ]")
+                lines.append("-" * 80)
+                lines.append(f"{'Outcome':<24} | {'Count':>6} | Meaning")
+                lines.append("-" * 80)
+                for status, meaning in (
+                        ('CONVERTED', 'converted and the target accepted it'),
+                        ('UNCHANGED', 'already valid PostgreSQL'),
+                        ('CONVERTED_FAILING', 'converted, the target refused it'),
+                        ('NOT CONVERTED', 'the converter could not do it'),
+                        ('SKIPPED', 'a gate refused it - not a read')):
+                    lines.append(f"{status:<24} | {query_counts.get(status, 0):>6} | {meaning}")
+                lines.append("-" * 80)
+                statements = sum(query_counts.values())
+                lines.append(f"{'TOTAL':<24} | {statements:>6} | in {query_files} file(s)")
+                attention = query_counts.get('CONVERTED_FAILING', 0) + query_counts.get('NOT CONVERTED', 0)
+                total_errors += attention
+                if attention:
+                    cursor.execute(f"""
+                        SELECT input_file, line_from, line_to, status, reason
+                        FROM "{self.protocol_schema}"."{queries_table}"
+                        WHERE run_started = (SELECT max(run_started)
+                                             FROM "{self.protocol_schema}"."{queries_table}")
+                          AND status IN ('CONVERTED_FAILING', 'NOT CONVERTED')
+                        ORDER BY input_file, statement_ordinal LIMIT 5
+                    """)
+                    lines.append(f"{attention} statement(s) need attention, the first of them:")
+                    for input_file, line_from, line_to, status, reason in cursor.fetchall():
+                        where = f"{os.path.basename(input_file or '')}:{line_from}-{line_to}"
+                        lines.append(f"  {status:<18} {where} - {(reason or '')[:60]}")
+                    lines.append("The whole list is in the output files and in the protocol table.")
+        except psycopg2.errors.UndefinedTable:
+            self.protocol_connection.connection.rollback()
         except Exception:
             self.protocol_connection.connection.rollback()
 

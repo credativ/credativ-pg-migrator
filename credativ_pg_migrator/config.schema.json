@@ -1453,8 +1453,9 @@
         },
         "timeout": {
           "type": "string",
+          "pattern": "^[0-9]+\\s*(us|ms|s|min|h|d)$",
           "default": "30s",
-          "description": "statement_timeout of the test transaction, as PostgreSQL writes it ('30s', '2min')."
+          "description": "statement_timeout of the test transaction, as PostgreSQL writes it ('30s', '2min'). The unit is required: PostgreSQL reads a bare number as milliseconds, so '30' would end every test after 30 ms and report every statement as one the target refused."
         },
         "workers": {
           "type": "integer",

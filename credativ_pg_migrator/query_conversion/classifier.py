@@ -88,7 +88,25 @@ WRITING_FUNCTIONS = ('NEXTVAL', 'SETVAL', 'NEXTVAL_FOR', 'NEXT_VALUE_FOR')
 ## statement - and both of them move the sequence on.
 SEQUENCE_ADVANCE = re.compile(r'(?i)\bNEXTVAL\b|\bNEXT\s+VALUE\s+FOR\b|\bPREVVAL\b')
 
+## Functions which cannot write, so that a call of anything else can be named as a call
+## whose effects this step does not know. Not a complete list of what PostgreSQL has - it is
+## the set which turns up in the statements of an application, and a name outside it is
+## reported rather than refused.
+KNOWN_READING_FUNCTIONS = frozenset((
+    'ABS', 'AVG', 'CAST', 'CEIL', 'CEILING', 'CHAR_LENGTH', 'COALESCE', 'CONCAT', 'CONCAT_WS',
+    'COUNT', 'CURRENT_DATE', 'CURRENT_TIME', 'CURRENT_TIMESTAMP', 'CURRENT_USER', 'DATE',
+    'DATE_PART', 'DATE_TRUNC', 'EXTRACT', 'FLOOR', 'GREATEST', 'INITCAP', 'LEAST', 'LEFT',
+    'LENGTH', 'LOWER', 'LPAD', 'LTRIM', 'MAX', 'MIN', 'MOD', 'NOW', 'NULLIF', 'POSITION',
+    'POWER', 'RANDOM', 'REPLACE', 'RIGHT', 'ROUND', 'RPAD', 'RTRIM', 'SIGN', 'SPLIT_PART',
+    'SQRT', 'STRING_AGG', 'SUBSTR', 'SUBSTRING', 'SUM', 'TO_CHAR', 'TO_DATE', 'TO_NUMBER',
+    'TO_TIMESTAMP', 'TRIM', 'TRUNC', 'UPPER',
+))
+
 LOCKING_HINTS = ('HOLDLOCK', 'UPDLOCK', 'XLOCK', 'TABLOCKX', 'PAGLOCK', 'ROWLOCK')
+
+## the same, as one pattern, so that the search can be given the stretches of the statement
+## which are SQL - see outside_literals()
+LOCKING_HINT_PATTERN = re.compile(r'(?i)\b(' + '|'.join(LOCKING_HINTS) + r')\b')
 
 ## The locking reads, as the dialects write them. The parsed statement says it too where a
 ## parser models the clause - but 'FOR UPDATE' is not modelled in every dialect, and a
@@ -110,11 +128,16 @@ SELECT_INTO_TARGET = re.compile(r'(?i)\bINTO\s+(TEMP|SCRATCH)\b|\bINTO\s+[:@][A-
 
 NOLOCK_HINT = re.compile(r'(?i)\bWITH\s*\(\s*NOLOCK\s*\)|\bNOLOCK\b')
 
+## the host variable an embedded SQL program reads into, as it stands in the text of the
+## application - by the time the statement is parsed the marker has been replaced by a bind
+## parameter, so this is read from the text and not from the parsed statement
+HOST_VARIABLE_TARGET = re.compile(r'(?i)\bINTO\s+([:@]\S+)')
+
 
 class Classification:
     """What the gates decided about one statement."""
 
-    def __init__(self, verdict, gate=None, reason='', warnings=None, parsed=None):
+    def __init__(self, verdict, gate=None, reason='', warnings=None, parsed=None, kind=''):
         ## 'select'   - a read, and it may be converted
         ## 'refused'  - a gate refused it; it is never sent anywhere
         ## 'unparsed' - the parser of the dialect could not read it, and nothing in the text
@@ -125,6 +148,9 @@ class Classification:
         self.reason = reason
         self.warnings = warnings or []
         self.parsed = parsed
+        ## what the statement is, for the protocol table of §11 - 'SELECT', 'UNION', 'VALUES'
+        ## for a read, and the kind the parser saw for the statement a gate refused
+        self.kind = kind
 
     @property
     def is_select(self):
@@ -181,6 +207,27 @@ def statement_starts(text):
     return parts
 
 
+def outside_literals(pattern, text):
+    """
+    The first match of the pattern in the stretches of the statement which are SQL.
+
+    Every textual gate goes through here. A gate which read the whole text refused a
+    statement for a word standing inside a string literal or inside a comment: "SELECT id
+    FROM customer -- the report for update of the pricing sheet" was answered with "the
+    statement takes row locks", and "SELECT 'next value for the counter'" with "the statement
+    reads a sequence". Neither is true. The content of a literal is data which never runs and
+    a comment runs even less, so only what stands outside of them can refuse a statement.
+
+    The search is given the boundaries of the region rather than a slice of the text, so that
+    a word boundary is decided against the characters which really stand next to it.
+    """
+    for start, end in safe_regions(text):
+        match = pattern.search(text, start, end)
+        if match:
+            return match
+    return None
+
+
 def check_written_words(text):
     """Gate 2 - the deny list, applied to the text as it stands."""
     for part in statement_starts(text):
@@ -198,7 +245,7 @@ def check_sequence_advance(text):
     nothing else in it. Oracle and Db2 write it as a pseudo column ('seq.NEXTVAL'), which is
     not a function call and cannot be found in the parsed statement at all.
     """
-    match = SEQUENCE_ADVANCE.search(text)
+    match = outside_literals(SEQUENCE_ADVANCE, text)
     if match:
         return (f"gate 2: the statement reads a sequence ({match.group(0).strip()}), "
                 f"which moves it on - that is a write")
@@ -214,7 +261,7 @@ def check_select_into(text):
     variable is not SQL. Both of them have to be refused whether or not the statement parses -
     the first creates and fills a table, the second is a fragment of an embedded program.
     """
-    match = SELECT_INTO_TARGET.search(text)
+    match = outside_literals(SELECT_INTO_TARGET, text)
     if match:
         target = re.sub(r'\s+', ' ', match.group(0)).strip()
         if match.group(1):
@@ -233,7 +280,7 @@ def check_data_change_table(text):
     back rows and carries out the INSERT. It is the construct which looks the most like a
     read of everything in this file.
     """
-    match = DATA_CHANGE_TABLE.search(text)
+    match = outside_literals(DATA_CHANGE_TABLE, text)
     if match:
         return (f"gate 2: the statement reads from a {match.group(1).upper()} TABLE, so the "
                 f"INSERT, UPDATE or DELETE inside it is carried out - it writes, although it "
@@ -248,13 +295,14 @@ def check_locking_hints(text):
     This one cannot wait for the parse: 'FROM orders o holdlock' is a hint written where a
     parser expects a second alias, so the statement does not parse at all - and a statement
     which locks has to be refused whether or not anything could read it. Refusing is the
-    safe direction: the worst a wrong hit costs is a statement reported as needing a look.
+    safe direction for a word which really stands in the SQL: the worst a wrong hit costs is
+    a statement reported as needing a look. It is not the safe direction for a word inside a
+    literal or a comment, which is why the search goes through outside_literals().
     """
-    upper = text.upper()
-    for hint in LOCKING_HINTS:
-        if re.search(rf'\b{hint}\b', upper):
-            return f"gate 2: the statement takes locks ({hint})"
-    match = LOCKING_PHRASES.search(text)
+    hint = outside_literals(LOCKING_HINT_PATTERN, text)
+    if hint:
+        return f"gate 2: the statement takes locks ({hint.group(0).upper()})"
+    match = outside_literals(LOCKING_PHRASES, text)
     if match:
         return f"gate 2: the statement takes row locks ({re.sub(r'\s+', ' ', match.group(0)).upper()})"
     return None
@@ -326,7 +374,7 @@ def check_traps(expression, text, source_db_type=''):
         ## the host variable is read in the text of the application and not in the parsed
         ## statement: a ':name' of an embedded program looks like a bind parameter and has
         ## been replaced by one before the parser saw it
-        host_variable = re.search(r'(?i)\bINTO\s+([:@]\S+)', text)
+        host_variable = outside_literals(HOST_VARIABLE_TARGET, text)
         if host_variable:
             target = host_variable.group(1)
         if ':' in target or '@' in target:
@@ -353,8 +401,24 @@ def check_traps(expression, text, source_db_type=''):
         if name in WRITING_FUNCTIONS:
             return f"gate 3: {name}() moves a sequence on, which is a write", warnings
 
+    ## A call of a function the migrator does not know cannot be told apart from a call of one
+    ## which writes: the trap table of §5 says such a statement is warned about, tested with
+    ## EXPLAIN and never executed. The first of the three was the one which was missing.
+    unknown = []
+    for function in expression.find_all(exp.Anonymous):
+        name = function_name(function)
+        if name and name not in KNOWN_READING_FUNCTIONS and name not in unknown:
+            unknown.append(name)
+    if unknown:
+        warnings.append(
+            f"the statement calls {', '.join(f'{name}()' for name in unknown[:4])}"
+            f"{', ...' if len(unknown) > 4 else ''} - the migrator does not know what "
+            f"{'these functions do' if len(unknown) > 1 else 'this function does'}, so it cannot "
+            f"say whether the call has effects of its own. It is tested with PREPARE or EXPLAIN "
+            f"and is never executed by this step.")
+
     ## not a write, but it must not reach the target as it stands
-    if NOLOCK_HINT.search(text):
+    if outside_literals(NOLOCK_HINT, text):
         warnings.append("the table hint NOLOCK has no counterpart in PostgreSQL and is removed "
                         "from the converted statement - the query reads committed rows there")
 
@@ -421,13 +485,46 @@ def classify(text, source_db_type='', dialect=None, parse_text=None):
             return Classification('unparsed', None,
                                   f"the SQL parser does not model this statement of the source dialect "
                                   f"({(expression.name or expression.sql())[:60].strip()})")
-        return Classification('refused', 1, f"gate 1: the statement is a {describe_parsed(expression)}, not a read")
+        return Classification('refused', 1, f"gate 1: the statement is a {describe_parsed(expression)}, not a read",
+                              kind=type(expression).__name__.upper())
 
+    kind = type(expression).__name__.upper()
     reason, warnings = check_traps(expression, text, source_db_type)
     if reason:
-        return Classification('refused', 3, reason, warnings)
+        return Classification('refused', 3, reason, warnings, kind=kind)
 
-    return Classification('select', None, '', warnings, expression)
+    return Classification('select', None, '', warnings, expression, kind=kind)
+
+
+def unqualified_tables(expression):
+    """
+    The tables the converted statement names without a schema in front of them.
+
+    The target test runs with `SET LOCAL search_path TO "<target schema>"`, so such a name
+    resolves there whatever the application's own session would do with it - the block says
+    `target test: OK` for a statement which needs a search_path the application may not have.
+    Naming them is what can be done before the name map of §7.3 exists to qualify them.
+
+    A name defined by the statement itself - a common table expression - is not one of these:
+    it never went through a search_path in the first place.
+    """
+    if expression is None:
+        return []
+    defined = set()
+    for cte in expression.find_all(exp.CTE):
+        if cte.alias:
+            defined.add(cte.alias.lower())
+    names = []
+    seen = set()
+    for table in expression.find_all(exp.Table):
+        if argument(table, 'db', 'catalog'):
+            continue
+        name = table.name
+        if not name or name.lower() in defined or name.lower() in seen:
+            continue
+        seen.add(name.lower())
+        names.append(name)
+    return names
 
 
 def classify_converted(text):

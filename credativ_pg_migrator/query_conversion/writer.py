@@ -59,6 +59,13 @@ class StatementResult:
         self.target_test_ms = None
         self.parameters_line = ''
         self.identical_to = None
+        ## for the protocol table of §11: what the statement is, which gate refused it and
+        ## when it was worked on
+        self.statement_kind = ''
+        self.gate_refused = None
+        self.unresolved_objects = []
+        self.task_started = None
+        self.task_completed = None
 
     @property
     def ordinal(self):
@@ -81,11 +88,16 @@ class StatementResult:
             'line_to': self.statement.line_to,
             'name': self.statement.name,
             'sha256': self.statement.sha256,
+            'statement_kind': self.statement_kind or None,
+            'gate_refused': self.gate_refused,
             'status': self.status,
             'reason': self.reason,
             'source_sql': self.statement.text,
             'target_sql': self.output_sql,
             'warnings': list(self.warnings),
+            'unresolved_objects': list(self.unresolved_objects),
+            'task_started': self.task_started,
+            'task_completed': self.task_completed,
             'source_test': {'result': self.source_test[0], 'message': self.source_test[1]},
             'target_test': {'result': self.target_test[0], 'message': self.target_test[1],
                             'duration_ms': self.target_test_ms},
@@ -141,6 +153,30 @@ class OutputWriter:
             raise ValueError(
                 f"{output_file} exists already. Set query_conversion.output.overwrite to true "
                 f"to replace it, or write to another directory.")
+
+    def check_all_paths(self, input_files):
+        """
+        Every output path of the run, checked before the first file is read.
+
+        None of these answers needs a conversion: an output which would be written over its
+        own input, an output which exists already and may not be replaced, and two input
+        files of different directories whose outputs would land on the same path are all
+        known from the names alone. Checking them here costs nothing and refuses in time;
+        checking them at write time threw away a file which had already been converted and
+        tested, and stopped the run before the files behind it were read.
+        """
+        planned = {}
+        for input_file in input_files:
+            output_file = self.output_path(input_file)
+            self.check_path(input_file, output_file)
+            key = os.path.abspath(output_file)
+            if key in planned:
+                raise ValueError(
+                    f"{input_file} and {planned[key]} would both be written to {output_file}. "
+                    f"Give query_conversion.output a directory of its own, or a prefix which "
+                    f"tells the two apart - one of the two answers would otherwise be lost.")
+            planned[key] = input_file
+        return sorted(planned)
 
     def write(self, input_file, results, header):
         output_file = self.output_path(input_file)

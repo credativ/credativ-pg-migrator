@@ -652,6 +652,28 @@ in the WHERE clause, the `TRUE` left behind is taken out, and a condition standi
 shows is one of the cases. Then `TOP`, the `+`, the function mapping, the schema replacement,
 and the gates in this dialect.
 
+### `test_names_case_handling.py` — 47 tests
+
+**Purpose.** `names_case_handling`, and the rule the whole migrator follows about names.
+
+**Covers.** The rule has two halves and both are asserted: the target **schema** is used
+exactly as the configuration spells it and is never case-converted, and every object name
+inside it follows the setting. Then the record: `source_*` is what was read and is **never**
+converted — a source can hold `CUSTOMER` and `Customer` as two different tables, and the
+protocol has to be able to tell them apart — while `target_*` is what was created. That every
+kind of target name is covered by the boundary which converts them, that the conversion is
+idempotent (several callers convert on their own and may stay as they are), and that the
+caller's own dictionary is not changed. That all twelve connectors read the source names
+unchanged, which is what `ibm_db2_luw` used to break. That the four tables which had a single
+bare name column now record the target spelling too, and — the guard which keeps this from
+rotting — that every decoder still matches the column order of its table, since the decoders
+read a row by position and a column added in the middle silently shifts every key behind it.
+Finally the collision check: two tables which become one stop the run, every clash is named
+and not only the first, columns are checked within their table, a protocol table which is not
+there is reported rather than fatal, `keep` is never checked because nothing can collapse
+under it, and two routines of one name with different arguments are not a collision —
+PostgreSQL tells overloads apart exactly as the source does.
+
 ### `test_oracle_outer_joins.py` — 16 tests
 
 **Purpose.** Oracle's `(+)`, and the one thing which makes it different from every other

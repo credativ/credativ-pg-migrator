@@ -177,6 +177,7 @@ def build_comments_catalog(config_parser):
         'columns': {
             'default_value_schema': 'Schema the default object belongs to in the source database.',
             'default_value_name': 'Name of the default object in the source database. It is the name the columns of the source refer to.',
+            'target_default_value_name': 'The name the object really has in the target - the spelling names_case_handling produced. The column next to it holds the spelling of the source, which is kept unchanged: two objects of the source which differ only in the case of their letters are two different objects, and the record of what was read has to say so.',
             'default_value_sql': 'The declaration of the default object as the source database states it.',
             'extracted_default_value': 'The value itself, taken out of the declaration and written into the DEFAULT clause of every column which was bound to the object.',
             'default_value_data_type': 'The type of the extracted value, which decides how it is written into the column.',
@@ -418,7 +419,8 @@ def build_comments_catalog(config_parser):
         ),
         'columns': {
             'index_owner': 'Owner of the index in the source database.',
-            'index_name': 'Name of the index. PostgreSQL requires index names to be unique within a schema while several sources require them to be unique only within a table, so the name in the target can carry the name of the table.',
+            'index_name': 'Name of the index in the source database. PostgreSQL requires index names to be unique within a schema while several sources require them to be unique only within a table, so the name in the target can carry the name of the table.',
+            'target_index_name': 'The name the object really has in the target - the spelling names_case_handling produced. The column next to it holds the spelling of the source, which is kept unchanged: two objects of the source which differ only in the case of their letters are two different objects, and the record of what was read has to say so.',
             'index_type': 'The kind of index - unique, clustered, bitmap and so on, as the source calls it.',
             'index_sql': 'The CREATE INDEX statement which was sent to the target.',
             'index_columns': 'The columns the index is built on, in their order.',
@@ -434,12 +436,14 @@ def build_comments_catalog(config_parser):
             'failed here usually points at data the source itself no longer satisfies.'
         ),
         'columns': {
-            'constraint_name': 'Name of the constraint.',
+            'constraint_name': 'Name of the constraint in the source database.',
+            'target_constraint_name': 'The name the object really has in the target - the spelling names_case_handling produced. The column next to it holds the spelling of the source, which is kept unchanged: two objects of the source which differ only in the case of their letters are two different objects, and the record of what was read has to say so.',
             'constraint_type': 'The kind of constraint - PRIMARY KEY, UNIQUE, FOREIGN KEY or CHECK.',
             'constraint_owner': 'Owner of the constraint in the source database.',
             'constraint_columns': 'The columns of the table the constraint is placed on.',
             'referenced_table_schema': 'Schema of the table a foreign key points at.',
-            'referenced_table_name': 'The table a foreign key points at.',
+            'referenced_table_name': 'The table a foreign key points at, named as the source names it.',
+            'target_referenced_table_name': 'The name the object really has in the target - the spelling names_case_handling produced. The column next to it holds the spelling of the source, which is kept unchanged: two objects of the source which differ only in the case of their letters are two different objects, and the record of what was read has to say so.',
             'referenced_columns': 'The columns of that table the foreign key points at.',
             'constraint_sql': 'The statement which was sent to the target.',
             'delete_rule': 'What a foreign key does when the referenced row is deleted - NO ACTION, CASCADE, SET NULL and so on.',
@@ -530,7 +534,8 @@ def build_comments_catalog(config_parser):
         ),
         'columns': {
             'trigger_id': 'The identifier the source database gave the trigger, for the engines which have one.',
-            'trigger_name': 'Name of the trigger.',
+            'trigger_name': 'Name of the trigger in the source database.',
+            'target_trigger_name': 'The name the object really has in the target - the spelling names_case_handling produced. The column next to it holds the spelling of the source, which is kept unchanged: two objects of the source which differ only in the case of their letters are two different objects, and the record of what was read has to say so.',
             'trigger_event': 'What fires the trigger - INSERT, UPDATE, DELETE, and whether it runs before or after the statement.',
             'trigger_new': 'The name the source gives the new image of the row. In the target it is read as NEW.',
             'trigger_old': 'The name the source gives the old image of the row. In the target it is read as OLD.',

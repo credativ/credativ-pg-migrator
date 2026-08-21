@@ -904,6 +904,47 @@ This allows you to:
 - Compare source vs generated PL/pgSQL for functions/procedures and triggers wherever conversion is supported (see section 8.2 for which engines those are) — this is the practical way to review the best-effort conversions before trusting them.
 - Rerun or manually fix individual objects without redoing the entire migration.
 
+### 7.1 How object names are spelled — `names_case_handling`
+
+`migration.names_case_handling` takes `lower`, `upper` or `keep` (the default), and the rule it
+follows has two halves:
+
+- **The target schema is used exactly as the configuration spells it.** It is never
+  case-converted — you wrote it and you mean it.
+- **Every object name inside that schema follows the setting**: tables, columns, indexes,
+  constraints, triggers, views, sequences, routines, types, domains, collations.
+
+The protocol tables record **both** spellings, and the difference matters:
+
+| column | holds |
+|---|---|
+| `source_*` | the name as the source database spells it — **never** converted |
+| `target_*` | the name the object really has in the target — the spelling the setting produced |
+
+The source spelling is kept unchanged on purpose. A source can hold `CUSTOMER` and `Customer`
+as two different tables, and the record of what was read has to be able to tell them apart. In
+the four tables which historically had a single bare name column — `indexes`, `constraints`,
+`triggers` and `default_values` — that bare column (`index_name`, `constraint_name`,
+`trigger_name`, `default_value_name`) is the **source** spelling, and `target_index_name` and
+its siblings hold what the target has.
+
+**Two source objects can become one target object.** Case folding is not injective: with
+`lower`, `CUSTOMER` and `Customer` both want to be `customer`. The migrator checks for this
+when the plan is complete and **before anything in the target is dropped or created**, and
+stops with the objects named:
+
+```
+names_case_handling is 'lower', and it would make one target object out of two or more
+different objects of the source:
+  - tables CUSTOMER, Customer of the source all become "migtest"."customer"
+The source tells them apart by the case of their letters and the target would not. Nothing
+has been created or dropped in the target - the run stops here rather than dropping the same
+object twice and reporting the second one as 'already exists'. Use names_case_handling: keep,
+or rename the objects which clash.
+```
+
+With `keep` nothing can collapse, so the check is skipped.
+
 Treat the migration database as read‑only metadata. You can query it freely for analysis, but avoid modifying its tables directly unless instructed by the tool’s maintainers.
 
 ---

@@ -2065,6 +2065,42 @@ class Orchestrator:
             self.handle_error(e, f"constraint_worker {worker_id} {constraint_name}")
             return False
 
+    def check_funcproc_name_collisions(self, funcproc_names):
+        """
+        Whether names_case_handling makes one routine of the target out of two of the source.
+
+        The planner checks every object it plans itself - see
+        planner.check_target_name_collisions(). The routines are read here instead, so they are
+        checked here, by the same rule and with the same answer: the run stops, and it stops
+        before the first of them has been converted or created.
+
+        Two routines of one name and different arguments are not a collision - PostgreSQL tells
+        those apart by their arguments as the source does, so the arguments are part of the
+        identity which is compared.
+        """
+        if not funcproc_names or self.config_parser.get_names_case_handling() == 'keep':
+            return
+        by_target = {}
+        for funcproc_data in funcproc_names.values():
+            name = funcproc_data.get('name')
+            if not name:
+                continue
+            identity = (self.config_parser.convert_names_case(name),
+                        funcproc_data.get('arguments') or '')
+            by_target.setdefault(identity, set()).add(name)
+        collisions = [f"{funcproc_type} {', '.join(sorted(sources))} of the source all become "
+                      f"\"{identity[0]}\""
+                      for identity, sources in by_target.items() if len(sources) > 1
+                      for funcproc_type in ('routines',)]
+        if collisions:
+            listed = '\n  - '.join(collisions)
+            raise ValueError(
+                f"names_case_handling is '{self.config_parser.get_names_case_handling()}', and it "
+                f"would make one routine of the target out of two or more of the source:\n"
+                f"  - {listed}\n"
+                f"The source tells them apart by the case of their letters and the target would "
+                f"not. Use names_case_handling: keep, or rename the routines which clash.")
+
     def stdwf_migrate_funcprocs(self):
         self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'functions/procedures migration'})
         include_funcprocs = self.config_parser.get_include_funcprocs()
@@ -2074,6 +2110,13 @@ class Orchestrator:
             self.config_parser.print_log_message('INFO', "orchestrator: run_migrate_funcprocs: Migrating functions and procedures.")
             funcproc_names = self.source_connection.fetch_funcproc_names(self.config_parser.get_source_schema())
             self.config_parser.print_log_message( 'DEBUG', f"orchestrator: run_migrate_funcprocs: Function/procedure names: {funcproc_names}")
+
+            ## The routines are planned here and not by the planner, so the collision check of
+            ## the planner never sees them. Case folding is not injective: a source holding
+            ## GET_TOTAL and Get_Total holds two routines, and with names_case_handling: lower
+            ## the second would be created over the first. Checked before any of them is
+            ## converted, so that a run which cannot come out right stops before it writes.
+            self.check_funcproc_name_collisions(funcproc_names)
 
             if funcproc_names:
                 for order_num, funcproc_data in funcproc_names.items():

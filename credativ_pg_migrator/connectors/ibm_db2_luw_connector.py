@@ -75,7 +75,7 @@ class IbmDb2LuwConnector(Db2QueryConversion, DatabaseConnector):
                 tables[order_num] = {
                     'id': row[0],
                     'schema_name': table_schema,
-                    'table_name': self.config_parser.convert_names_case(row[1]),
+                    'table_name': row[1],
                     'comment': row[2]
                 }
                 order_num += 1
@@ -157,7 +157,7 @@ class IbmDb2LuwConnector(Db2QueryConversion, DatabaseConnector):
                     column_type = f"{data_type}({numeric_precision})"
 
                 result[ordinal_position] = {
-                    'column_name': self.config_parser.convert_names_case(column_name),
+                    'column_name': column_name,
                     'data_type': data_type,
                     'column_type': column_type,
                     'character_maximum_length': character_maximum_length,
@@ -611,7 +611,7 @@ class IbmDb2LuwConnector(Db2QueryConversion, DatabaseConnector):
                     col_expr = self.apply_sql_functions_mapping(col_expr, settings)
                     indexes_dict[index_name]['is_function_based'] = 'YES'
                 else:
-                    col_expr = f'"{self.config_parser.convert_names_case(col_name)}"'
+                    col_expr = f'"{col_name}"'
 
                 if col_order == 'D':
                     col_expr += ' DESC'
@@ -625,7 +625,7 @@ class IbmDb2LuwConnector(Db2QueryConversion, DatabaseConnector):
 
                 uniquerule = idx_info['uniquerule']
                 table_indexes[order_num] = {
-                    'index_name': self.config_parser.convert_names_case(index_name),
+                    'index_name': index_name,
                     'index_type': 'PRIMARY KEY' if uniquerule == 'P' else 'UNIQUE' if uniquerule == 'U' else 'INDEX',
                     'index_owner': source_table_schema,
                     'index_columns': ', '.join(idx_info['cols']),
@@ -695,18 +695,18 @@ class IbmDb2LuwConnector(Db2QueryConversion, DatabaseConnector):
                         pk_col_list = [c.strip('+"\' ') for c in raw_pk_cols.replace('+', ' ').split() if c.strip('+"\' ')]
                         fk_col_list = [c.strip('+"\' ') for c in raw_fk_cols.replace('+', ' ').split() if c.strip('+"\' ')]
 
-                        pk_columns = ', '.join(f'"{self.config_parser.convert_names_case(col)}"' for col in pk_col_list)
-                        fk_columns = ', '.join(f'"{self.config_parser.convert_names_case(col)}"' for col in fk_col_list)
+                        pk_columns = ', '.join(f'"{col}"' for col in pk_col_list)
+                        fk_columns = ', '.join(f'"{col}"' for col in fk_col_list)
                     else:
                         ref_table_schema = source_table_schema
 
                     table_constraints[order_num] = {
-                        'constraint_name': self.config_parser.convert_names_case(constraint_name),
+                        'constraint_name': constraint_name,
                         'constraint_type': constraint_type,
                         'constraint_owner': source_table_schema,
                         'constraint_columns': fk_columns,
                         'referenced_table_schema': ref_table_schema,
-                        'referenced_table_name': self.config_parser.convert_names_case(ref_table_name),
+                        'referenced_table_name': ref_table_name,
                         'referenced_columns': pk_columns,
                         'constraint_sql': '',
                         'constraint_comment': '',
@@ -726,7 +726,7 @@ class IbmDb2LuwConnector(Db2QueryConversion, DatabaseConnector):
                     constraint_sql = chk_row[0].strip() if chk_row else ''
 
                     table_constraints[order_num] = {
-                        'constraint_name': self.config_parser.convert_names_case(constraint_name),
+                        'constraint_name': constraint_name,
                         'constraint_type': constraint_type,
                         'constraint_owner': source_table_schema,
                         'constraint_columns': '',
@@ -764,7 +764,7 @@ class IbmDb2LuwConnector(Db2QueryConversion, DatabaseConnector):
             for row in cursor.fetchall():
                 triggers[order_num] = {
                     'id': order_num,
-                    'name': self.config_parser.convert_names_case(row[0].strip() if row[0] else row[0]),
+                    'name': row[0].strip() if row[0] else row[0],
                     'event': 'UPDATE', # dummy, parsed in convert_trigger
                     'new': '',
                     'old': '',
@@ -1076,9 +1076,9 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                 cursor.execute(query)
                 for row in cursor.fetchall():
                     sequences[order_num] = {
-                        'sequence_name': self.config_parser.convert_names_case(row[0].strip() if row[0] else row[0]),
-                        'table_name': self.config_parser.convert_names_case(row[1].strip()) if row[1] else row[1],
-                        'column_name': self.config_parser.convert_names_case(row[2].strip()) if row[2] else row[2],
+                        'sequence_name': row[0].strip() if row[0] else row[0],
+                        'table_name': row[1].strip() if row[1] else row[1],
+                        'column_name': row[2].strip() if row[2] else row[2],
                         'source_start_value': int(row[3]) if row[3] is not None else None,
                         'source_increment_by': int(row[4]) if row[4] is not None else None,
                         'source_minvalue': int(row[5]) if row[5] is not None else None,

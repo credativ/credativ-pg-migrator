@@ -100,6 +100,10 @@ class Planner:
 
                     self.check_pausing_resuming()
 
+                    ## the plan is complete and nothing in the target has been touched yet -
+                    ## the last moment at which a run which cannot come out right costs nothing
+                    self.check_target_name_collisions()
+
                     self.migrator_tables.update_main_status({'task_name': 'Planner', 'subtask_name': '', 'success': True, 'message': 'finished OK'})
 
                     try:
@@ -1245,12 +1249,16 @@ class Planner:
             if not ref_tbl or not ref_cols_str:
                 continue
 
-            ref_tbl_target = ref_tbl
+            ## the name the referenced table really has in the target. This used to be the
+            ## name of the source, so with names_case_handling: lower the lookup in
+            ## table_unique_cols - which is keyed by the target name - never matched, and the
+            ## index below was created ON a table spelled the way the source spells it.
+            ref_tbl_target = fk.get('target_referenced_table_name') or self.config_parser.convert_names_case(ref_tbl)
             if self.config_parser.get_use_aliases_as_target_names():
                 ref_schema = fk.get('referenced_table_schema', '') or self.source_schema_name
                 alias_dict = self.migrator_tables.get_alias_for_table(ref_schema, ref_tbl)
                 if alias_dict and alias_dict.get('target_alias_name'):
-                    ref_tbl_target = alias_dict.get('target_alias_name')
+                    ref_tbl_target = self.config_parser.convert_names_case(alias_dict.get('target_alias_name'))
 
             norm_ref_cols = normalize_cols(ref_cols_str)
             if not norm_ref_cols:
@@ -1265,9 +1273,14 @@ class Planner:
 
             if not has_matching_unique:
                 cols_suffix = "_".join(norm_ref_cols)
-                idx_name = f"idx_fk_parent_{ref_tbl_target}_{cols_suffix}"[:63]
+                idx_name = self.config_parser.convert_names_case(
+                    f"idx_fk_parent_{ref_tbl_target}_{cols_suffix}"[:63])
 
-                clean_cols = [c.strip().strip('"').strip("'") for c in str(ref_cols_str).split(',')]
+                ## the columns are read from the constraint of the source, so they carry its
+                ## spelling - the index is created in the target and has to name them the way
+                ## the target has them
+                clean_cols = [self.config_parser.convert_names_case(c.strip().strip('"').strip("'"))
+                              for c in str(ref_cols_str).split(',')]
                 quoted_cols = ", ".join(f'"{c}"' for c in clean_cols if c)
                 index_sql = f'CREATE UNIQUE INDEX "{idx_name}" ON "{self.target_schema_name}"."{ref_tbl_target}" ({quoted_cols});'
 
@@ -1451,6 +1464,97 @@ class Planner:
             raise ValueError(f"Unsupported target database type: {target_db_type}")
 
         return converted
+
+    ## What is checked for a collision, once the plan is written and before anything is
+    ## created: the protocol table, the column holding the name of the source, the column
+    ## holding the name the target will have, and what the name has to be unique within.
+    ## PostgreSQL keeps tables, views, sequences, types, domains and indexes unique per schema,
+    ## and constraints, triggers and columns unique per table.
+    COLLISION_CHECKS = (
+        ('tables',             'source_table_name',      'target_table_name',      ('target_schema_name',),                      'table'),
+        ('columns',            'source_column_name',     'target_column_name',     ('target_schema_name', 'target_table_name'),  'column'),
+        ('views',              'source_view_name',       'target_view_name',       ('target_schema_name',),                      'view'),
+        ('sequences',          'source_sequence_name',   'target_sequence_name',   ('target_schema_name',),                      'sequence'),
+        ('user_defined_types', 'source_type_name',       'target_type_name',       ('target_schema_name',),                      'user defined type'),
+        ('domains',            'source_domain_name',     'target_domain_name',     ('target_schema_name',),                      'domain'),
+        ('collations',         'source_collation_name',  'target_collation_name',  ('target_schema_name',),                      'collation'),
+        ('text_search',        'source_object_name',     'target_object_name',     ('target_schema_name',),                      'text search object'),
+        ('indexes',            'index_name',             'target_index_name',      ('target_schema_name',),                      'index'),
+        ('constraints',        'constraint_name',        'target_constraint_name', ('target_schema_name', 'target_table_name'),  'constraint'),
+        ('triggers',           'trigger_name',           'target_trigger_name',    ('target_schema_name', 'target_table_name'),  'trigger'),
+    )
+
+    def check_target_name_collisions(self):
+        """
+        Whether names_case_handling collapses two objects of the source into one on the target.
+
+        Case folding is not injective. A source holding CUSTOMER and Customer is holding two
+        different tables; with names_case_handling: lower both of them want to be "customer",
+        and the migrator used to notice nothing at all - it dropped "customer" once per table
+        in the loop which prepares the target, created it for the first, and answered the
+        second with "already exists". What the user saw was one failed table and a message
+        which says nothing about the case of a name.
+
+        The check runs when the plan is complete and before anything in the target is dropped
+        or created, so a run which cannot come out right stops before it has done anything.
+        It reads the protocol tables, which by then hold both spellings of every name - so it
+        costs no query against the source.
+
+        With names_case_handling: keep nothing can collapse and the check is skipped.
+        """
+        case_handling = self.config_parser.get_names_case_handling()
+        if case_handling == 'keep':
+            self.config_parser.print_log_message(
+                'DEBUG', "planner: check_target_name_collisions: names_case_handling is 'keep' - "
+                         "no two names of the source can become one name in the target.")
+            return
+
+        collisions = []
+        for table_key, source_column, target_column, scope_columns, label in self.COLLISION_CHECKS:
+            protocol_table = getattr(self.config_parser, f'get_protocol_name_{table_key}')()
+            scope_list = ', '.join(f'"{column}"' for column in scope_columns)
+            query = f'''
+                SELECT {scope_list}, "{target_column}",
+                       string_agg(DISTINCT "{source_column}", ', ' ORDER BY "{source_column}")
+                FROM "{self.migrator_tables.protocol_schema}"."{protocol_table}"
+                WHERE "{target_column}" IS NOT NULL AND "{target_column}" <> ''
+                GROUP BY {scope_list}, "{target_column}"
+                HAVING count(DISTINCT "{source_column}") > 1
+            '''
+            try:
+                cursor = self.migrator_tables.protocol_connection.connection.cursor()
+                cursor.execute(query)
+                rows = cursor.fetchall()
+                cursor.close()
+            except Exception as e:
+                ## a protocol table which does not exist means that kind of object was not
+                ## planned - it is not a reason to stop, and it is not passed over silently
+                self.config_parser.print_log_message(
+                    'DEBUG', f"planner: check_target_name_collisions: {protocol_table} could not "
+                             f"be read ({e}) - no {label} was checked.")
+                continue
+            for row in rows:
+                ## every part of the name on its own quotes, the way the target is addressed:
+                ## "migtest"."orders"."total" and not "migtest.orders"."total"
+                parts = [str(value) for value in row[:len(scope_columns)] if value]
+                parts.append(str(row[len(scope_columns)]))
+                where = '.'.join(f'"{part}"' for part in parts)
+                collisions.append(f"{label}s {row[-1]} of the source all become {where}")
+
+        if not collisions:
+            self.config_parser.print_log_message(
+                'INFO', f"planner: check_target_name_collisions: names_case_handling is "
+                        f"'{case_handling}' and no two names of the source become one in the target.")
+            return
+
+        listed = '\n  - '.join(collisions)
+        raise ValueError(
+            f"names_case_handling is '{case_handling}', and it would make one target object out "
+            f"of two or more different objects of the source:\n  - {listed}\n"
+            f"The source tells them apart by the case of their letters and the target would not. "
+            f"Nothing has been created or dropped in the target - the run stops here rather than "
+            f"dropping the same object twice and reporting the second one as 'already exists'. "
+            f"Use names_case_handling: keep, or rename the objects which clash.")
 
     def stdwf_prepare_views(self):
         self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_views: Preparing views...")

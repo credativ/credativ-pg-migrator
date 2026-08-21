@@ -1292,7 +1292,49 @@ class MigratorTables:
         """)
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: create_table_for_user_defined_types: Table {table_name} created in schema {self.protocol_schema}")
 
+    ## The keys of a settings dictionary which hold a name the target object really carries.
+    ## The target *schema* is deliberately not among them: it is used exactly as the
+    ## configuration spells it, and only the names of the objects inside it follow
+    ## names_case_handling. See with_target_names() below.
+    TARGET_NAME_KEYS = (
+        'target_table_name', 'target_column_name', 'target_alias_name',
+        'target_view_name', 'target_view_alias', 'target_funcproc_name',
+        'target_sequence_name', 'target_type_name', 'target_domain_name',
+        'target_collation_name', 'target_object_name', 'target_index_name',
+        'target_constraint_name', 'target_trigger_name', 'target_default_value_name',
+        'target_referenced_table_name', 'target_referenced_column_name',
+    )
+
+    def with_target_names(self, settings):
+        """
+        The settings with every target name spelled the way the target really has it.
+
+        The protocol tables are the migrator's own record of what it created, and they are
+        what --validate, the object validation pass and the query conversion read back. They
+        used to hold the name of the *source* in the target columns as well: the case handling
+        was applied when the DDL was generated and nowhere else, so a migration with
+        names_case_handling: lower created "customers" and recorded "CUSTOMERS". Everything
+        which read the record afterwards had to remember to convert, and --validate did not -
+        it asked the target for a relation which is not there.
+
+        The conversion happens here, once, at the boundary where a row is written. The
+        source_* columns are never touched: two objects of the source which differ only in
+        case are two different objects, and the record of what was read has to say so.
+
+        It is safe to call on a dictionary whose names are already converted - the conversion
+        is idempotent - which is why the callers which convert on their own may stay as they
+        are.
+        """
+        converted = dict(settings)
+        for key in self.TARGET_NAME_KEYS:
+            value = converted.get(key)
+            if value:
+                converted[key] = self.config_parser.convert_names_case(value)
+        return converted
+
     def insert_user_defined_type(self, settings):
+        ## the target names are recorded the way the target really spells them
+        settings = self.with_target_names(settings)
         func_run_id = uuid.uuid4()
         ## source_schema_name, source_type_name, source_type_sql, target_schema_name, target_type_name, target_type_sql, target_basic_type, type_comment
         source_schema_name = settings['source_schema_name']
@@ -1415,6 +1457,8 @@ class MigratorTables:
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: create_table_for_domains: Table {table_name} created in schema {self.protocol_schema}")
 
     def insert_domain(self, settings):
+        ## the target names are recorded the way the target really spells them
+        settings = self.with_target_names(settings)
         func_run_id = uuid.uuid4()
         ## source_schema_name, source_domain_name, source_domain_sql, target_schema_name, target_domain_name, target_domain_sql, domain_comment
         source_schema_name = settings['source_schema_name']
@@ -1551,6 +1595,8 @@ class MigratorTables:
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: create_table_for_collations: Table {table_name} created in schema {self.protocol_schema}")
 
     def insert_collation(self, settings):
+        ## the target names are recorded the way the target really spells them
+        settings = self.with_target_names(settings)
         func_run_id = uuid.uuid4()
         source_schema_name = settings['source_schema_name']
         source_collation_name = settings['source_collation_name']
@@ -1697,6 +1743,8 @@ class MigratorTables:
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: create_table_for_text_search: Table {table_name} created in schema {self.protocol_schema}")
 
     def insert_text_search(self, settings):
+        ## the target names are recorded the way the target really spells them
+        settings = self.with_target_names(settings)
         func_run_id = uuid.uuid4()
         source_schema_name = settings['source_schema_name']
         source_object_name = settings['source_object_name']
@@ -1830,6 +1878,7 @@ class MigratorTables:
             (id SERIAL PRIMARY KEY,
             default_value_schema TEXT,
             default_value_name TEXT,
+            target_default_value_name TEXT,
             default_value_sql TEXT,
             extracted_default_value TEXT,
             default_value_data_type TEXT,
@@ -1853,13 +1902,16 @@ class MigratorTables:
         table_name = self.config_parser.get_protocol_name_default_values()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (default_value_schema, default_value_name, default_value_sql,
-            extracted_default_value, default_value_data_type)
-            VALUES (%s, %s, %s, %s, %s)
+            (default_value_schema, default_value_name, target_default_value_name,
+            default_value_sql, extracted_default_value, default_value_data_type)
+            VALUES (%s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (default_value_schema, default_value_name, default_value_sql,
-                  extracted_default_value, default_value_data_type)
+        params = (default_value_schema, default_value_name,
+                  ## the name the object really has in the target - 'default_value_name' stays
+                  ## the spelling of the source
+                  self.config_parser.convert_names_case(default_value_name),
+                  default_value_sql, extracted_default_value, default_value_data_type)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -1913,9 +1965,10 @@ class MigratorTables:
             'id': row[0],
             'default_value_schema': row[1],
             'default_value_name': row[2],
-            'default_value_sql': row[3],
-            'extracted_default_value': row[4],
-            'default_value_data_type': row[5],
+            'target_default_value_name': row[3],
+            'default_value_sql': row[4],
+            'extracted_default_value': row[5],
+            'default_value_data_type': row[6],
         }
 
     def get_default_value_details(self, settings):
@@ -2375,6 +2428,8 @@ class MigratorTables:
             raise
 
     def insert_data_migration(self, settings):
+        ## the target names are recorded the way the target really spells them
+        settings = self.with_target_names(settings)
         func_run_id = uuid.uuid4()
         ## source_schema_name, source_table_name, source_table_id, source_table_rows, worker_id, target_schema_name, target_table_name, target_table_rows
         source_schema_name = settings['source_schema_name']
@@ -2919,6 +2974,7 @@ class MigratorTables:
             target_schema_name TEXT,
             target_table_name TEXT,
             target_alias_name TEXT,
+            target_index_name TEXT,
             index_sql TEXT,
             index_columns TEXT,
             index_comment TEXT,
@@ -3046,6 +3102,7 @@ class MigratorTables:
             source_table_id INTEGER,
             target_schema_name TEXT,
             target_table_name TEXT,
+            target_trigger_name TEXT,
             trigger_id BIGINT,
             trigger_name TEXT,
             trigger_event TEXT,
@@ -3248,10 +3305,11 @@ class MigratorTables:
             'target_schema_name': row[7],
             'target_table_name': row[8],
             'target_alias_name': row[9],
-            'index_sql': row[10],
-            'index_columns': row[11],
-            'index_comment': row[12],
-            'is_function_based': row[13]
+            'target_index_name': row[10],
+            'index_sql': row[11],
+            'index_columns': row[12],
+            'index_comment': row[13],
+            'is_function_based': row[14]
         }
 
     def decode_funcproc_row(self, row):
@@ -3304,24 +3362,25 @@ class MigratorTables:
             'source_table_id': row[3],
             'target_schema_name': row[4],
             'target_table_name': row[5],
-            'trigger_id': row[6],
-            'trigger_name': row[7],
-            'trigger_event': row[8],
-            'trigger_new': row[9],
-            'trigger_old': row[10],
-            'trigger_row_statement': row[11],
-            'trigger_source_sql': row[12],
-            'trigger_target_sql': row[13],
-            'trigger_comment': row[14],
-            'task_created': row[15],
-            'task_started': row[16],
-            'task_completed': row[17],
-            'success': row[18],
-            'message': row[19],
-            'final_valid': row[20],
-            'final_valid_message': row[21],
+            'target_trigger_name': row[6],
+            'trigger_id': row[7],
+            'trigger_name': row[8],
+            'trigger_event': row[9],
+            'trigger_new': row[10],
+            'trigger_old': row[11],
+            'trigger_row_statement': row[12],
+            'trigger_source_sql': row[13],
+            'trigger_target_sql': row[14],
+            'trigger_comment': row[15],
+            'task_created': row[16],
+            'task_started': row[17],
+            'task_completed': row[18],
+            'success': row[19],
+            'message': row[20],
+            'final_valid': row[21],
+            'final_valid_message': row[22],
             'requires_manual_adjustment': bool(row[22]) if len(row) > 22 else False,
-            'manual_adjustment_details': row[23] if len(row) > 23 else None,
+            'manual_adjustment_details': row[24] if len(row) > 23 else None,
         }
 
     def decode_view_row(self, row):
@@ -3391,6 +3450,8 @@ class MigratorTables:
             raise
 
     def insert_tables(self, settings):
+        ## the target names are recorded the way the target really spells them
+        settings = self.with_target_names(settings)
         func_run_id = uuid.uuid4()
         source_schema_name = settings['source_schema_name']
         source_table_name = settings['source_table_name']
@@ -3535,18 +3596,25 @@ class MigratorTables:
             raise
 
     def insert_indexes(self, settings):
+        ## the target names are recorded the way the target really spells them
+        settings = self.with_target_names(settings)
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_indexes()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
             (source_schema_name, source_table_name, source_table_id, index_owner, index_name, index_type,
-            target_schema_name, target_table_name, target_alias_name, index_sql, index_columns, index_comment, is_function_based)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            target_schema_name, target_table_name, target_alias_name, target_index_name,
+            index_sql, index_columns, index_comment, is_function_based)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
         params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_table_id'), settings.get('index_owner'),
                   settings.get('index_name'), settings.get('index_type'), settings.get('target_schema_name'),
-                  settings.get('target_table_name'), settings.get('target_alias_name', ''), settings.get('index_sql'), settings.get('index_columns'),
+                  settings.get('target_table_name'), settings.get('target_alias_name', ''),
+                  ## the name the index really has in the target - the spelling names_case_handling
+                  ## produced. 'index_name' above stays the spelling of the source.
+                  self.config_parser.convert_names_case(settings.get('index_name')),
+                  settings.get('index_sql'), settings.get('index_columns'),
                   settings.get('index_comment'), True if settings.get('is_function_based') == 'YES' else False)
         try:
             cursor = self.protocol_connection.connection.cursor()
@@ -3608,12 +3676,14 @@ class MigratorTables:
             target_schema_name TEXT,
             target_table_name TEXT,
             target_alias_name TEXT,
+            target_constraint_name TEXT,
             constraint_name TEXT,
             constraint_type TEXT,
             constraint_owner TEXT,
             constraint_columns TEXT,
             referenced_table_schema TEXT,
             referenced_table_name TEXT,
+            target_referenced_table_name TEXT,
             referenced_columns TEXT,
             constraint_sql TEXT,
             delete_rule TEXT,
@@ -3638,48 +3708,58 @@ class MigratorTables:
             'target_schema_name': row[4],
             'target_table_name': row[5],
             'target_alias_name': row[6],
-            'constraint_name': row[7],
-            'constraint_type': row[8],
-            'constraint_owner': row[9],
-            'constraint_columns': row[10],
-            'referenced_table_schema': row[11],
-            'referenced_table_name': row[12],
-            'referenced_columns': row[13],
-            'constraint_sql': row[14],
-            'delete_rule': row[15],
-            'update_rule': row[16],
-            'constraint_comment': row[17],
-            'constraint_status': row[18],
-            'task_created': row[19],
-            'task_started': row[20],
-            'task_completed': row[21],
-            'success': row[22],
-            'message': row[23]
+            'target_constraint_name': row[7],
+            'constraint_name': row[8],
+            'constraint_type': row[9],
+            'constraint_owner': row[10],
+            'constraint_columns': row[11],
+            'referenced_table_schema': row[12],
+            'referenced_table_name': row[13],
+            'target_referenced_table_name': row[14],
+            'referenced_columns': row[15],
+            'constraint_sql': row[16],
+            'delete_rule': row[17],
+            'update_rule': row[18],
+            'constraint_comment': row[19],
+            'constraint_status': row[20],
+            'task_created': row[21],
+            'task_started': row[22],
+            'task_completed': row[23],
+            'success': row[24],
+            'message': row[25]
         }
 
     def insert_constraint(self, settings):
+        ## the target names are recorded the way the target really spells them
+        settings = self.with_target_names(settings)
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_constraints()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
             (source_table_id, source_schema_name, source_table_name,
-            target_schema_name, target_table_name, target_alias_name, constraint_name,
+            target_schema_name, target_table_name, target_alias_name,
+            target_constraint_name, constraint_name,
             constraint_type,
             constraint_owner, constraint_columns,
-            referenced_table_schema, referenced_table_name,
+            referenced_table_schema, referenced_table_name, target_referenced_table_name,
             referenced_columns, constraint_sql,
             delete_rule, update_rule, constraint_comment,
             constraint_status)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
         params = (settings['source_table_id'], settings['source_schema_name'], settings['source_table_name'],
-                    settings['target_schema_name'], settings['target_table_name'], settings.get('target_alias_name', ''), settings['constraint_name'],
+                    settings['target_schema_name'], settings['target_table_name'], settings.get('target_alias_name', ''),
+                    ## the names the target really has - 'constraint_name' and
+                    ## 'referenced_table_name' stay the spelling of the source
+                    self.config_parser.convert_names_case(settings['constraint_name']),
+                    settings['constraint_name'],
                     settings['constraint_type'] if 'constraint_type' in settings else '',
                     settings['constraint_owner'] if 'constraint_owner' in settings else '',
                     settings['constraint_columns'] if 'constraint_columns' in settings else '',
                     settings['referenced_table_schema'] if 'referenced_table_schema' in settings else '',
                     settings['referenced_table_name'] if 'referenced_table_name' in settings else '',
+                    self.config_parser.convert_names_case(settings.get('referenced_table_name') or ''),
                     settings['referenced_columns'] if 'referenced_columns' in settings else '',
                     settings['constraint_sql'] if 'constraint_sql' in settings else '',
                     settings['delete_rule'] if 'delete_rule' in settings else '',
@@ -3738,6 +3818,8 @@ class MigratorTables:
             raise
 
     def insert_funcprocs(self, settings):
+        ## the target names are recorded the way the target really spells them
+        settings = self.with_target_names(settings)
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_funcprocs()
         query = f"""
@@ -3834,6 +3916,8 @@ class MigratorTables:
         return clamped, message
 
     def insert_sequence(self, settings):
+        ## the target names are recorded the way the target really spells them
+        settings = self.with_target_names(settings)
         func_run_id = uuid.uuid4()
         protocol_table_name = self.config_parser.get_protocol_name_sequences()
 
@@ -3911,15 +3995,21 @@ class MigratorTables:
             raise
 
     def insert_trigger(self, settings):
+        ## the target names are recorded the way the target really spells them
+        settings = self.with_target_names(settings)
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_triggers()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema_name, source_table_name, source_table_id, target_schema_name, target_table_name, trigger_id, trigger_name, trigger_event, trigger_new, trigger_old, trigger_source_sql, trigger_target_sql, trigger_comment, requires_manual_adjustment, manual_adjustment_details)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (source_schema_name, source_table_name, source_table_id, target_schema_name, target_table_name, target_trigger_name, trigger_id, trigger_name, trigger_event, trigger_new, trigger_old, trigger_source_sql, trigger_target_sql, trigger_comment, requires_manual_adjustment, manual_adjustment_details)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_table_id'), settings.get('target_schema_name'), settings.get('target_table_name'), settings.get('trigger_id'), settings.get('trigger_name'), settings.get('trigger_event'), settings.get('trigger_new'), settings.get('trigger_old'), settings.get('trigger_source_sql'), settings.get('trigger_target_sql'), settings.get('trigger_comment'), bool(settings.get('requires_manual_adjustment')), settings.get('manual_adjustment_details'))
+        params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_table_id'), settings.get('target_schema_name'), settings.get('target_table_name'),
+                  ## the name the trigger really has in the target - 'trigger_name' stays the
+                  ## spelling of the source
+                  self.config_parser.convert_names_case(settings.get('trigger_name')),
+                  settings.get('trigger_id'), settings.get('trigger_name'), settings.get('trigger_event'), settings.get('trigger_new'), settings.get('trigger_old'), settings.get('trigger_source_sql'), settings.get('trigger_target_sql'), settings.get('trigger_comment'), bool(settings.get('requires_manual_adjustment')), settings.get('manual_adjustment_details'))
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -4032,6 +4122,8 @@ class MigratorTables:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: update_object_final_valid: Error updating {object_type} {row_id} in {table_name}: {e}")
 
     def insert_view(self, settings):
+        ## the target names are recorded the way the target really spells them
+        settings = self.with_target_names(settings)
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_views()
         query = f"""
@@ -5591,6 +5683,8 @@ class MigratorTables:
         }
 
     def insert_columns(self, settings):
+        ## the target names are recorded the way the target really spells them
+        settings = self.with_target_names(settings)
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_columns()
         query = f"""
@@ -5688,6 +5782,8 @@ class MigratorTables:
         return None
 
     def insert_aliases(self, settings):
+        ## the target names are recorded the way the target really spells them
+        settings = self.with_target_names(settings)
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_aliases()
         query = f"""

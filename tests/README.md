@@ -37,7 +37,7 @@ tests, and no test depends on the order of the others.
 | configuration & logging | `pyyaml`, `jsonschema`, `pytest` | the 5 `test_config_*` / `test_logging_*` / `test_object_*` files, and `test_schema_names.py` |
 | query conversion | `sqlglot`, `pytest` | the 6 `test_query_*` files and the `test_*_query_conversion.py` of Db2, Oracle and SQL Anywhere |
 | anonymization, Db2 CSV | nothing beyond the standard library | 3 files |
-| everything else | the package's own dependencies — `psycopg2`, `tabulate`, `jaydebeapi`, `pyodbc` | 21 files, `test_informix_query_conversion.py`, `test_mysql_query_conversion.py`, `test_ms_sql_query_conversion.py` and `test_sybase_query_conversion.py` among them |
+| everything else | the package's own dependencies — `psycopg2`, `tabulate`, `jaydebeapi`, `pyodbc` | 21 files, `test_informix_query_conversion.py`, `test_mysql_query_conversion.py`, `test_ms_sql_query_conversion.py` and `test_sybase_query_conversion.py` and `test_tsql_outer_joins.py` among them |
 
 The third group imports the connectors, which import their drivers at module level, so
 those files fail to **collect** if the drivers are absent — the message is
@@ -651,6 +651,28 @@ in the WHERE clause, the `TRUE` left behind is taken out, and a condition standi
 `OR` is still refused rather than answered with fewer rows. The example §10.2 of the strategy
 shows is one of the cases. Then `TOP`, the `+`, the function mapping, the schema replacement,
 and the gates in this dialect.
+
+### `test_tsql_outer_joins.py` — 55 tests
+
+**Purpose.** The `*=` and `=*` outer joins of the Transact-SQL family, for **both** connectors
+and **both** paths. Sybase ASE and MS SQL Server are one family and wrote the same operator, so
+every case runs against both connectors and against the view path as well as the query path;
+this file is what keeps the two from drifting apart again.
+
+**Covers.** The join itself — `*=` as a `LEFT JOIN`, `=*` as a `RIGHT JOIN`, the asterisk
+standing next to the table whose rows are kept, two joins in one statement, and the operator
+never surviving. Then the half which decides whether the answer is right: a WHERE condition
+which restricts the **inner** table belongs to the join in this dialect and undoes the outer
+join if it is left in the WHERE clause of PostgreSQL, so it moves into the `ON` clause — while
+`AND inner.col IS NULL` must **not** move, because that is how the dialect asks for the rows
+without a match and inside an `ON` clause it is never true. A condition reading two tables does
+not move, a parenthesised `OR` keeps its parentheses on both sides of the move, and a join
+written as ANSI in the source is not touched at all — its WHERE clause means the same in both
+dialects. Every move is reported, and nothing is reported when nothing moved. What cannot be
+attributed is refused in both paths rather than converted into the inner join it would otherwise
+become, and it is reported as an outer join which could not be done and not as a statement which
+could not be read. Finally the shared marking: the operator inside a string literal is text, and
+`UPDATE t SET x *= 2` is the compound assignment MS SQL Server has read since 2008, not a join.
 
 ### `test_query_gates_literals.py` — 34 tests
 

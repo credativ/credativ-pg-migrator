@@ -28,6 +28,7 @@ from tabulate import tabulate
 import sqlglot
 from credativ_pg_migrator.connectors.tsql_parser import TsqlParser
 from credativ_pg_migrator.query_conversion import outer_joins as query_outer_joins
+from credativ_pg_migrator.query_conversion.outer_joins import outer_join_warnings
 from sqlglot import exp, TokenType
 from sqlglot.dialects import TSQL
 import time
@@ -4864,12 +4865,28 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
             condition it could not attribute keeps its marker, and the caller refuses such a
             statement rather than offering it as converted.
             """
-            expression, unconverted = query_outer_joins.convert_marked_outer_joins(expression)
+            converted_joins = set()
+            expression, unconverted = query_outer_joins.convert_marked_outer_joins(
+                expression, converted_joins)
             if unconverted:
                 self.config_parser.print_log_message(
                     'WARNING', f"sybase_ase_connector: convert_statement_code: {unconverted} outer "
                                f"join(s) written '*=' or '=*' could not be attributed to a table of "
                                f"the FROM clause and were not rewritten.")
+            ## A restriction on the inner table belongs to the join in this dialect and to the
+            ## result of the join in PostgreSQL, where it throws away the rows the outer join
+            ## added - the LEFT JOIN would be an inner join again. It moves into the ON clause,
+            ## and what moved is reported, because it decides which rows the statement answers.
+            expression, moved = query_outer_joins.move_inner_table_predicates(
+                expression, converted_joins)
+            if moved:
+                report = settings.setdefault('conversion_report', {})
+                report['moved_predicates'] = report.get('moved_predicates', []) + moved
+                self.config_parser.print_log_message(
+                    'WARNING', f"sybase_ase_connector: convert_statement_code: "
+                               f"{', '.join(moved)} restrict the inner table of an outer join and "
+                               f"were moved into its ON clause - in the WHERE clause of PostgreSQL "
+                               f"they would undo the outer join.")
             return expression
 
         def replace_cast_types(node):
@@ -4979,6 +4996,18 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
             self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: convert_statement_code: Converted view: {converted_code}")
         else:
             self.config_parser.print_log_message('ERROR', f"sybase_ase_connector: convert_statement_code: Unsupported target database type: {settings['target_db_type']}")
+
+        ## An outer join whose condition could not be attributed leaves its marker behind, and
+        ## what stands around it is the comma join it started from - an INNER join. The view
+        ## would be created and would answer fewer rows. Refused here, for the view path and
+        ## the query path alike.
+        marker_message = query_outer_joins.unconverted_marker_message(converted_code)
+        if marker_message:
+            error = ValueError(marker_message)
+            ## it parsed and it converted - it is the outer join alone which could not be
+            ## done, and a caller must not report it as a statement it could not read
+            error.outer_join_failure = True
+            raise error
         return converted_code
 
 
@@ -5017,8 +5046,9 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
         if not query_code:
             return query_code
 
-        prepared = re.sub(r'\*=', '= /* left_outer */', query_code)
-        prepared = re.sub(r'=\*', '= /* right_outer */', prepared)
+        ## shared with ms_sql - the two are one family and wrote the same operator
+        prepared = query_outer_joins.mark_tsql_outer_joins(
+            query_code, self.sql_without_literals_and_comments)
         prepared = re.sub(r'\bnoholdlock\b', '', prepared, flags=re.IGNORECASE)
 
         def single_quote(match):
@@ -5035,13 +5065,17 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
         query of a view is given. See the contract in DatabaseConnector.convert_query_code().
         """
         statement_id = settings.get('statement_id', '')
+        ## the converter writes what it had to decide into this dictionary - it is made per
+        ## call, so nothing is carried from one statement to the next or between threads
+        statement_settings = {
+            'view_code': settings['query_code'],
+            'source_schema_name': settings['source_schema_name'],
+            'target_schema_name': settings['target_schema_name'],
+            'target_db_type': settings.get('target_db_type', 'postgresql'),
+            'conversion_report': {},
+        }
         try:
-            converted = self.convert_statement_code({
-                'view_code': settings['query_code'],
-                'source_schema_name': settings['source_schema_name'],
-                'target_schema_name': settings['target_schema_name'],
-                'target_db_type': settings.get('target_db_type', 'postgresql'),
-            })
+            converted = self.convert_statement_code(statement_settings)
         except ValueError as e:
             return {'code': '', 'converted': False, 'warnings': [], 'error': first_line(e)}
         except Exception as e:
@@ -5052,11 +5086,11 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
             return {'code': '', 'converted': False, 'warnings': [],
                     'error': 'the conversion produced no statement at all'}
 
-        warnings = []
+        warnings = outer_join_warnings(statement_settings.get('conversion_report') or {})
         ## the outer joins of the source are rewritten by the conversion; a marker left in the
         ## text says it did not finish, and such a statement is not offered as converted
         if '/* left_outer */' in converted or '/* right_outer */' in converted:
-            return {'code': '', 'converted': False, 'warnings': [],
+            return {'code': '', 'converted': False, 'warnings': warnings,
                     'error': "the outer join written '*=' or '=*' could not be rewritten as a "
                              "LEFT JOIN / RIGHT JOIN - the statement needs to be rewritten by hand"}
 

@@ -348,6 +348,22 @@ Other ODBC parameters such as DSN or connection string are configured alongside 
 
 Functions, procedures and triggers are converted (T-SQL → PL/pgSQL, via the shared T-SQL parser), as are views.
 
+**The `*=` / `=*` outer joins** are rewritten as ANSI `LEFT` / `RIGHT JOIN`s, in views and in the
+statements of an application alike — the same conversion MS SQL Server gets, from the same shared
+code in `query_conversion/outer_joins.py`, because the two are one dialect family and wrote the
+same operator. The asterisk stands next to the table whose rows are kept, so `c.id *= o.cid`
+becomes `customer LEFT JOIN orders`. The half which decides whether the result is right is the
+WHERE clause: a condition which restricts the **inner** table belongs to the join in this dialect,
+and in the WHERE clause of PostgreSQL it is applied to the result of the join, where it throws away
+exactly the rows the outer join added — the `LEFT JOIN` would be an inner join again, valid and
+answering fewer rows. Such a condition is moved into the `ON` clause and the move is reported,
+because it decides which rows come back. Three things are deliberately left where they stand:
+`AND inner.col IS NULL`, which is how this dialect asks for the rows without a match and which
+inside an `ON` clause is never true; a condition which reads more than one table; and anything
+under an `OR`. A join written as ANSI in the source is not touched at all. What cannot be
+attributed to a table of the FROM clause is **reported and not converted** — the alternative is the
+comma join it started from, which is an inner join PostgreSQL accepts without complaint.
+
 **Data types worth knowing about (Sybase ASE):** the `TIMESTAMP` of Sybase is **not** a point in time — it is the row version of the row, a `VARBINARY(8)` the server writes on every change (the `ROWVERSION` of MS SQL), and it is migrated as `BYTEA`. PostgreSQL does not maintain such a column; the values of the source are copied, they are not updated afterwards. `MONEY` / `SMALLMONEY` become `NUMERIC(19,4)` / `NUMERIC(10,4)`, `BIGTIME` becomes `TIME` (it holds a time of the day, not a point in time) and `BIGDATETIME` becomes `TIMESTAMP`.
 
 **Known limitations (Sybase ASE):** foreign-key `ON DELETE` actions, table/column comments and standalone sequences have no Sybase counterpart or are not migrated. Note that older ASE versions do not support `LIMIT ... OFFSET`, so the migrator always drops and reloads unfinished tables when resuming after a crash for this source (it cannot skip already-loaded rows reliably).
@@ -672,6 +688,8 @@ When `migration.migrate_lob_values` is `false`, `BLOB`-backed columns are migrat
 - **Configuration**: `system_catalog` selects the metadata source — `SYS` (the `sys.*` catalog views) or `INFORMATION_SCHEMA`.
 - **Tested version**: MS SQL Server 2022.
 - **Migrated**: tables and data, primary keys, indexes, foreign keys, IDENTITY columns, sequences (SQL Server 2012+ standalone sequence objects), user-defined types, aliases/synonyms, views, functions, procedures and triggers (T-SQL converted to PL/pgSQL through the shared T-SQL parser).
+
+- **The `*=` / `=*` outer joins of the old Transact-SQL** are rewritten as ANSI `LEFT` / `RIGHT JOIN`s, in views and in the statements of an application alike. The asterisk stands next to the table whose rows are kept, so `c.id *= o.cid` becomes `customer LEFT JOIN orders`. The half which decides whether the result is right is the WHERE clause: a condition which restricts the **inner** table belongs to the join in this dialect, and in the WHERE clause of PostgreSQL it is applied to the result of the join, where it throws away exactly the rows the outer join added — the `LEFT JOIN` would be an inner join again, valid and answering fewer rows. Such a condition is moved into the `ON` clause and the move is reported, because it decides which rows come back. Three things are deliberately left where they stand: `AND inner.col IS NULL`, which is how this dialect asks for the rows without a match and which inside an `ON` clause is never true; a condition which reads more than one table; and anything under an `OR`. A join written as ANSI in the source is not touched at all. What cannot be attributed to a table of the FROM clause is **reported and not converted** — the alternative is the comma join it started from, which is an inner join PostgreSQL accepts without complaint. The rewrite is shared by the two connectors of the family and lives in `query_conversion/outer_joins.py`.
 - **Not migrated**: CHECK constraints, foreign-key `ON DELETE` actions, table and column comments (extended properties such as `MS_Description`), computed columns and domains/rules.
 
 ### 4.9 MySQL and MariaDB

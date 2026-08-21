@@ -21,6 +21,8 @@ from pyodbc import Error
 from credativ_pg_migrator.database_connector import DatabaseConnector, first_line
 from credativ_pg_migrator.migrator_logging import MigratorLogger
 from credativ_pg_migrator.connectors.tsql_parser import TsqlParser
+from credativ_pg_migrator.query_conversion import outer_joins as query_outer_joins
+from credativ_pg_migrator.query_conversion.outer_joins import outer_join_warnings
 from credativ_pg_migrator.jvm_helper import detach_thread_from_jvm
 import re
 import struct
@@ -1304,17 +1306,43 @@ class MsSQLConnector(DatabaseConnector):
                         node.set(arg, peel_parentheses_and_cast(child))
             return node
 
-        def transform_sybase_joins(expression):
-            # Check for EQ nodes with outer join comments (sqlglot default parsing of *=)
-            # OR check for 'outer_join' property if parsing handles it.
-            # sqlglot T-SQL might parse *= as normal EQ, or custom.
-            # Since we didn't inject the scanner pre-processor for *= yet (it's in Sybase v2 conversion),
-            # we rely on sqlglot.
-            # MSSQL views likely use standard ANSI JOINs, but legacy syntax exists.
-            # We assume ANSI joins for now, or sqlglot handles standard T-SQL.
+        def convert_legacy_outer_joins(expression):
+            """
+            The '*=' and '=*' outer joins of the old T-SQL, as the joins of PostgreSQL.
+
+            MS SQL Server read these until 2005 and the application files of a database old
+            enough to be migrated are full of them. This connector used to leave them alone -
+            the comment which stood here said "we assume ANSI joins for now" - so a statement
+            no parser can read was reported as unreadable, while sybase_ase, which is the same
+            family and writes the same operator, converted it. The work is shared with Sybase
+            ASE and with Oracle's '(+)' and stands in query_conversion/outer_joins.py; only
+            the marking is done in prepare_query_for_parsing() above.
+            """
+            converted_joins = set()
+            expression, unconverted = query_outer_joins.convert_marked_outer_joins(
+                expression, converted_joins)
+            if unconverted:
+                self.config_parser.print_log_message(
+                    'WARNING', f"ms_sql_connector: convert_statement_code: {unconverted} outer "
+                               f"join(s) written '*=' or '=*' could not be attributed to a table "
+                               f"of the FROM clause and were not rewritten.")
+            ## A restriction on the inner table belongs to the join in this dialect and to the
+            ## result of the join in PostgreSQL, where it throws away the rows the outer join
+            ## added - the LEFT JOIN would be an inner join again. It moves into the ON clause,
+            ## and what moved is reported, because it decides which rows the statement answers.
+            expression, moved = query_outer_joins.move_inner_table_predicates(
+                expression, converted_joins)
+            if moved:
+                report = settings.setdefault('conversion_report', {})
+                report['moved_predicates'] = report.get('moved_predicates', []) + moved
+                self.config_parser.print_log_message(
+                    'WARNING', f"ms_sql_connector: convert_statement_code: {', '.join(moved)} "
+                               f"restrict the inner table of an outer join and were moved into "
+                               f"its ON clause - in the WHERE clause of PostgreSQL they would "
+                               f"undo the outer join.")
             return expression
 
-        view_code = settings['view_code']
+        view_code = self.prepare_query_for_parsing(settings['view_code'])
         CustomTSQL.Parser.config_parser = self.config_parser
         try:
             expressions = sqlglot.parse(view_code, read=CustomTSQL)
@@ -1340,19 +1368,57 @@ class MsSQLConnector(DatabaseConnector):
                 ## which would otherwise cast the parts of a concatenation to a number
                 expression = expression.transform(self.convert_string_concatenation)
                 expression = expression.transform(cast_arithmetic_operands)
-                # expression = transform_sybase_joins(expression) # Not needed if standard SQL
+                expression = convert_legacy_outer_joins(expression)
 
                 ## the variables of the source keep their own spelling, the PostgreSQL generator
                 ## would write '@v' as '$v' and the conversion of a routine renames '@v' later
                 expression = expression.transform(self.keep_source_variables)
 
                 pg_sql = expression.sql(dialect='postgres')
+                ## the 'TRUE' the outer join rewrite leaves where the marked condition stood -
+                ## "WHERE TRUE AND x" is "WHERE x", and the shorter one is what a developer reads
+                pg_sql = query_outer_joins.tidy_boolean_placeholders(pg_sql)
                 transformed_sqls.append(pg_sql)
             except Exception as e:
-                self.config_parser.print_log_message('ERROR', f"ms_sql_connector: transform_sybase_joins: Failed to transform expression: {e}")
+                self.config_parser.print_log_message('ERROR', f"ms_sql_connector: convert_statement_code: Failed to transform expression: {e}")
                 transformed_sqls.append(f"-- ERROR transforming: {e}")
 
-        return "\n".join(transformed_sqls)
+        converted_code = "\n".join(transformed_sqls)
+        ## An outer join whose condition could not be attributed leaves its marker behind, and
+        ## what stands around it is the comma join it started from - an INNER join. The view
+        ## would be created and would answer fewer rows. Refused here, for the view path and
+        ## the query path alike.
+        marker_message = query_outer_joins.unconverted_marker_message(converted_code)
+        if marker_message:
+            error = ValueError(marker_message)
+            ## it parsed and it converted - it is the outer join alone which could not be
+            ## done, and a caller must not report it as a statement it could not read
+            error.outer_join_failure = True
+            raise error
+        return converted_code
+
+    def prepare_query_for_parsing(self, query_code):
+        """
+        The statement rewritten into something a T-SQL parser can read, without converting
+        anything.
+
+          '*=' and '=*' - the outer join MS SQL Server read until 2005. No parser of any
+          dialect knows them, so they become an equality carrying a marker which says which
+          side was outer, and convert_legacy_outer_joins() in convert_statement_code() turns
+          the marker into a LEFT / RIGHT JOIN. sybase_ase does the same with the same shared
+          code; this connector had nothing, so the identical statement converted from one
+          source of the family and was reported as unreadable from the other.
+
+        It is used by convert_statement_code() - so the view path and the query path are given
+        one preparation - and by the query conversion, which has to classify a statement
+        before it converts it: a statement which cannot be parsed would be reported as one the
+        migrator does not understand, and that answer must not be given to a statement its own
+        connector converts.
+        """
+        if not query_code:
+            return query_code
+        return query_outer_joins.mark_tsql_outer_joins(
+            query_code, self.sql_without_literals_and_comments)
 
     def query_conversion_supported(self):
         return True
@@ -1364,32 +1430,47 @@ class MsSQLConnector(DatabaseConnector):
         DatabaseConnector.convert_query_code().
         """
         statement_id = settings.get('statement_id', '')
+        ## the converter writes what it had to decide into this dictionary - it is made per
+        ## call, so nothing is carried from one statement to the next or between threads
+        statement_settings = {
+            'view_code': settings['query_code'],
+            'source_schema_name': settings['source_schema_name'],
+            'target_schema_name': settings['target_schema_name'],
+            'target_db_type': settings.get('target_db_type', 'postgresql'),
+            'conversion_report': {},
+        }
         try:
-            converted = self.convert_statement_code({
-                'view_code': settings['query_code'],
-                'source_schema_name': settings['source_schema_name'],
-                'target_schema_name': settings['target_schema_name'],
-                'target_db_type': settings.get('target_db_type', 'postgresql'),
-            })
+            converted = self.convert_statement_code(statement_settings)
         except ValueError as e:
+            if getattr(e, 'outer_join_failure', False):
+                return {'code': '', 'converted': False, 'warnings': [], 'error': first_line(e)}
             return {'code': '', 'converted': False, 'warnings': [],
                     'error': f"the statement could not be parsed as T-SQL: {first_line(e)}"}
         except Exception as e:
             return {'code': '', 'converted': False, 'warnings': [],
                     'error': f"the conversion ended with an error: {first_line(e)}"}
 
+        warnings = outer_join_warnings(statement_settings.get('conversion_report') or {})
+
         ## convert_statement_code() writes the transformation it could not do into the text it
         ## returns. Such a result is not a conversion and is not offered as one.
         failed = [line for line in (converted or '').splitlines() if line.strip().startswith('-- ERROR')]
         if failed:
-            return {'code': '', 'converted': False, 'warnings': [],
+            return {'code': '', 'converted': False, 'warnings': warnings,
                     'error': f"the statement could not be transformed: {failed[0].strip()}"}
         if not (converted or '').strip():
-            return {'code': '', 'converted': False, 'warnings': [],
+            return {'code': '', 'converted': False, 'warnings': warnings,
                     'error': 'the conversion produced no statement at all'}
 
+        ## an outer join whose condition could not be attributed keeps its marker; such a
+        ## statement is reported, never offered as converted with a comment in the middle of it
+        if '/* left_outer */' in converted or '/* right_outer */' in converted:
+            return {'code': '', 'converted': False, 'warnings': warnings,
+                    'error': "the outer join written '*=' or '=*' could not be rewritten as a "
+                             "LEFT JOIN / RIGHT JOIN - the statement needs to be rewritten by hand"}
+
         self.config_parser.print_log_message('DEBUG', f"ms_sql_connector: convert_query_code: {statement_id}: {converted}")
-        return {'code': converted, 'converted': True, 'warnings': [], 'error': None}
+        return {'code': converted, 'converted': True, 'warnings': warnings, 'error': None}
 
     def convert_view_code(self, settings: dict):
         """

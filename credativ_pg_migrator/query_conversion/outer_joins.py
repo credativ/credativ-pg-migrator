@@ -35,12 +35,309 @@ import re
 from sqlglot import exp
 
 
-def convert_marked_outer_joins(expression):
+## '*=' and '=*' of the Transact-SQL family. A literal holding one of them is text, so the
+## caller may hand in a way of blanking the literals out before the rewrite is applied.
+TSQL_OUTER_OPERATOR = re.compile(r'\*=|=\*')
+
+## The keywords which say what the text around an operator is. An outer join stands in a
+## search condition and is therefore preceded by one of WHERE, ON or HAVING; '*=' preceded by
+## SET is the compound assignment MS SQL Server has had since 2008 - 'UPDATE t SET x *= 2'
+## multiplies, and the routine conversion sends exactly such statements through here.
+CLAUSE_KEYWORD = re.compile(r'(?i)\b(WHERE|ON|HAVING|SET)\b')
+
+
+def from_anchor(select_node):
+    """
+    The alias of the table the FROM clause starts with.
+
+    The name of the argument differs between the versions of sqlglot this migrator is used
+    with - version 30 renamed 'from' to 'from_' - and asking for the wrong one answers None,
+    which reads exactly like a SELECT without a FROM clause. That is what made a RIGHT JOIN
+    lose the restrictions on its inner table: the anchor is the table the join leaves NULL.
+    """
+    for name in ('from_', 'from'):
+        clause = select_node.args.get(name)
+        if clause is not None and clause.this is not None:
+            return clause.this.alias_or_name
+    return None
+
+
+def protect(condition):
+    """
+    A condition wrapped in parentheses where it needs them.
+
+    An OR moved next to an AND changes what it means without them: the ON clause
+    "a = b AND x = 'X' OR x = 'Y'" is read as "(a = b AND x = 'X') OR x = 'Y'", which is not
+    the condition that was moved.
+    """
+    if isinstance(condition, exp.Or):
+        return exp.Paren(this=condition)
+    return condition
+
+
+MARKERS = ('/* left_outer */', '/* right_outer */')
+
+
+def unconverted_marker_message(code):
+    """
+    The message for a statement which still carries an outer join marker, or None.
+
+    A marker which reaches the end means the rewrite could not attribute the condition to a
+    table of the FROM clause - and what stands in the generated statement is then the comma
+    join it started from with an ordinary equality in the WHERE clause, which is an INNER
+    join. PostgreSQL accepts it, the view is created, the query runs, and it answers fewer
+    rows than the source did. That is the one outcome this conversion must never produce, so
+    the statement is refused instead: `FAKE_CONVERSIONS_AND_SILENT_SKIPS.md`.
+    """
+    if not code or not any(marker in code for marker in MARKERS):
+        return None
+    return ("the outer join written '*=' or '=*' could not be rewritten as a LEFT JOIN / RIGHT "
+            "JOIN - its condition could not be attributed to a table of the FROM clause. The "
+            "statement is not converted rather than converted into the inner join it would "
+            "otherwise become, which would answer fewer rows without looking wrong. It has to "
+            "be rewritten by hand.")
+
+
+def outer_join_warnings(report):
+    """
+    The report of the conversion as the warnings which go into the block of the statement.
+
+    A predicate moved into an ON clause changes which rows the statement answers, so the
+    developer is told which one moved and why - a conversion of an outer join which is silent
+    about this is the one a reader would trust and should not.
+    """
+    warnings = []
+    moved = (report or {}).get('moved_predicates') or []
+    if moved:
+        warnings.append(
+            f"{', '.join(moved)} restrict{'' if len(moved) > 1 else 's'} the inner table of an "
+            f"outer join. In the source such a condition belongs to the join and the rows of the "
+            f"outer table are kept either way; in the WHERE clause of PostgreSQL it would be "
+            f"applied to the result of the join and would throw away exactly the rows the outer "
+            f"join added. It was moved into the ON clause of the join, which is the same "
+            f"question - check that this is what the query means.")
+    return warnings
+
+
+def mark_tsql_outer_joins(code, mask_literals=None):
+    """
+    The '*=' and '=*' of Sybase ASE and of MS SQL Server as a marker on the '='.
+
+    No parser of any dialect reads them, so such a statement cannot be classified, let alone
+    converted, while they stand in the text. Each becomes an ordinary equality carrying an
+    inline comment which says which side was outer, and convert_marked_outer_joins() below
+    turns the marker into a LEFT or a RIGHT JOIN. The asterisk stands next to the table whose
+    rows are kept: 'a.x *= b.y' keeps every row of a, 'a.x =* b.y' keeps every row of b.
+
+    Both connectors of the family use this. It stood in sybase_ase alone before, which is why
+    the identical statement converted from Sybase ASE and was reported as unreadable from MS
+    SQL Server.
+
+    'mask_literals' is a callable which blanks out the string literals of the statement; where
+    it is given, the rewrite is applied only where it says the text is SQL.
+    """
+    if not code or ('*=' not in code and '=*' not in code):
+        return code
+    searched = mask_literals(code) if mask_literals is not None else code
+    clauses = [(match.start(), match.group(1).upper()) for match in CLAUSE_KEYWORD.finditer(searched)]
+    pieces = []
+    position = 0
+    for match in TSQL_OUTER_OPERATOR.finditer(searched):
+        if in_a_set_clause(clauses, match.start()):
+            continue
+        pieces.append(code[position:match.start()])
+        pieces.append('= /* left_outer */' if match.group(0) == '*=' else '= /* right_outer */')
+        position = match.end()
+    pieces.append(code[position:])
+    return ''.join(pieces)
+
+
+def in_a_set_clause(clauses, position):
+    """
+    Whether the operator at this position is being assigned to rather than compared.
+
+    'UPDATE t SET x *= 2' multiplies x by 2 - MS SQL Server has read '*=' that way since 2008,
+    and the conversion of a routine sends its UPDATE statements through the same converter as
+    its SELECT statements. Rewriting it as an outer join marker would turn an assignment into
+    a comparison. An outer join always stands in a search condition, so the question is which
+    keyword the operator stands behind: SET means it is an assignment, WHERE, ON and HAVING
+    mean it is a condition. Nothing in front of it at all is a fragment, and a fragment of a
+    condition is what the connectors hand in - so that is read as a condition too.
+    """
+    nearest = None
+    for start, keyword in clauses:
+        if start < position:
+            nearest = keyword
+        else:
+            break
+    return nearest == 'SET'
+
+
+def null_supplying_aliases(select_node, only_joins=None):
+    """
+    The tables of one SELECT whose rows an outer join may leave as NULL.
+
+    For 'a LEFT JOIN b' it is b; for 'a RIGHT JOIN b' it is a, the anchor of the FROM clause.
+    A FULL JOIN makes both sides null-supplying.
+
+    'only_joins' holds the ids of the joins to look at. move_inner_table_predicates() gives it
+    the joins the conversion itself made out of a '*=', because those are the only ones whose
+    WHERE conditions mean something else in the source than they do on the target. A join
+    written as ANSI in the source means on both sides what it says, and nothing of it may be
+    moved.
+    """
+    aliases = set()
+    anchor = from_anchor(select_node)
+    for join in select_node.args.get('joins') or []:
+        if only_joins is not None and id(join) not in only_joins:
+            continue
+        ## either slot: a join this module made carries 'side', and a join which was written
+        ## as ANSI in the source may carry the word in 'kind' depending on how it was parsed
+        side = (join.side or join.kind or '').upper()
+        table = join.this
+        name = table.alias_or_name if table is not None else None
+        if side == 'LEFT' and name:
+            aliases.add(name)
+        elif side == 'RIGHT' and anchor:
+            aliases.add(anchor)
+        elif side == 'FULL':
+            if name:
+                aliases.add(name)
+            if anchor:
+                aliases.add(anchor)
+    return aliases
+
+
+def conjuncts(condition):
+    """The top level AND parts of a condition. A part under an OR is not one of them."""
+    if isinstance(condition, exp.And):
+        return conjuncts(condition.this) + conjuncts(condition.expression)
+    if isinstance(condition, exp.Paren):
+        return conjuncts(condition.this)
+    return [condition]
+
+
+def tables_named_by(condition):
+    """The table qualifiers the condition reads. A column without one answers the empty name."""
+    return {column.table or '' for column in condition.find_all(exp.Column)}
+
+
+def is_a_null_test(condition):
+    """
+    Whether the condition asks whether something is NULL.
+
+    'WHERE c.id *= o.cid AND o.cid IS NULL' is how this family writes "the customers which
+    have no order", and it is answered after the join. Moving it into the ON clause would make
+    it a condition of the join, where it is never true - the statement would answer no rows at
+    all. It stays in the WHERE clause, whatever table it reads.
+    """
+    if isinstance(condition, exp.Not):
+        condition = condition.this
+    return isinstance(condition, exp.Is)
+
+
+def move_inner_table_predicates(expression, only_joins=None):
+    """
+    The WHERE conditions which read only a null-supplying table, moved into the ON clause of
+    its join. TRANSACT-SQL ONLY - see the note about Oracle at the end.
+
+    This is the half of the outer join which is not the join itself, and the half a converter
+    is most likely to get wrong - because getting it wrong produces a statement which is
+    valid, looks healthy and answers fewer rows. In Sybase ASE and in MS SQL Server a
+    restriction on the inner table of an old style outer join belongs to the join: it decides
+    which rows of the inner table take part, and the rows of the outer table are kept either
+    way. In PostgreSQL the same condition standing in the WHERE clause is applied to the
+    result of the join, where it throws away exactly the rows the outer join added - and the
+    LEFT JOIN is an inner join again.
+
+        WHERE c.id *= o.cid AND o.status = 'X'
+
+    is every customer, with the order of status X where there is one. Left where it stands, it
+    becomes only the customers which have such an order.
+
+    Three kinds of condition are left alone on purpose:
+
+      * one which reads more than one table, or a table which is not null-supplying - it is
+        not a restriction on the inner table,
+      * a test for NULL - see is_a_null_test(),
+      * anything under an OR, which conjuncts() never answers.
+
+    Returns (expression, moved) - 'moved' holds the conditions as text, for the warning the
+    caller writes into the block of the statement. The move changes which rows the statement
+    answers, so it is never silent.
+
+    NOT FOR ORACLE. There the marker is written per condition, so Oracle itself says which of
+    the two readings it means and nothing may be moved on its behalf.
+    """
+    moved = []
+    for select_node in expression.find_all(exp.Select):
+        where = select_node.args.get('where')
+        joins = select_node.args.get('joins') or []
+        if where is None or where.this is None or not joins:
+            continue
+        outer_aliases = null_supplying_aliases(select_node, only_joins)
+        if not outer_aliases:
+            continue
+        anchor = from_anchor(select_node)
+        join_by_alias = {}
+        for join in joins:
+            table = join.this
+            if table is not None and table.alias_or_name:
+                join_by_alias[table.alias_or_name] = join
+
+        kept = []
+        moved_here = False
+        ## the join which made the anchor of the FROM clause null-supplying, if one did
+        for condition in conjuncts(where.this):
+            named = tables_named_by(condition)
+            alias = next(iter(named)) if len(named) == 1 else None
+            if (alias is None or alias not in outer_aliases
+                    or is_a_null_test(condition) or isinstance(condition, exp.Boolean)):
+                kept.append(condition)
+                continue
+            ## the join which may leave this table NULL - its own join, or, when the table is
+            ## the anchor of the FROM clause, the RIGHT or FULL join which made it so
+            target_join = join_by_alias.get(alias)
+            if target_join is not None and only_joins is not None and id(target_join) not in only_joins:
+                target_join = None
+            if target_join is None and alias == anchor:
+                target_join = next(
+                    (join for join in joins
+                     if (join.side or join.kind or '').upper() in ('RIGHT', 'FULL')
+                     and (only_joins is None or id(join) in only_joins)), None)
+            if target_join is None:
+                kept.append(condition)
+                continue
+            moved.append(condition.sql())
+            moved_here = True
+            piece = protect(condition.copy())
+            existing_on = target_join.args.get('on')
+            target_join.set('on', exp.And(this=existing_on, expression=piece)
+                            if existing_on is not None else piece)
+
+        if not moved_here:
+            continue
+        if kept:
+            rebuilt = protect(kept[0].copy())
+            for condition in kept[1:]:
+                rebuilt = exp.And(this=rebuilt, expression=protect(condition.copy()))
+            where.set('this', rebuilt)
+        else:
+            select_node.set('where', None)
+    return expression, moved
+
+
+def convert_marked_outer_joins(expression, converted_joins=None):
     """Rewrite comment-marked equality predicates in the WHERE clause into ANSI LEFT/RIGHT
     JOINs. In sqlglot's model the extra comma-separated tables are implicit joins on the
     SELECT, so the null-supplying table's implicit join becomes a LEFT JOIN; if that table is
     the FROM anchor, the preserved table's join becomes a RIGHT JOIN instead. Returns
-    (expression, unconverted_count)."""
+    (expression, unconverted_count).
+
+    'converted_joins' is an optional set which is filled with the id() of every join this made
+    outer. move_inner_table_predicates() needs it to tell those joins from the ones which were
+    written as ANSI in the source: only the former carry conditions which mean something else
+    on the target than they did in the statement."""
     unconverted = 0
     for select_node in expression.find_all(exp.Select):
         where = select_node.args.get('where')
@@ -85,8 +382,15 @@ def convert_marked_outer_joins(expression):
             existing_on = target_join.args.get('on')
             if existing_on is not None:
                 cond = exp.And(this=existing_on, expression=cond)
-            target_join.set('kind', target_join.args.get('kind') or join_kind)
+            ## 'side' is the slot sqlglot models LEFT/RIGHT/FULL in; 'kind' is INNER/OUTER/
+            ## CROSS. This set 'kind' before, which generates the same SQL and leaves the
+            ## parsed statement saying the join has no side at all - so every later pass which
+            ## asks whether a join is outer, move_inner_table_predicates() above among them,
+            ## was answered no.
+            target_join.set('side', target_join.args.get('side') or join_kind)
             target_join.set('on', cond)
+            if converted_joins is not None:
+                converted_joins.add(id(target_join))
             eq.replace(exp.Boolean(this=True))
     return expression, unconverted
 

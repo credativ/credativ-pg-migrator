@@ -177,21 +177,27 @@ def test_a_statement_which_is_already_valid_postgresql_stays_readable(ms_sql):
     assert 'WHERE' in answer['code']
 
 
-## ---------------------------------------------------------------- what it does not do
+## ---------------------------------------------------------------- the legacy outer join
 
-def test_the_outer_join_written_star_equals_is_not_rewritten_here(ms_sql):
+def test_the_statement_is_prepared_so_a_parser_can_read_the_old_outer_join(ms_sql):
     """
-    MS SQL Server read '*=' until 2005 and application files still hold it. sybase_ase, which
-    is the same T-SQL family, rewrites it in prepare_query_for_parsing(); this connector has no
-    such rewrite, so the statement is reported as one which cannot be read. It is reported -
-    never handed back unconverted - which is what this asserts. See §17.2 of the strategy.
+    MS SQL Server read '*=' until 2005 and the application files of a database old enough to
+    be migrated are full of it. This connector had no preparation at all, so such a statement
+    was reported as one which cannot be read - while sybase_ase, the same T-SQL family with
+    the same operator, converted it.
     """
-    assert ms_sql.prepare_query_for_parsing('SELECT a FROM t1 x, t2 y WHERE x.i *= y.i') == \
-        'SELECT a FROM t1 x, t2 y WHERE x.i *= y.i'
-    answer = convert(ms_sql, 'SELECT c.id FROM dbo.customer c, dbo.orders o WHERE c.id *= o.cid')
-    assert answer['converted'] is False
-    assert answer['code'] == ''
-    assert answer['error']
+    prepared = ms_sql.prepare_query_for_parsing('SELECT a FROM t1 x, t2 y WHERE x.i *= y.i')
+    assert '*=' not in prepared
+    assert 'left_outer' in prepared
+
+
+def test_the_old_outer_join_becomes_a_left_join(ms_sql):
+    answer = convert(ms_sql, 'SELECT c.id, o.total FROM dbo.customer c, dbo.orders o '
+                             'WHERE c.id *= o.cid')
+    assert answer['converted'] is True
+    assert 'LEFT JOIN' in answer['code']
+    assert '*=' not in answer['code']
+    assert 'left_outer' not in answer['code']
 
 
 ## ---------------------------------------------------------------- the gates, in this dialect

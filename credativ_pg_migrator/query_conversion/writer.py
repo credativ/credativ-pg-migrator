@@ -28,6 +28,7 @@ changes from run to run does no harm.
 """
 
 import csv
+import datetime
 import io
 import json
 import os
@@ -104,6 +105,25 @@ class StatementResult:
             'parameters': self.parameters_line,
             'identical_to': self.identical_to,
         }
+
+
+def json_ready(value):
+    """
+    The values a result holds which JSON does not know, rendered as text.
+
+    The timestamps of a statement are datetimes, because that is what the protocol table takes
+    and as_dict() serves both. Without this the sidecar stopped the whole run with "Object of
+    type datetime is not JSON serializable" - after the output file had been written, so the
+    deliverable stood there and the run failed behind it, with no protocol rows and no summary.
+
+    Anything else is still an error rather than being stringified: the sidecar is what a CI job
+    reads, and a type nobody thought about must not be written into it without a word.
+    """
+    if isinstance(value, datetime.datetime):
+        return value.isoformat(sep=' ', timespec='milliseconds')
+    if isinstance(value, datetime.date):
+        return value.isoformat()
+    raise TypeError(f"the sidecar cannot hold a value of type {type(value).__name__}")
 
 
 def comment_block(text, indent='--   '):
@@ -257,7 +277,8 @@ class OutputWriter:
         if self.sidecar == 'json':
             path = f"{stem}.json"
             with open(path, 'w', encoding='utf-8') as handle:
-                json.dump([result.as_dict() for result in results], handle, indent=2, ensure_ascii=False)
+                json.dump([result.as_dict() for result in results], handle, indent=2,
+                          ensure_ascii=False, default=json_ready)
                 handle.write('\n')
             return path
         if self.sidecar == 'csv':

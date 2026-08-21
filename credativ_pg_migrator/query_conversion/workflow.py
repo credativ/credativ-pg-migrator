@@ -563,6 +563,11 @@ class QueryConverter:
         stop_on_error = (self.config_parser.get_query_conversion_on_error() == 'stop')
         written = []
         stopped = None
+        ## What went wrong is raised at the end and not here: the statements which were already
+        ## converted have a record and a summary either way. The run which reported this - a
+        ## sidecar which could not be written - lost the protocol rows and the summary of nine
+        ## converted statements to an error which happened after their file had been written.
+        failed_with = None
         try:
             for path in files:
                 results = self.convert_file(path)
@@ -579,12 +584,20 @@ class QueryConverter:
                     stopped = next((result for result in results if result.is_failure), None)
                     if stopped is not None:
                         break
+        except Exception as e:
+            failed_with = e
+            self.print_log_message('ERROR', f"query_conversion: the run ended with an error: {e}. "
+                                            f"What was converted up to here is recorded and "
+                                            f"summarised below.")
         finally:
             ## whatever ended the loop, the connections this run opened are its own to close
             self.close_worker_connections()
 
         self.record_protocol()
         self.print_summary(written, header)
+
+        if failed_with is not None:
+            raise failed_with
 
         if stopped is not None:
             raise ValueError(

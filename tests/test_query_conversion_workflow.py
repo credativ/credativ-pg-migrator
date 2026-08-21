@@ -340,3 +340,70 @@ def test_a_statement_which_needs_attention_is_a_failure_of_the_run():
     assert not make_result(UNCHANGED).is_failure
     ## a statement which was refused is not a failure - it is the step doing its work
     assert not make_result(SKIPPED).is_failure
+
+
+# --------------------------------------------------------------------------------------
+# the sidecar and the types a result holds
+
+
+def result_with_timestamps(ordinal=1, total=1):
+    import datetime
+    statement = Statement('SELECT 1', ordinal, 1, 1, 'queries/reports.sql')
+    result = StatementResult(statement, total)
+    result.status = CONVERTED
+    result.output_sql = 'SELECT 1'
+    result.statement_kind = 'SELECT'
+    result.task_started = datetime.datetime(2026, 8, 21, 11, 42, 21, 628000)
+    result.task_completed = datetime.datetime(2026, 8, 21, 11, 42, 21, 661000)
+    result.target_test = ('OK', 'explain on postgresql')
+    result.target_test_ms = 12.4
+    return result
+
+
+def test_the_sidecar_holds_the_timestamps_of_a_statement(tmp_path):
+    """
+    The timestamps are datetimes, because that is what the protocol table takes and as_dict()
+    serves both. json.dump stopped the whole run with "Object of type datetime is not JSON
+    serializable" - after the output file had been written, so the deliverable stood there and
+    the run failed behind it.
+    """
+    writer = OutputWriter({'directory': str(tmp_path), 'sidecar': 'json'}, lambda level, message: None)
+    _output, sidecar = writer.write(str(tmp_path / 'reports.sql'), [result_with_timestamps()],
+                                    {'tool': 't', 'source_db_type': 'ibm_db2_luw',
+                                     'target_db_type': 'postgresql', 'target_schema': 'public'})
+    record = json.loads(open(sidecar, encoding='utf-8').read())[0]
+    assert record['task_started'] == '2026-08-21 11:42:21.628'
+    assert record['task_completed'] == '2026-08-21 11:42:21.661'
+
+
+def test_the_sidecar_is_valid_json_for_every_field_a_result_carries(tmp_path):
+    writer = OutputWriter({'directory': str(tmp_path), 'sidecar': 'json'}, lambda level, message: None)
+    result = result_with_timestamps()
+    result.warnings = ['a warning']
+    result.unresolved_objects = ['AUDIT_LOG']
+    result.gate_refused = None
+    _output, sidecar = writer.write(str(tmp_path / 'reports.sql'), [result],
+                                    {'tool': 't', 'source_db_type': 'oracle',
+                                     'target_db_type': 'postgresql', 'target_schema': 'public'})
+    record = json.loads(open(sidecar, encoding='utf-8').read())[0]
+    assert record['statement_kind'] == 'SELECT'
+    assert record['warnings'] == ['a warning']
+    assert record['unresolved_objects'] == ['AUDIT_LOG']
+    assert record['target_test']['duration_ms'] == 12.4
+
+
+def test_a_type_the_sidecar_does_not_know_is_an_error_and_not_a_string():
+    """
+    Stringifying whatever turns up would put something nobody designed into the file a CI job
+    reads. It is refused by name instead.
+    """
+    from credativ_pg_migrator.query_conversion.writer import json_ready
+    with pytest.raises(TypeError) as raised:
+        json_ready(object())
+    assert 'cannot hold a value of type' in str(raised.value)
+
+
+def test_a_date_is_rendered_as_a_date():
+    import datetime
+    from credativ_pg_migrator.query_conversion.writer import json_ready
+    assert json_ready(datetime.date(2026, 8, 21)) == '2026-08-21'

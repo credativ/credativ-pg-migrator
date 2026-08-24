@@ -51,6 +51,7 @@ from tabulate import tabulate
 
 from credativ_pg_migrator.database_connector import DatabaseConnector
 from credativ_pg_migrator.migrator_logging import MigratorLogger
+from credativ_pg_migrator.text_decoding import TextDecoder
 
 
 class SQLiteConnector(DatabaseConnector):
@@ -90,6 +91,38 @@ class SQLiteConnector(DatabaseConnector):
         self._ddl_database_path = None
         if self.connectivity == self.config_parser.const_connectivity_ddl():
             self._prepare_ddl_files()
+
+    ## ---------------------------------------------------------------- bytes to text
+    ##
+    ## SQLite does not enforce the encoding of a TEXT value and it does not enforce the type
+    ## of a column either, so a value which is declared TEXT can arrive as bytes which are
+    ## not valid UTF-8 - a legacy database in a single byte encoding is exactly that. Four
+    ## places decoded those with errors='replace', which writes U+FFFD into the target as if
+    ## it were the data: it cannot be told apart from a U+FFFD which was really there and
+    ## cannot be turned back into the byte it stood for. What happens instead is
+    ## migration.on_undecodable_bytes, applied in text_decoding.py.
+
+    def text_decoder(self):
+        """The decoder of the values of this connection. UTF-8 is the only encoding SQLite
+        hands text over in, so there is nothing else to try before the setting applies."""
+        decoder = getattr(self, '_text_decoder', None)
+        if decoder is None:
+            decoder = TextDecoder(self.config_parser, 'sqlite_connector',
+                                  encodings=('utf-8',))
+            self._text_decoder = decoder
+        return decoder
+
+    def script_decoder(self):
+        """The decoder of the DDL scripts, which are files and not values of a connection."""
+        decoder = getattr(self, '_script_decoder', None)
+        if decoder is None:
+            ## utf-8-sig is utf-8 and also removes a byte order mark, which plain utf-8
+            ## leaves in the text as \ufeff - SQLite then refuses the first statement of the
+            ## file as an unrecognised token.
+            decoder = TextDecoder(self.config_parser, 'sqlite_connector',
+                                  encodings=('utf-8-sig',), last_resort='latin-1')
+            self._script_decoder = decoder
+        return decoder
 
     ## ---------------------------------------------------------------- connection
 
@@ -169,17 +202,17 @@ class SQLiteConnector(DatabaseConnector):
             return self._ddl_database_path
         return self.config_parser.get_connect_string(self.source_or_target)
 
-    @staticmethod
-    def _read_script(filepath):
-        """ Read a SQL script; a legacy dump is not necessarily valid UTF-8. """
+    def _read_script(self, filepath):
+        """
+        Read a SQL script; a legacy dump is not necessarily valid UTF-8.
+
+        A script which is not UTF-8 is read as latin-1, which keeps every byte, and that is
+        reported: what is in the file are the names of the objects the migration is about to
+        create, so a script read in the wrong encoding creates them misspelled.
+        """
         with open(filepath, 'rb') as script_file:
             raw = script_file.read()
-        for encoding in ('utf-8', 'utf-8-sig', 'latin-1'):
-            try:
-                return raw.decode(encoding)
-            except UnicodeDecodeError:
-                continue
-        return raw.decode('utf-8', errors='replace')
+        return self.script_decoder().decode(raw, place=os.path.basename(filepath))
 
     def _execute_script(self, connection, script, filepath):
         """
@@ -259,6 +292,8 @@ class SQLiteConnector(DatabaseConnector):
                     self.config_parser.print_log_message('WARNING', f"sqlite_connector: _build_ddl_database: {filepath} is empty - skipped.")
                     continue
                 failed_statements += self._execute_script(build_connection, script, filepath)
+            ## which of the scripts were not in the encoding they were expected in
+            self.script_decoder().log_summary()
             build_connection.commit()
             objects = build_connection.execute(
                 "SELECT type, count(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' GROUP BY type ORDER BY type").fetchall()
@@ -300,18 +335,14 @@ class SQLiteConnector(DatabaseConnector):
         self.config_parser.set_source_schema('main')
         self.config_parser.print_log_message('INFO', "sqlite_connector: parse_ddl_files: DDL scripts loaded - source schema set to 'main'.")
 
-    @staticmethod
-    def _decode_text(value):
+    def _decode_text(self, value):
         """
-        Text factory for sqlite3. SQLite does not enforce the encoding of TEXT values,
-        so a legacy database can easily contain bytes which are not valid UTF-8. The
-        default factory raises on those - decoding with a replacement keeps the
-        migration running instead of failing on a single bad row.
+        Text factory for sqlite3. SQLite does not enforce the encoding of TEXT values, so a
+        legacy database can easily contain bytes which are not valid UTF-8. The default
+        factory raises on those, which ends the migration on a single bad row; what happens
+        instead is migration.on_undecodable_bytes, and its default keeps every byte.
         """
-        try:
-            return value.decode('utf-8')
-        except UnicodeDecodeError:
-            return value.decode('utf-8', errors='replace')
+        return self.text_decoder().decode(value, place='TEXT value')
 
     def connect(self):
         if self.connectivity == self.config_parser.const_connectivity_ddl():
@@ -346,6 +377,14 @@ class SQLiteConnector(DatabaseConnector):
         self.connection.text_factory = self._decode_text
 
     def disconnect(self):
+        try:
+            ## How many values did not fit UTF-8, before the connection which read them is
+            ## gone. Nothing is written when there were none.
+            decoder = getattr(self, '_text_decoder', None)
+            if decoder is not None:
+                decoder.log_summary()
+        except Exception:
+            pass
         try:
             if self.connection:
                 self.connection.close()
@@ -2126,14 +2165,13 @@ class SQLiteConnector(DatabaseConnector):
             self.config_parser.print_log_message('WARNING', f"sqlite_connector: get_table_next_identity: Error fetching next identity for {table_schema}.{table_name}: {e}")
             return None
 
-    @staticmethod
-    def _coerce_boolean(value):
+    def _coerce_boolean(self, value):
         if value is None or isinstance(value, bool):
             return value
         if isinstance(value, (int, float, Decimal)):
             return value != 0
         if isinstance(value, (bytes, bytearray, memoryview)):
-            value = bytes(value).decode('utf-8', errors='replace')
+            value = self.text_decoder().decode(bytes(value), place='BOOLEAN value')
         if isinstance(value, str):
             normalized = value.strip().lower()
             if normalized in ('1', 't', 'true', 'y', 'yes', 'on'):
@@ -2143,8 +2181,7 @@ class SQLiteConnector(DatabaseConnector):
             return True
         return bool(value)
 
-    @staticmethod
-    def _coerce_datetime(value):
+    def _coerce_datetime(self, value):
         """
         SQLite stores date and time values as ISO text, as a Unix timestamp (INTEGER) or
         as a Julian day number (REAL). Text is handed over unchanged - PostgreSQL parses
@@ -2153,7 +2190,7 @@ class SQLiteConnector(DatabaseConnector):
         if value is None or isinstance(value, (str, datetime.date, datetime.datetime, datetime.time)):
             return value
         if isinstance(value, (bytes, bytearray, memoryview)):
-            return bytes(value).decode('utf-8', errors='replace')
+            return self.text_decoder().decode(bytes(value), place='date or time value')
         if isinstance(value, int):
             try:
                 return datetime.datetime.fromtimestamp(value, datetime.timezone.utc).replace(tzinfo=None)

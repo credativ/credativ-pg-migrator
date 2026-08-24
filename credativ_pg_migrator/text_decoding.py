@@ -19,8 +19,8 @@ What happens to a byte which the assumed encoding cannot read.
 
 A value arrives from a source database as bytes whenever the driver does not know - or does
 not say - which encoding it is in, and the migrator has to make a Python string out of it
-before it can be written to the target. Three places in the MS SQL Server connector did that
-with `errors='ignore'`:
+before it can be written to the target. Nine places did that leniently: three in the MS SQL
+Server connector, with `errors='ignore'`, which is where this module comes from:
 
     value.decode('utf-16', errors='ignore')
     value.decode('latin1', errors='ignore')
@@ -29,7 +29,8 @@ with `errors='ignore'`:
 left the source, no line is written anywhere, and nothing afterwards can see it: the row
 counts match, and the validator compares what it reads on both sides through this same
 decoder, so the checksums match as well. Data changed without a trace is the one outcome this
-repository treats as worse than a crash.
+repository treats as worse than a crash. The other six wrote `errors='replace'` instead, which
+is the same silence with the replacement character in place of the missing byte.
 
 `errors='strict'` on its own is not the repair either. It would end the migration of a million
 rows on the first odd byte, and a value which is not in the encoding the driver assumes is
@@ -55,9 +56,11 @@ here once for every place which has to make a string out of bytes:
 Two things about it are deliberate.
 
 **U+FFFD is never written.** The replacement character cannot be told apart from a U+FFFD
-which was in the data and cannot be turned back into the byte it stood for. Writing it is
-P1-2 of `development/OPEN_ISSUES.md`, which is the same decision as this one for six further
-sites, and it is meant to be repaired by calling this module rather than by choosing again.
+which was in the data and cannot be turned back into the byte it stood for. Writing it was
+P1-2 of `development/OPEN_ISSUES.md` - six further places, in the SQLite connector and in the
+CSV reader of a file data source - and they were repaired by calling this module rather than
+by deciding again. Nine places, one decision. The UNL reader of Informix is not one of them:
+it opens its files strictly and refuses such a byte out loud, which is a decision of its own.
 
 **A value which the first expected encoding reads is not reported at all**, and one which a
 later one reads is counted but not written per value. Trying utf-8 and then utf-16 for a wide
@@ -72,11 +75,23 @@ can tell that this is not what was meant. That is why every value which the firs
 could not read is counted and named in the summary, per place: the count is the only evidence
 there is, and before this module there was none.
 
+A **file** is decided the same way and read differently. A CSV export is opened with the
+encoding its data source declares (`format_options.character_set`), so there is no chain
+to try: a byte which does not fit means the declaration is wrong or the file is damaged. The
+decision is applied by a codec error handler, registered under the name `ERROR_HANDLER` and
+handed to `open()`, so the reader of the file is not restructured around it - see
+`TextDecoder.open_text()`. `substitute` there keeps the byte as the character `latin1` gives
+it and leaves the rest of the file in the declared encoding, which is closer to the file than
+decoding the whole of it again would be.
+
 `summary()` returns what happened as counters, per place and per outcome. It is what a
 deviations protocol table (P4-6) would be filled from, and it is what `log_summary()` writes
-when the connection is closed.
+when the connection is closed or the file has been read.
 """
 
+import codecs
+import contextlib
+import os
 import threading
 
 ## The values of migration.on_undecodable_bytes.
@@ -91,6 +106,14 @@ DETAILED_REPORTS_PER_PLACE = 5
 ## How much of a value a message may show. It is data, so it is shown as hexadecimal, only
 ## around the byte which did not fit, and never more than this many bytes.
 PREVIEW_BYTES = 16
+
+
+## The decoder a file is being read through, per thread. A codec error handler is given the
+## failure and nothing else - not the file, not the setting - so this is where it finds them.
+_ACTIVE = threading.local()
+
+## The name open() is given as its `errors`, registered below.
+ERROR_HANDLER = 'credativ_pg_migrator_undecodable'
 
 
 class UndecodableBytes(ValueError):
@@ -195,23 +218,61 @@ class TextDecoder:
         if not isinstance(value, bytes):
             return str(value)
 
-        where = f'{self.place}: {place}' if place else self.place
         candidates = tuple(encodings) if encodings else self.encodings
-        first_error = None
-        for position, encoding in enumerate(candidates):
+        try:
+            return value.decode(candidates[0])
+        except UnicodeDecodeError as error:
+            first_error = error
+
+        ## Only a value which the first expected encoding could not read costs anything more
+        ## than the decode itself - this runs for every text value of every row.
+        where = f'{self.place}: {place}' if place else self.place
+        for encoding in candidates[1:]:
             try:
                 decoded = value.decode(encoding)
-            except UnicodeDecodeError as error:
-                if first_error is None:
-                    first_error = error
+            except UnicodeDecodeError:
                 continue
-            if position:
-                ## Read, but not by the encoding which was expected first. Nothing is written
-                ## per value - this is one event per row for a column which is wholly in the
-                ## second encoding - and the count is named in the summary.
-                self._count(where, f'read as {encoding}')
+            ## Read, but not by the encoding which was expected first. Nothing is written per
+            ## value - a column which is wholly in the second encoding is one event per row -
+            ## and the count is named in the summary.
+            self._count(where, f'read as {encoding}')
             return decoded
         return self._undecodable(value, where, candidates, first_error)
+
+    ## ------------------------------------------------------------------------------------
+    ## Files.
+    ##
+    ## A file is read through a codec error handler rather than value by value, so that the
+    ## reader - csv.reader over an open file, in both places which need this - does not have
+    ## to be restructured around the decision. The handler is registered once, under a name
+    ## which is given to open(); it finds the decoder to report to in `_ACTIVE`, which
+    ## `reading()` sets for the current thread.
+
+    @contextlib.contextmanager
+    def reading(self, place):
+        """Make this decoder the one the codec error handler reports to, in this thread."""
+        previous = getattr(_ACTIVE, 'decoder', None)
+        previous_place = getattr(_ACTIVE, 'place', None)
+        _ACTIVE.decoder, _ACTIVE.place = self, place
+        try:
+            yield self
+        finally:
+            _ACTIVE.decoder, _ACTIVE.place = previous, previous_place
+
+    @contextlib.contextmanager
+    def open_text(self, path, encoding, place=None, **open_arguments):
+        """
+        `open()` for a file whose encoding is declared, with the setting applied to the bytes
+        which do not fit it.
+
+        Everything read inside the block goes through the decision, including what a
+        `csv.reader` built on the handle reads. The block is where the decision applies, so
+        the file must be read inside it and not from a handle which outlived it.
+        """
+        with self.reading(place or os.path.basename(path)):
+            with open(path, 'r', encoding=encoding, errors=ERROR_HANDLER,
+                      **open_arguments) as handle:
+                yield handle
 
     def _undecodable(self, value, where, candidates, error):
         detail = describe_error(error)
@@ -261,6 +322,44 @@ class TextDecoder:
             f"written as a \\xNN escape, so nothing is lost and the value is not the text it "
             f"was. The bytes around it are {preview}.")
         return kept
+
+    def file_error(self, error, place=None):
+        """
+        One run of bytes of a file which the declared encoding could not read.
+
+        Answers `(replacement, position to carry on at)`, which is what a codec error handler
+        owes its caller. The offset the failure carries is inside the block the reader had
+        just read and not inside the file, so it is not reported as a position - the bytes
+        themselves are, which is what says what the encoding of the file really is.
+        """
+        where = f'{self.place}: {place}' if place else self.place
+        bad = bytes(error.object[error.start:error.end])
+        spelled = ' '.join(f'0x{byte:02x}' for byte in bad)
+        policy = self.policy
+
+        if policy == 'fail':
+            self._count(where, 'refused')
+            raise error
+
+        if policy == 'remove':
+            self._count(where, 'with bytes deleted')
+            self._report(
+                where, 'WARNING',
+                f"{where}: {len(bad)} byte(s) ({spelled}) are not {error.encoding} - "
+                f"{error.reason}. They were DELETED from the value, because "
+                f"migration.on_undecodable_bytes is 'remove'.")
+            return ('', error.end)
+
+        ## substitute - the byte is kept as the character latin1 gives it, and the rest of
+        ## the file stays in the encoding it was declared as.
+        self._count(where, 'read as latin1 as a last resort')
+        self._report(
+            where, 'WARNING',
+            f"{where}: {len(bad)} byte(s) ({spelled}) are not {error.encoding} - "
+            f"{error.reason}. They were kept as what latin1 reads them as, so no byte is "
+            f"lost and the characters may be wrong. The declared encoding of this file is "
+            f"probably not the one it was written in.")
+        return (bad.decode('latin1'), error.end)
 
     def _count(self, where, outcome):
         with self._lock:
@@ -323,8 +422,8 @@ class TextDecoder:
             if any(self.is_fallback(outcome) for outcome in outcomes):
                 self.config_parser.print_log_message(
                     'WARNING',
-                    f"{where}: {spelled}. These values were not in any of the encodings "
-                    f"expected for them ({' or '.join(self.encodings)}) and were handled as "
+                    f"{where}: {spelled}. What did not fit the encoding(s) expected there "
+                    f"({' or '.join(self.encodings)}) was handled as "
                     f"migration.on_undecodable_bytes says ('{self.policy}').")
             else:
                 self.config_parser.print_log_message(
@@ -332,3 +431,31 @@ class TextDecoder:
                     f"{where}: {spelled}. Nothing was guessed and no byte was lost - the "
                     f"values were read by an encoding which is expected for them, but not by "
                     f"{self.encodings[0]}, which is the one tried first.")
+
+
+def handle_file_error(error):
+    """
+    The codec error handler `open()` is given for a file whose encoding is declared.
+
+    It is called with one run of bytes which the declared encoding could not read, and it
+    answers with what stands there instead and where to carry on. `substitute` answers with
+    the characters `latin1` gives those bytes - the rest of the file stays in the encoding it
+    was declared as, and no byte is lost; `remove` answers with nothing, which is what
+    `errors='ignore'` did; `fail` raises what it was given, which ends the read.
+
+    A decoder is put in `_ACTIVE` by `TextDecoder.reading()`, which `open_text()` wraps the
+    read in. Without one - a handle opened by something which does not know about this - the
+    default setting is applied and nothing is counted, because there is nowhere to count it.
+    """
+    if not isinstance(error, UnicodeDecodeError):
+        ## An encoding error is the caller writing a value the target cannot hold, which is
+        ## not this decision and must not be answered by one.
+        raise error
+
+    decoder = getattr(_ACTIVE, 'decoder', None)
+    if decoder is None:
+        return (error.object[error.start:error.end].decode('latin1'), error.end)
+    return decoder.file_error(error, getattr(_ACTIVE, 'place', None))
+
+
+codecs.register_error(ERROR_HANDLER, handle_file_error)

@@ -1,6 +1,6 @@
 # credativ-pg-migrator — test suite
 
-809 test functions in 47 files. **No test in this directory needs a database, a driver
+802 test functions in 46 files. **No test in this directory needs a database, a driver
 connection, or a network.** Everything that would talk to a server is either constructed
 with `Class.__new__(Class)` and fed a fake config, or replaced with `unittest.mock`. A
 full run touches nothing outside the repository and finishes in seconds.
@@ -337,13 +337,17 @@ function returning set").
 **collection** time — a failure appears as a collection error, not a test failure. Worth
 turning into proper test functions when this file is next touched.
 
-### `test_undecodable_bytes.py` — 31 tests
+### `test_undecodable_bytes.py` — 53 functions, 58 tests
 
-**Purpose.** A byte the assumed encoding cannot read is never deleted from a value. P1-1 of
-`development/OPEN_ISSUES.md`: the MS SQL Server connector decoded the values pyodbc hands
-over as bytes with `errors='ignore'` three times, so such a byte was removed from the value —
-the row reached the target shorter than it left the source and nothing said so, not the row
-counts and not the validator, which reads both sides through the same decoder.
+**Purpose.** A byte the assumed encoding cannot read is never deleted from a value, and
+U+FFFD is never written into the target. P1-1 and P1-2 of `development/OPEN_ISSUES.md` —
+nine places, one decision. The MS SQL Server connector decoded the values pyodbc hands over
+as bytes with `errors='ignore'` three times, so such a byte was removed from the value: the
+row reached the target shorter than it left the source and nothing said so, not the row
+counts and not the validator, which reads both sides through the same decoder. The other six
+— four in the SQLite connector, two in the CSV reader of a file data source — wrote the
+replacement character, which cannot be told apart from one which was really in the data and
+cannot be turned back into the byte it stood for.
 
 **Covers.** `migration.on_undecodable_bytes` in all three of its settings, over
 `text_decoding.TextDecoder`: that `substitute` loses no byte (what comes out re-encodes to
@@ -355,15 +359,28 @@ later expected encoding reads is counted without a line per value, with the deta
 limited per place and the totals in the summary. The limit of the detection is asserted
 rather than left to be discovered: **utf-16 reads almost any byte string of even length**, so
 four bytes of Windows-1252 come out as two characters nobody wrote, and the count is the only
-evidence there is. And the connector: that every ODBC converter goes through the decision,
-that all five are callable the way pyodbc calls them — with the value alone — that a
-`datetimeoffset` which is not the 20 byte structure is read as text rather than as the repr
-of its bytes, that the summary is written when the connection is closed and that a connection
-which read nothing odd says nothing. The last test reads `ms_sql_connector.py` and fails if
-`errors='ignore'` or `errors='replace'` is added back to it.
+evidence there is.
 
-**Expected result.** Passes. The connector half is skipped where the ODBC and JDBC drivers
-are not installed; the decoder half needs nothing beyond the standard library.
+Then each of the three places. **MS SQL Server**: every ODBC converter goes through the
+decision, all five are callable the way pyodbc calls them — with the value alone — a
+`datetimeoffset` which is not the 20 byte structure is read as text rather than as the repr
+of its bytes, the summary is written when the connection is closed, and a connection which
+read nothing odd says nothing. **SQLite**: a real SQLite file holding a TEXT value which is
+not valid UTF-8 is read through the text factory in every setting, the two value coercions go
+through the decision as well, a DDL script which is not UTF-8 is read as latin-1 and reported
+for it, and one with a byte order mark loses the mark instead of handing `\ufeff` to SQLite as
+part of its first statement. **A file**: the CSV reader keeps every byte of a file declared as
+the wrong encoding, refuses it under `fail`, names the file in the summary, restores the
+previous decoder when a second file is read inside the first — which
+`convert_csv_to_utf8()` really does, to work out the order the dates are written in — and
+`convert_csv_to_utf8()` itself is run end to end over a Windows-1252 export to assert that no
+U+FFFD reaches the UTF-8 file the target is loaded from.
+
+Three tests read `ms_sql_connector.py`, `sqlite_connector.py` and `config_parser.py` with
+`ast` and fail if any call there passes `errors='ignore'` or `errors='replace'` again.
+
+**Expected result.** Passes. The two connector groups are skipped where their drivers are not
+installed; everything else needs nothing beyond the standard library.
 
 ---
 

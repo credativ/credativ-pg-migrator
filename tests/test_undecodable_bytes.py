@@ -2,11 +2,16 @@
 """
 A byte which the assumed encoding cannot read is never deleted from a value.
 
-P1-1 of development/OPEN_ISSUES.md: the MS SQL Server connector decoded the values pyodbc
-hands over as bytes with `errors='ignore'` in three places, so a byte which did not fit the
-assumed encoding was removed from the value. The row reached the target shorter than it left
-the source and nothing said so - not the row counts, and not the validator, which reads both
-sides through the same decoder.
+P1-1 and P1-2 of development/OPEN_ISSUES.md - nine places, one decision.
+
+The MS SQL Server connector decoded the values pyodbc hands over as bytes with
+`errors='ignore'` in three places, so a byte which did not fit the assumed encoding was
+removed from the value: the row reached the target shorter than it left the source and
+nothing said so - not the row counts, and not the validator, which reads both sides through
+the same decoder. The other six wrote **U+FFFD** instead - four in the SQLite connector, two
+in the CSV reader of a file data source - which is worse in one way: the replacement
+character cannot be told apart from one which was really in the data, and cannot be turned
+back into the byte it stood for.
 
 What is asserted here is the whole of the repair:
 
@@ -19,11 +24,16 @@ What is asserted here is the whole of the repair:
     reported for every value it happens to;
   * that a value one of the expected encodings can read is decoded and NOT reported, because
     a line per row would bury the values which really did not fit;
-  * and the connector itself: the ODBC converters go through the decision, the summary is
-    written when the connection is closed, and a datetimeoffset which is not the 20 byte
-    structure is read as text rather than as the repr of its bytes.
+  * the connectors themselves: the ODBC converters of MS SQL Server go through the decision,
+    the summary is written when the connection is closed, and a datetimeoffset which is not
+    the 20 byte structure is read as text rather than as the repr of its bytes; the SQLite
+    text factory, its two value coercions and its DDL scripts go through it as well;
+  * and a file, which is decided the same way and read differently - the CSV reader of a
+    file data source opens the file in the encoding its data source declares, and the
+    decision is applied to it by a codec error handler.
 
-Nothing here connects to anything.
+Nothing here connects to anything. The SQLite tests build a real SQLite file in a temporary
+directory, which is what `sqlite3` is - a library, not a server.
 
 Run with:  python3 -m pytest tests/test_undecodable_bytes.py -v
 """
@@ -424,14 +434,376 @@ def test_a_connector_which_read_nothing_odd_says_nothing_when_it_closes(connecto
     assert connector.config_parser.messages == []
 
 
-def test_the_source_of_the_connector_holds_no_lenient_decode_any_more():
+@pytest.mark.parametrize('module', [
+    'connectors/ms_sql_connector.py',
+    'connectors/sqlite_connector.py',
+    'config_parser.py',
+])
+def test_no_lenient_decode_is_left_anywhere_the_two_issues_name(module):
     """
-    The three lines P1-1 names. A `errors='ignore'` added back here would delete bytes again
-    without anything else in the suite noticing.
+    The nine lines P1-1 and P1-2 name. One added back here would delete bytes, or write
+    U+FFFD into the target, without anything else in the suite noticing.
     """
-    path = os.path.join(REPO, 'credativ_pg_migrator', 'connectors', 'ms_sql_connector.py')
+    import ast
+
+    path = os.path.join(REPO, 'credativ_pg_migrator', *module.split('/'))
     with open(path, encoding='utf-8') as handle:
-        code = [line for line in handle if not line.lstrip().startswith('#')]
-    for lenient in ("errors='ignore'", "errors='replace'", 'errors="ignore"', 'errors="replace"'):
-        offenders = [line.strip() for line in code if lenient in line]
-        assert not offenders, f'{lenient} is back in ms_sql_connector.py: {offenders}' 
+        tree = ast.parse(handle.read(), filename=path)
+
+    offenders = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        for keyword in node.keywords:
+            if keyword.arg != 'errors' or not isinstance(keyword.value, ast.Constant):
+                continue
+            if keyword.value.value in ('ignore', 'replace'):
+                offenders.append(f"line {node.lineno}: errors={keyword.value.value!r}")
+    assert not offenders, (
+        f'a lenient decode is back in {module} - it belongs in text_decoding.py, where the '
+        f'setting decides: ' + ', '.join(offenders))
+
+
+# --------------------------------------------------------------------------------------
+# the SQLite connector
+
+
+def sqlite_connector_class():
+    try:
+        from credativ_pg_migrator.connectors.sqlite_connector import SQLiteConnector
+    except Exception as error:
+        pytest.skip(f"sqlite needs a driver which is not installed here ({error})")
+    return SQLiteConnector
+
+
+@pytest.fixture
+def sqlite(request):
+    """A connector with nothing but a configuration - it opens no database of its own."""
+    policy = getattr(request, 'param', 'substitute')
+    made = sqlite_connector_class().__new__(sqlite_connector_class())
+    made.config_parser = RecordingConfig(policy)
+    made.connection = None
+    return made
+
+
+@pytest.fixture
+def sqlite_database(tmp_path):
+    """A SQLite file holding a TEXT value which is not valid UTF-8, as a legacy one does."""
+    import sqlite3
+
+    path = str(tmp_path / 'legacy.sqlite')
+    raw = sqlite3.connect(path)
+    raw.execute('CREATE TABLE t (id INTEGER, name TEXT)')
+    raw.execute('INSERT INTO t VALUES (1, CAST(? AS TEXT))', (CP1252,))
+    raw.commit()
+    raw.close()
+    return path
+
+
+@pytest.mark.parametrize('sqlite', ['substitute', 'remove'], indirect=True)
+def test_the_sqlite_text_factory_never_answers_with_u_fffd(sqlite, sqlite_database):
+    """
+    SQLite does not enforce the encoding of a TEXT value, so a legacy database holds bytes
+    which are not UTF-8. The factory answered with U+FFFD, which is P1-2: it cannot be told
+    apart from one which was in the data and cannot be turned back into the byte it stood for.
+    """
+    import sqlite3
+
+    connection = sqlite3.connect(sqlite_database)
+    connection.text_factory = sqlite._decode_text
+    value = connection.execute('SELECT name FROM t').fetchone()[0]
+    connection.close()
+    assert '\ufffd' not in value
+
+
+def test_the_sqlite_text_factory_keeps_every_byte(sqlite, sqlite_database):
+    import sqlite3
+
+    connection = sqlite3.connect(sqlite_database)
+    connection.text_factory = sqlite._decode_text
+    value = connection.execute('SELECT name FROM t').fetchone()[0]
+    connection.close()
+    assert value.encode('latin1') == CP1252
+    assert 'TEXT value' in sqlite.config_parser.levels('WARNING')[0]
+
+
+@pytest.mark.parametrize('sqlite', ['fail'], indirect=True)
+def test_the_sqlite_text_factory_refuses_the_row_under_fail(sqlite, sqlite_database):
+    import sqlite3
+
+    connection = sqlite3.connect(sqlite_database)
+    connection.text_factory = sqlite._decode_text
+    with pytest.raises(UndecodableBytes):
+        connection.execute('SELECT name FROM t').fetchone()
+    connection.close()
+
+
+def test_a_value_which_is_valid_utf_8_costs_the_sqlite_factory_nothing(sqlite):
+    assert sqlite._decode_text('café'.encode('utf-8')) == 'café'
+    assert sqlite.config_parser.messages == []
+
+
+def test_the_sqlite_value_coercions_go_through_the_decision(sqlite):
+    """
+    Both used to decode with a replacement as well. A boolean is not written into the target
+    as text, but which boolean it becomes is decided from what the bytes are read as.
+    """
+    assert sqlite._coerce_boolean(CP1252) is True
+    assert sqlite._coerce_datetime(CP1252).encode('latin1') == CP1252
+    assert sqlite._coerce_boolean(b'true') is True
+    assert sqlite._coerce_boolean(b'0') is False
+    assert sqlite.text_decoder().summary() == {
+        'sqlite_connector: BOOLEAN value': {'read as latin1 as a last resort': 1},
+        'sqlite_connector: date or time value': {'read as latin1 as a last resort': 1},
+    }
+
+
+def test_the_sqlite_coercions_say_nothing_about_a_value_which_is_utf_8(sqlite):
+    assert sqlite._coerce_boolean(b'yes') is True
+    assert sqlite._coerce_datetime('2026-08-24'.encode('utf-8')) == '2026-08-24'
+    assert sqlite.config_parser.messages == []
+
+
+def test_a_ddl_script_which_is_not_utf_8_is_read_and_reported(sqlite, tmp_path):
+    """
+    What is in the file are the names of the objects the migration is about to create, so a
+    script read in the wrong encoding creates them misspelled - it is reported for that.
+    """
+    path = tmp_path / 'schema.sql'
+    path.write_bytes('CREATE TABLE köln (id INTEGER);\n'.encode('cp1252'))
+    script = sqlite._read_script(str(path))
+    assert script == 'CREATE TABLE köln (id INTEGER);\n'
+    written = sqlite.config_parser.levels('WARNING')[0]
+    assert 'schema.sql' in written
+    assert 'latin-1' in written
+
+
+def test_a_ddl_script_with_a_byte_order_mark_loses_it(sqlite, tmp_path):
+    """
+    Plain utf-8 leaves the mark in the text as \ufeff and SQLite then refuses the first
+    statement of the file as an unrecognised token, so utf-8-sig is what is expected.
+    """
+    path = tmp_path / 'schema.sql'
+    path.write_bytes('\ufeffCREATE TABLE t (id INTEGER);\n'.encode('utf-8'))
+    assert sqlite._read_script(str(path)).startswith('CREATE TABLE')
+    assert sqlite.config_parser.messages == []
+
+
+def test_the_sqlite_connector_writes_its_summary_when_the_connection_is_closed(sqlite):
+    sqlite._decode_text(CP1252)
+    sqlite.config_parser.messages.clear()
+    sqlite.disconnect()
+    assert any('TEXT value' in message for message in sqlite.config_parser.levels('WARNING'))
+
+
+# --------------------------------------------------------------------------------------
+# files - the CSV reader of a file data source
+
+
+def write(tmp_path, name, text, encoding):
+    path = tmp_path / name
+    path.write_bytes(text.encode(encoding))
+    return str(path)
+
+
+@pytest.fixture
+def csv_file(tmp_path):
+    """A CSV export written in Windows-1252, which is what its data source would declare."""
+    return write(tmp_path, 'customers.csv',
+                 'id,name\n1,Bäckerei Müller\n2,Straße\n', 'cp1252')
+
+
+def file_decoder(policy='substitute', encodings=('utf-8',)):
+    config = RecordingConfig(policy)
+    return TextDecoder(config, 'config_parser', encodings=encodings), config
+
+
+def read_rows(decoder, path, encoding):
+    import csv
+
+    with decoder.open_text(path, encoding, newline='') as handle:
+        return list(csv.reader(handle))
+
+
+def test_a_file_read_in_the_encoding_it_was_written_in_says_nothing(csv_file):
+    text, config = file_decoder(encodings=('cp1252',))
+    assert read_rows(text, csv_file, 'cp1252')[1] == ['1', 'Bäckerei Müller']
+    text.log_summary()
+    assert config.messages == []
+
+
+def test_a_file_declared_as_the_wrong_encoding_keeps_every_byte(csv_file):
+    """
+    The default. The byte is kept as the character latin1 gives it and the rest of the file
+    stays in the encoding it was declared as - which is closer to the file than decoding the
+    whole of it again would be.
+    """
+    text, config = file_decoder()
+    rows = read_rows(text, csv_file, 'utf-8')
+    assert [field.encode('latin1') for field in rows[1]] == [b'1', 'Bäckerei Müller'.encode('cp1252')]
+    assert '\ufffd' not in ''.join(rows[1])
+    assert text.total() == 3, 'one event per run of bytes which did not fit'
+
+
+def test_a_file_is_refused_under_fail(csv_file):
+    text, config = file_decoder('fail')
+    with pytest.raises(UnicodeDecodeError):
+        read_rows(text, csv_file, 'utf-8')
+    assert text.summary() == {'config_parser: customers.csv': {'refused': 1}}
+
+
+def test_a_file_under_remove_loses_the_byte_and_says_so(csv_file):
+    text, config = file_decoder('remove')
+    rows = read_rows(text, csv_file, 'utf-8')
+    assert rows[1] == ['1', 'Bckerei Mller']
+    assert 'DELETED' in config.levels('WARNING')[0]
+
+
+def test_the_file_summary_names_the_file(csv_file):
+    text, config = file_decoder()
+    read_rows(text, csv_file, 'utf-8')
+    config.messages.clear()
+    text.log_summary()
+    written = config.levels('WARNING')[0]
+    assert 'customers.csv' in written
+    assert '3 read as latin1 as a last resort' in written
+
+
+def test_the_place_can_be_given_so_that_two_passes_over_one_file_are_told_apart(csv_file):
+    text, _ = file_decoder()
+    with text.open_text(csv_file, 'utf-8', place='customers.csv (working out the date order)',
+                        newline='') as handle:
+        handle.read()
+    assert list(text.summary()) == ['config_parser: customers.csv (working out the date order)']
+
+
+def test_the_decision_is_undone_when_the_block_ends(csv_file):
+    """
+    The error handler is registered once and finds the decoder it reports to per thread. A
+    decoder which stayed active after its block would report another file's bytes as its own.
+    """
+    from credativ_pg_migrator import text_decoding as module
+
+    text, _ = file_decoder()
+    with text.open_text(csv_file, 'utf-8', newline='') as handle:
+        handle.read()
+        assert getattr(module._ACTIVE, 'decoder', None) is text
+    assert getattr(module._ACTIVE, 'decoder', None) is None
+
+
+def test_one_file_read_inside_another_restores_the_first(csv_file, tmp_path):
+    """
+    Not hypothetical: convert_csv_to_utf8() opens the file to work out the order of the dates
+    from inside the row loop of the conversion, which is inside its own block. A decoder which
+    did not put the previous one back would report the rest of the conversion as the other
+    pass.
+    """
+    from credativ_pg_migrator import text_decoding as module
+
+    outer, _ = file_decoder()
+    inner, _ = file_decoder()
+    with outer.open_text(csv_file, 'utf-8', newline='') as handle:
+        handle.readline()
+        with inner.open_text(csv_file, 'utf-8', place='the other pass', newline='') as nested:
+            nested.read()
+            assert module._ACTIVE.decoder is inner
+        assert module._ACTIVE.decoder is outer
+        handle.read()
+    assert list(inner.summary()) == ['config_parser: the other pass']
+    assert list(outer.summary()) == ['config_parser: customers.csv']
+
+
+def test_a_handler_without_a_decoder_still_loses_no_byte(csv_file):
+    """A handle opened by something which does not know about this - the default applies."""
+    from credativ_pg_migrator.text_decoding import ERROR_HANDLER
+
+    with open(csv_file, 'r', encoding='utf-8', errors=ERROR_HANDLER, newline='') as handle:
+        assert handle.read().encode('latin1') == open(csv_file, 'rb').read()
+
+
+# --------------------------------------------------------------------------------------
+# the CSV reader as the migration really calls it
+
+
+def config_parser_for(policy, messages):
+    """A real ConfigParser, built without a configuration file, which records what it writes."""
+    from credativ_pg_migrator.config_parser import ConfigParser
+
+    made = ConfigParser.__new__(ConfigParser)
+    made.config = {'migration': {'on_undecodable_bytes': policy}}
+    made.print_log_message = lambda level, message: messages.append((level, str(message)))
+    return made
+
+
+def convert(config_parser, path, character_set, tmp_path):
+    settings = {
+        'file_name': path,
+        'converted_file_name': str(tmp_path / 'converted.csv'),
+        'source_table_name': 'CUSTOMERS',
+        'file_size': os.path.getsize(path),
+        'format_options': {'format': 'CSV', 'delimiter': ',', 'header': True,
+                           'character_set': character_set},
+    }
+    config_parser.convert_csv_to_utf8(settings, None, None)
+    with open(settings['converted_file_name'], encoding='utf-8') as handle:
+        return [line.rstrip('\n') for line in handle if line.strip()]
+
+
+def test_the_conversion_writes_no_u_fffd_into_the_file_the_target_is_loaded_from(
+        csv_file, tmp_path):
+    """
+    The end of the path P1-2 names: the reader put U+FFFD into the UTF-8 file which is then
+    copied into the target, where it is indistinguishable from data.
+    """
+    messages = []
+    rows = convert(config_parser_for('substitute', messages), csv_file, 'UTF-8', tmp_path)
+    assert rows == ['id,name', '1,Bäckerei Müller', '2,Straße']
+    assert not any('\ufffd' in row for row in rows)
+    assert any('customers.csv' in message for level, message in messages if level == 'WARNING')
+
+
+def test_the_conversion_of_a_file_declared_correctly_says_nothing(csv_file, tmp_path):
+    messages = []
+    rows = convert(config_parser_for('substitute', messages), csv_file, 'cp1252', tmp_path)
+    assert rows == ['id,name', '1,Bäckerei Müller', '2,Straße']
+    assert not [message for level, message in messages if level == 'WARNING']
+
+
+def test_the_conversion_stops_on_a_file_it_cannot_read_under_fail(csv_file, tmp_path):
+    messages = []
+    with pytest.raises(UnicodeDecodeError):
+        convert(config_parser_for('fail', messages), csv_file, 'UTF-8', tmp_path)
+
+
+def test_the_setting_is_read_by_the_configuration_the_migration_uses():
+    """The accessor and the module have to agree about the name and the default."""
+    from credativ_pg_migrator.config_parser import ConfigParser
+
+    made = ConfigParser.__new__(ConfigParser)
+    made.config = {}
+    assert made.get_on_undecodable_bytes_action() == text_decoding.DEFAULT_POLICY
+    made.config = {'migration': {'on_undecodable_bytes': 'FAIL'}}
+    assert made.get_on_undecodable_bytes_action() == 'fail'
+
+
+def test_an_unusable_setting_stops_the_run():
+    from credativ_pg_migrator.config_parser import ConfigParser
+
+    made = ConfigParser.__new__(ConfigParser)
+    made.config = {'migration': {'on_undecodable_bytes': 'delete'}}
+    made.print_log_message = lambda level, message: None
+    with pytest.raises(ValueError) as raised:
+        made.validate_config()
+    assert 'on_undecodable_bytes' in str(raised.value)
+
+
+def test_an_encoding_error_is_not_answered_by_this_decision():
+    """
+    Writing a character the target encoding cannot hold is the caller's bug, not the data's,
+    and must not be silently substituted by a handler which was given the wrong job.
+    """
+    from credativ_pg_migrator.text_decoding import handle_file_error
+
+    error = UnicodeEncodeError('ascii', 'ä', 0, 1, 'ordinal not in range(128)')
+    with pytest.raises(UnicodeEncodeError):
+        handle_file_error(error) 

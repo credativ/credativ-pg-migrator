@@ -1076,6 +1076,19 @@ class ConfigParser:
         return str((self.config.get('migration') or {}).get(
             'on_undecodable_bytes', text_decoding.DEFAULT_POLICY)).strip().lower()
 
+    def data_file_decoder(self, input_data_file, character_set):
+        """
+        The decoder of one exported data file, whose encoding the data source declares.
+
+        There is nothing to try here and therefore nothing to detect: `character_set` is what
+        the file was said to be written in, so a byte which does not fit it means the
+        declaration is wrong or the file is damaged. Both CSV readers used errors='replace'
+        for those, which writes U+FFFD into the converted file and from there into the target
+        as if it were the data. What happens instead is migration.on_undecodable_bytes - see
+        credativ_pg_migrator/text_decoding.py - and its default keeps every byte.
+        """
+        return text_decoding.TextDecoder(self, 'config_parser', encodings=(character_set,))
+
     def get_pre_migration_script(self):
         return (self.config.get('migration') or {}).get('pre_migration_script', None)
 
@@ -2406,7 +2419,12 @@ class ConfigParser:
         rows_read = 0
         processing_start_time = datetime.now()
 
-        with open(input_csv_data_file, 'r', encoding=character_set, errors='replace', newline='') as infile:
+        decoder = self.data_file_decoder(input_csv_data_file, character_set)
+        ## the pass which reads the file to work out the date order is named apart from the
+        ## conversion, so that the same file is not reported twice as if it were two
+        place = f'{os.path.basename(input_csv_data_file)} (working out the date order)'
+        with decoder.open_text(input_csv_data_file, character_set, place=place,
+                               newline='') as infile:
             if reader_quoting is None:
                 reader = csv.reader(infile, delimiter=csv_delimiter)
             else:
@@ -2434,6 +2452,7 @@ class ConfigParser:
                     if narrowed != remaining and len(narrowed) == 1:
                         deciding[column_index] = field
                     candidates[column_index] = narrowed
+        decoder.log_summary()
 
         resolved = {}
         for column_index, remaining in candidates.items():
@@ -2553,7 +2572,8 @@ class ConfigParser:
                 self.print_log_message('WARNING',
                     "config_parser: convert_csv_to_utf8: This Python cannot distinguish an unquoted empty CSV field from a quoted one (csv.QUOTE_NOTNULL needs Python 3.12). An empty field is migrated as an empty string, which a column that is not text refuses - Python 3.12 or newer is needed for such a file.")
 
-            with open(input_csv_data_file, 'r', encoding=character_set, errors='replace', newline='') as infile, \
+            decoder = self.data_file_decoder(input_csv_data_file, character_set)
+            with decoder.open_text(input_csv_data_file, character_set, newline='') as infile, \
                  open(output_csv_data_file, 'w', encoding='utf-8', newline='') as outfile:
 
                 if reader_quoting is None:
@@ -2669,6 +2689,8 @@ class ConfigParser:
                     writer.writerow(processed_row)
                     counter += 1
 
+            ## what of the file did not fit the encoding it was declared to be written in
+            decoder.log_summary()
             self.print_log_message('INFO', f"config_parser: convert_csv_to_utf8: Processed {counter} lines from {input_csv_data_file} and wrote to {output_csv_data_file} - source file size: {source_file_size} - processing time: {datetime.now() - processing_start_time}")
             if converted_temporal_values:
                 self.print_log_message('INFO',

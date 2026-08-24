@@ -622,10 +622,7 @@
             "remove"
           ],
           "default": "substitute",
-          "description": "What happens to a value which none of the encodings expected for it can read. 'substitute' keeps it with the last resort encoding latin1, which maps every one of the 256 byte values and therefore loses no byte - the characters may be spelled wrongly and the original bytes can be read again - and reports every occurrence. 'fail' refuses the value, so the table or the chunk is recorded as failed and nothing is guessed. 'remove' deletes the byte, which is what the migrator did before 0.16.0; it is reported now rather than silent. Read case-insensitively, validated at startup.",
-          "x-applies-to-engines": [
-            "mssql"
-          ]
+          "description": "What happens to a value, or to a byte of an exported file, which the encoding expected for it cannot read. 'substitute' keeps it with the last resort encoding latin1, which maps every one of the 256 byte values and therefore loses no byte - the characters may be spelled wrongly and the original bytes can be read again - and reports every occurrence. 'fail' refuses it, so the table, chunk or file is recorded as failed and nothing is guessed. 'remove' deletes the byte, which is what the migrator did before 0.16.0; it is reported now rather than silent. Applied where bytes have to become text: the MS SQL Server connector (the wide and extended ODBC types), the SQLite connector (TEXT values, which SQLite does not enforce the encoding of, and the DDL scripts of connectivity 'ddl') and the CSV reader of a file data source, which reads the file in the encoding format_options.character_set declares. Read case-insensitively, validated at startup."
         },
         "parallel_workers": {
           "type": "integer",

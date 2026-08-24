@@ -1903,9 +1903,18 @@ class Orchestrator:
             create_index_sql = index_data['index_sql']
 
             if not create_index_sql or not create_index_sql.strip():
-                self.migrator_tables.update_protocol_task_finished('indexes', index_data['id'], 'skipped (empty index)')
-                self.config_parser.print_log_message('WARNING', f"orchestrator: index_worker: Worker {worker_id}: Skipping creation of index {index_name} because its SQL is empty.")
-                return True
+                ## There is nothing to run: no CREATE INDEX statement could be built for this
+                ## index - its column list came out empty, or the expression it is built on
+                ## could not be converted. The index is therefore NOT in the target, and the
+                ## worker answers False for it: answering True let the caller overwrite this
+                ## very row with 'migrated OK' for an index which does not exist. P2-1.
+                not_created = ('not created - no CREATE INDEX statement could be built for it. '
+                               'Its column list came out empty, or the expression it is built '
+                               'on could not be converted to PostgreSQL. Create it by hand in '
+                               'the target if the queries need it.')
+                self.migrator_tables.update_protocol_task_finished('indexes', index_data['id'], not_created)
+                self.config_parser.print_log_message('WARNING', f"orchestrator: index_worker: Worker {worker_id}: Index '{index_name}' on table '{index_data.get('target_table_name', '')}' is {not_created}")
+                return False
 
             self.migrator_tables.update_protocol_task_started('indexes', index_data['id'])
             self.config_parser.print_log_message('INFO', f"orchestrator: index_worker: Worker {worker_id}: Creating index {index_name} in target database.")

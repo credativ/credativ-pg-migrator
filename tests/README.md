@@ -1,6 +1,6 @@
 # credativ-pg-migrator — test suite
 
-856 test functions in 48 files. **No test in this directory needs a database, a driver
+892 test functions in 50 files. **No test in this directory needs a database, a driver
 connection, or a network.** Everything that would talk to a server is either constructed
 with `Class.__new__(Class)` and fed a fake config, or replaced with `unittest.mock`. A
 full run touches nothing outside the repository and finishes in seconds.
@@ -439,6 +439,64 @@ Three tests read `ms_sql_connector.py`, `sqlite_connector.py` and `config_parser
 
 **Expected result.** Passes. The two connector groups are skipped where their drivers are not
 installed; everything else needs nothing beyond the standard library.
+
+---
+
+## 3b. Validation
+
+### `test_protocol_task_finished.py` — 13 functions, 15 tests
+
+**Purpose.** The method the orchestrator calls has to exist. P2-1 of
+`development/OPEN_ISSUES.md`: `index_worker()` answered an index whose SQL came out empty with
+`self.migrator_tables.update_protocol_task_finished(...)` and nothing defined that method, so
+the call raised `AttributeError`, the `except` around the worker caught it, and the index was
+recorded as failed with the AttributeError as its message — the right outcome for the wrong
+reason, and a line which says nothing about the index.
+
+**Covers.** The check which would have caught it the day it was written: every
+`migrator_tables.<name>(...)` in the orchestrator, the planner, the validator and all twelve
+connectors — around 390 calls — must name a method `MigratorTables` really has. Then what the
+new method writes: the end of the task, the reason and the verdict; that an object which was
+not created is not a success by default; that the journal of the run is finished as well,
+because every object is written there when it is planned and one which is never finished
+leaves a row saying the work began and never saying what came of it; that sequences are keyed
+by their own id column; and that an unknown object type is reported and writes nothing. That
+the two vocabularies — the plural name which selects the protocol table, the singular one the
+journal uses — are written down rather than guessed, with both sides checked against what
+really exists, and that every table the method can be pointed at has the three columns it
+sets. Finally the worker: an index with no statement is recorded as not created, with the
+index and its table named, and is **not** answered with True — the caller writes
+`'migrated OK'` over the row of every worker which did not answer False, so answering True
+would have reported an index which does not exist as migrated (F-24, which had only stopped
+happening because the missing method crashed first).
+
+**Expected result.** Passes. Nothing connects to anything: the protocol connection is a stub
+which records the SQL it was given.
+
+### `test_validation_outcome.py` — 23 functions, 23 tests
+
+**Purpose.** "We could not tell" is not "it is correct". P2-2 of
+`development/OPEN_ISSUES.md`: the validator started every table at `passed = True` and the
+branches which found a mismatch set it to False, so a table where **no branch ran at all** —
+no primary key, so no row sample and no LOB check; no checksum on that source; the checks
+switched off — ended the run reported exactly like a table which passed every one of them, and
+the log said *"passed all active validations"*.
+
+**Covers.** The rule itself, over `outcome_of()`: a check which said no fails the table, a
+table passes when at least one check ran and every check which ran said yes, a table no check
+could run against is `NOT VALIDATED`, and a crash is a failure and not an absence. That the
+outcome is **derived and never accumulated**, with a source guard which fails if a `passed`
+flag is put back into the table result. Then the real `_validate_table_inner()` over stubbed
+connectors, for the situations which produce each outcome, including the one this repair is
+about — and that the sentence it used to print is not reachable any more. Finally the summary,
+which is where the verdict is read: that a table nobody could measure is marked `?` and counted
+on its own, that a table which failed the row sample is no longer shown as `PASS` (those two
+checks were recorded in no column at all, so the summary could not see them), that a `SKIP` is
+not counted as a check which passed, and that a protocol row written before the outcome existed
+is still rendered.
+
+**Expected result.** Passes. Nothing here connects to anything: the connectors, the protocol
+tables and the log are stubs, and the summary is driven through a fake cursor.
 
 ---
 

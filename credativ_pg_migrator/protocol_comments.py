@@ -956,8 +956,12 @@ def build_comments_catalog(config_parser):
             'target_indexes_count': 'How many indexes the target table has. A difference is normal for a source whose primary key already brings an index of its own.',
             'source_constraints_count': 'How many constraints the source table has.',
             'target_constraints_count': 'How many constraints the target table has.',
-            'row_count_passed': 'Whether the two row counts agree.',
+            'row_count_passed': 'Whether the two row counts agree. PASS, X for a mismatch, SKIP where the check ran and could not decide, and - where it was never asked for.',
             'table_hash_passed': 'Whether the two hashes agree, or why the comparison could not be made.',
+            'row_hash_passed': 'Whether the sample of rows compared row by row agrees. It could fail a table in the log and was written into no column at all until 0.16.0, so a table which failed it was shown as passed in the summary.',
+            'lob_size_passed': 'Whether the sizes of the large objects of the sampled rows agree. Recorded since 0.16.0, for the same reason as the column before it.',
+            'validation_outcome': "What the validation of this table ended in: PASSED, FAILED, or NOT VALIDATED. The third one is not a failure and not a pass - it means not one check could be run against the table (no primary key, no checksum on that source, the checks switched off), so the run says nothing about whether the table is correct. Before 0.16.0 such a table was reported exactly like one which passed every check.",
+            'validation_message': 'What was checked and what each check said - and, for a table which could not be measured, why each check could not run.',
             'validated_at': 'When this comparison was made.',
         },
     }

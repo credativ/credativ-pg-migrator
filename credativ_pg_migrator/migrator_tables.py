@@ -1222,6 +1222,100 @@ class MigratorTables:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: update_protocol_task_started: ({func_run_id}): Exception: {e}")
             raise
 
+    ## The protocol tables are selected by the plural name of the object type -
+    ## get_protocol_name_indexes() - and the journal of the run calls the same object by its
+    ## singular name. Two vocabularies for one thing, so the one place which has to cross
+    ## between them writes the crossing down instead of guessing it.
+    PROTOCOL_TABLE_TO_JOURNAL_OBJECT = {
+        'tables': 'table',
+        'indexes': 'index',
+        'constraints': 'constraint',
+        'funcprocs': 'funcproc',
+        'triggers': 'trigger',
+        'views': 'view',
+        'sequences': 'sequence',
+        'user_defined_types': 'user_defined_type',
+        'collations': 'collation',
+        'text_search': 'text search',
+        'domains': 'domain',
+        'default_values': 'default_value',
+        'aliases': 'alias',
+        'data_sources': 'data_source',
+        'source_table_partitioning': 'source_table_partitioning',
+        'target_table_partitioning': 'target_table_partitioning',
+        'target_columns_alterations': 'target_column_alteration',
+    }
+
+    def update_protocol_task_finished(self, object_type, row_id, message, success=False):
+        """
+        Record that the work on one object has ended, and how.
+
+        The counterpart of update_protocol_task_started(), and it **did not exist**: the
+        orchestrator called it for an index whose SQL came out empty and got
+        `AttributeError: 'MigratorTables' object has no attribute
+        'update_protocol_task_finished'`. The `except` around index_worker caught that and
+        recorded the index as failed with the AttributeError as its message - the right
+        outcome for the wrong reason, and a message which told the reader nothing about the
+        index. P2-1 of development/OPEN_ISSUES.md.
+
+        `success` defaults to **False** because that is what the only caller means: an object
+        the migration did not create. An object which was created is recorded by the
+        update_*_status() method of its own kind, which knows what else to write.
+
+        The row of the journal is updated as well. Every object is written there when it is
+        planned, with `execution_success` still empty, and an object which is never finished
+        leaves that row saying the work began and never saying what came of it.
+        """
+        func_run_id = uuid.uuid4()
+        method_name = f"get_protocol_name_{object_type}"
+        if not hasattr(self.config_parser, method_name):
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_protocol_task_finished: ({func_run_id}): Invalid object_type '{object_type}'. Method {method_name} not found.")
+            return
+        try:
+            table_name = getattr(self.config_parser, method_name)()
+        except BaseException as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_protocol_task_finished: ({func_run_id}): Error calling {method_name}: {e}")
+            return
+
+        id_column = "sequence_id" if object_type == "sequences" else "id"
+        query = f"""
+            UPDATE "{self.protocol_schema}"."{table_name}"
+            SET task_completed = clock_timestamp(),
+            success = %s,
+            message = %s
+            WHERE {id_column} = %s
+            RETURNING *
+        """
+        params = ('TRUE' if success else 'FALSE', message, row_id)
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: update_protocol_task_finished: ({func_run_id}): Updating record for table {table_name} with params: {params}")
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+            self.protocol_connection.connection.commit()
+            if not row:
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: update_protocol_task_finished: ({func_run_id}): No row {row_id} in {table_name} to finish.")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_protocol_task_finished: ({func_run_id}): Error updating finished status for object type {object_type} {row_id} in {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_protocol_task_finished: ({func_run_id}): Exception: {e}")
+            raise
+
+        journal_object = self.PROTOCOL_TABLE_TO_JOURNAL_OBJECT.get(object_type)
+        if journal_object:
+            try:
+                self.update_protocol({
+                    'object_type': journal_object,
+                    'object_protocol_id': row_id,
+                    'execution_success': success,
+                    'execution_error_message': message,
+                    'execution_results': None,
+                })
+            except Exception as e:
+                ## the object itself is recorded; a journal which could not be written must
+                ## not throw that record away again
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: update_protocol_task_finished: ({func_run_id}): Error updating the journal for {journal_object} {row_id}: {e}")
+
     def update_main_status(self, settings):
         task_name = settings.get('task_name')
         subtask_name = settings.get('subtask_name')
@@ -6326,6 +6420,10 @@ class MigratorTables:
                 target_constraints_count bigint,
                 row_count_passed text,
                 table_hash_passed text,
+                row_hash_passed text,
+                lob_size_passed text,
+                validation_outcome text,
+                validation_message text,
                 validated_at timestamp default current_timestamp
             )
         """
@@ -6440,24 +6538,37 @@ class MigratorTables:
         source_constraints_count = settings.get('source_constraints_count')
         target_constraints_count = settings.get('target_constraints_count')
         
-        row_logic = settings.get('row_logic')
-        if row_logic is True: row_cnt_res = 'PASS'
-        elif row_logic is False: row_cnt_res = 'X'
-        elif row_logic is None and settings.get('row_msg', '').startswith('Skip'): row_cnt_res = 'SKIP'
-        else: row_cnt_res = '-'
+        ## What each of the four checks said. A check which ran and could not decide wrote
+        ## its own 'Skip:' message, and a check which was never asked for leaves a '-': the
+        ## two are not the same thing and the row keeps them apart.
+        def verdict_mark(logic, message):
+            if logic is True:
+                return 'PASS'
+            if logic is False:
+                return 'X'
+            if str(message or '').startswith('Skip'):
+                return 'SKIP'
+            return '-'
 
-        table_hash_logic = settings.get('table_hash_logic')
-        if table_hash_logic is True: tbl_hash_res = 'PASS'
-        elif table_hash_logic is False: tbl_hash_res = 'X'
-        elif table_hash_logic is None and settings.get('table_msg', '').startswith('Skip'): tbl_hash_res = 'SKIP'
-        else: tbl_hash_res = '-'
+        row_cnt_res = verdict_mark(settings.get('row_logic'), settings.get('row_msg'))
+        tbl_hash_res = verdict_mark(settings.get('table_hash_logic'), settings.get('table_msg'))
+        ## Recorded for the first time. The row sample and the LOB sizes could already fail a
+        ## table in the log and were written into no column at all, so the summary - which
+        ## builds its verdict out of these columns - showed such a table as PASS.
+        row_hash_res = verdict_mark(settings.get('row_hash_logic'), settings.get('row_hash_msg'))
+        lob_size_res = verdict_mark(settings.get('lob_size_logic'), settings.get('lob_size_msg'))
+
+        ## The outcome the validator derived - PASSED, FAILED or NOT VALIDATED. The summary
+        ## reads it instead of deriving a verdict of its own out of two of the four columns.
+        validation_outcome = settings.get('outcome')
+        validation_message = settings.get('validation_message')
 
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{self.config_parser.get_validation_tables_name()}"
-            (source_schema_name, source_table_name, source_row_count, target_schema_name, target_table_name, target_row_count, source_table_hash, target_table_hash, source_columns_count, target_columns_count, source_indexes_count, target_indexes_count, source_constraints_count, target_constraints_count, row_count_passed, table_hash_passed)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (source_schema_name, source_table_name, source_row_count, target_schema_name, target_table_name, target_row_count, source_table_hash, target_table_hash, source_columns_count, target_columns_count, source_indexes_count, target_indexes_count, source_constraints_count, target_constraints_count, row_count_passed, table_hash_passed, row_hash_passed, lob_size_passed, validation_outcome, validation_message)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
-        params = (source_schema_name, source_table_name, source_row_count, target_schema_name, target_table_name, target_row_count, str(source_table_hash) if source_table_hash is not None else None, str(target_table_hash) if target_table_hash is not None else None, source_columns_count, target_columns_count, source_indexes_count, target_indexes_count, source_constraints_count, target_constraints_count, row_cnt_res, tbl_hash_res)
+        params = (source_schema_name, source_table_name, source_row_count, target_schema_name, target_table_name, target_row_count, str(source_table_hash) if source_table_hash is not None else None, str(target_table_hash) if target_table_hash is not None else None, source_columns_count, target_columns_count, source_indexes_count, target_indexes_count, source_constraints_count, target_constraints_count, row_cnt_res, tbl_hash_res, row_hash_res, lob_size_res, validation_outcome, validation_message)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -6575,7 +6686,8 @@ class MigratorTables:
         query = f"""
             SELECT v.target_schema_name, v.target_table_name, MAX(t.source_schema_name), MAX(t.source_table_name), MAX(v.source_row_count), MAX(v.target_row_count), MAX(v.source_table_hash), MAX(v.target_table_hash),
                    MAX(v.source_columns_count), MAX(v.target_columns_count), MAX(v.source_indexes_count), MAX(v.target_indexes_count), MAX(v.source_constraints_count), MAX(v.target_constraints_count),
-                   MAX(v.row_count_passed), MAX(v.table_hash_passed)
+                   MAX(v.row_count_passed), MAX(v.table_hash_passed),
+                   MAX(v.row_hash_passed), MAX(v.lob_size_passed), MAX(v.validation_outcome)
             FROM "{self.protocol_schema}"."{self.config_parser.get_validation_tables_name()}" v
             LEFT JOIN "{self.protocol_schema}"."{protocol_tables}" t
             ON v.target_schema_name = t.target_schema_name AND v.target_table_name = t.target_table_name
@@ -6612,6 +6724,15 @@ class MigratorTables:
             total = len(results)
 
             passed_count = 0
+            ## A table which could not be measured is counted on its own. Adding it to either
+            ## of the other two is what P2-2 is about: it is neither a pass nor a failure.
+            not_validated_count = 0
+            row_hash_tests = 0
+            row_hash_pass = 0
+            row_hash_fail = 0
+            lob_tests = 0
+            lob_pass = 0
+            lob_fail = 0
             row_count_tests = 0
             row_count_pass = 0
             row_count_fail = 0
@@ -6644,7 +6765,7 @@ class MigratorTables:
                 header = f"| {'No.':>{max_num_len}} | {'Source Table':<{max_source_len}} | {'Target Table':<{max_target_len}} |"
                 if is_mapping:
                     header += f" {'Action':<15} |"
-                header += f" {'Status':<6} | {'RowCnt':<6} | {'SrcRows':>10} | {'TgtRows':>10} | {'TblHash':<7} | {'SrcHash':<15} | {'TgtHash':<15} | {'Cols':<7} | {'Idxs':<7} | {'Cons':<7} |"
+                header += f" {'Status':<6} | {'RowCnt':<6} | {'SrcRows':>10} | {'TgtRows':>10} | {'TblHash':<7} | {'SrcHash':<15} | {'TgtHash':<15} | {'RowHash':<7} | {'LOBs':<7} | {'Cols':<7} | {'Idxs':<7} | {'Cons':<7} |"
                 sep = "|" + "|".join(['-' * len(c) for c in header.split('|')[1:-1]]) + "|"
                 details_lines.append(header)
                 details_lines.append(sep)
@@ -6663,21 +6784,35 @@ class MigratorTables:
                     src_cons_cnt = r[12]
                     tgt_cons_cnt = r[13]
                     
+                    ## A check is counted as run when it reached a verdict. SKIP means it
+                    ## was asked for and could not decide, and '-' that it was never asked -
+                    ## neither of them is a pass. A SKIP used to be added to the passed
+                    ## column, which is the same conflation of "we could not tell" with "it
+                    ## is correct" one level down from the table verdict. P2-2.
+                    def tally(mark, tests, passes, failures):
+                        if mark == "PASS":
+                            return tests + 1, passes + 1, failures
+                        if mark == "X":
+                            return tests + 1, passes, failures + 1
+                        return tests, passes, failures
+
                     row_cnt_res = r[14] if r[14] is not None else "-"
-                    if row_cnt_res != "-":
-                        row_count_tests += 1
-                        if row_cnt_res == "PASS" or row_cnt_res == "SKIP":
-                            row_count_pass += 1
-                        else:
-                            row_count_fail += 1
+                    row_count_tests, row_count_pass, row_count_fail = tally(
+                        row_cnt_res, row_count_tests, row_count_pass, row_count_fail)
 
                     tbl_hash_res = r[15] if r[15] is not None else "-"
-                    if tbl_hash_res != "-":
-                        table_hash_tests += 1
-                        if tbl_hash_res == "PASS" or tbl_hash_res == "SKIP":
-                            table_hash_pass += 1
-                        else:
-                            table_hash_fail += 1
+                    table_hash_tests, table_hash_pass, table_hash_fail = tally(
+                        tbl_hash_res, table_hash_tests, table_hash_pass, table_hash_fail)
+
+                    row_hash_res = r[16] if r[16] is not None else "-"
+                    row_hash_tests, row_hash_pass, row_hash_fail = tally(
+                        row_hash_res, row_hash_tests, row_hash_pass, row_hash_fail)
+
+                    lob_res = r[17] if r[17] is not None else "-"
+                    lob_tests, lob_pass, lob_fail = tally(
+                        lob_res, lob_tests, lob_pass, lob_fail)
+
+                    outcome = r[18]
 
                     cols_str = "-"
                     cols_res = "-"
@@ -6715,7 +6850,15 @@ class MigratorTables:
                             cons_res = "X"
                             cons_fail += 1
 
-                    status = "PASS" if (row_cnt_res in ("PASS", "-") and tbl_hash_res in ("PASS", "-") and not (row_cnt_res == "-" and tbl_hash_res == "-")) else "X"
+                    ## The verdict of the validator, as the validator recorded it. It used to
+                    ## be worked out again here out of two of the four checks, so a table
+                    ## which failed the row sample or the LOB check - neither of which was
+                    ## written into any column - was shown as PASS, and a table which could
+                    ## not be measured at all was shown as PASS as well.
+                    status = MigratorConstants.get_validation_outcome_mark(outcome)
+                    if outcome is None:
+                        ## a row written by an older run, which has no outcome recorded
+                        status = "PASS" if (row_cnt_res in ("PASS", "-") and tbl_hash_res in ("PASS", "-") and not (row_cnt_res == "-" and tbl_hash_res == "-")) else "X"
 
                     # Ensure structural tests also pass for overall PASS
                     if status == "PASS" and any(res == "X" for res in (cols_res, idxs_res, cons_res)):
@@ -6723,6 +6866,8 @@ class MigratorTables:
 
                     if status == "PASS":
                         passed_count += 1
+                    elif status == "?":
+                        not_validated_count += 1
 
                     src_rows_str = "-" if src_rows is None else str(src_rows)
                     tgt_rows_str = "-" if tgt_rows is None else str(tgt_rows)
@@ -6740,9 +6885,9 @@ class MigratorTables:
                     else:
                         action_str = ""
 
-                    details_lines.append(f"| {idx:>{max_num_len}} | {source_table:<{max_source_len}} | {target_table:<{max_target_len}} |{action_str} {status:<6} | {row_cnt_res:<6} | {src_rows_str:>10} | {tgt_rows_str:>10} | {tbl_hash_res:<7} | {src_hash_str:<15} | {tgt_hash_str:<15} | {cols_str:<7} | {idxs_str:<7} | {cons_str:<7} |")
+                    details_lines.append(f"| {idx:>{max_num_len}} | {source_table:<{max_source_len}} | {target_table:<{max_target_len}} |{action_str} {status:<6} | {row_cnt_res:<6} | {src_rows_str:>10} | {tgt_rows_str:>10} | {tbl_hash_res:<7} | {src_hash_str:<15} | {tgt_hash_str:<15} | {row_hash_res:<7} | {lob_res:<7} | {cols_str:<7} | {idxs_str:<7} | {cons_str:<7} |")
 
-            failed_count = total - passed_count
+            failed_count = total - passed_count - not_validated_count
 
             # Append column validation details
             col_query = f"""
@@ -6936,21 +7081,33 @@ class MigratorTables:
 
             lines.append("")
             lines.append("### Validation Totals")
-            header = f"| {'Test Category':<24} | {'Total':>7} | {'Passed':>7} | {'Failed':>6} |"
+            header = f"| {'Test Category':<24} | {'Total':>7} | {'Passed':>7} | {'Failed':>6} | {'Not measured':>13} |"
             sep = "|" + "|".join(['-' * len(c) for c in header.split('|')[1:-1]]) + "|"
             lines.append(header)
             lines.append(sep)
-            lines.append(f"| {'All Evaluated Tables':<24} | {total:>7} | {passed_count:>7} | {failed_count:>6} |")
+            lines.append(f"| {'All Evaluated Tables':<24} | {total:>7} | {passed_count:>7} | {failed_count:>6} | {not_validated_count:>13} |")
             if row_count_tests > 0:
-                lines.append(f"| {'Row Counts':<24} | {row_count_tests:>7} | {row_count_pass:>7} | {row_count_fail:>6} |")
+                lines.append(f"| {'Row Counts':<24} | {row_count_tests:>7} | {row_count_pass:>7} | {row_count_fail:>6} | {total - row_count_tests:>13} |")
             if table_hash_tests > 0:
-                lines.append(f"| {'Table Hashes':<24} | {table_hash_tests:>7} | {table_hash_pass:>7} | {table_hash_fail:>6} |")
+                lines.append(f"| {'Table Hashes':<24} | {table_hash_tests:>7} | {table_hash_pass:>7} | {table_hash_fail:>6} | {total - table_hash_tests:>13} |")
+            if row_hash_tests > 0:
+                lines.append(f"| {'Row Samples':<24} | {row_hash_tests:>7} | {row_hash_pass:>7} | {row_hash_fail:>6} | {total - row_hash_tests:>13} |")
+            if lob_tests > 0:
+                lines.append(f"| {'LOB Sizes':<24} | {lob_tests:>7} | {lob_pass:>7} | {lob_fail:>6} | {total - lob_tests:>13} |")
             if cols_tests > 0:
-                lines.append(f"| {'Column Counts':<24} | {cols_tests:>7} | {cols_pass:>7} | {cols_fail:>6} |")
+                lines.append(f"| {'Column Counts':<24} | {cols_tests:>7} | {cols_pass:>7} | {cols_fail:>6} | {total - cols_tests:>13} |")
             if idxs_tests > 0:
-                lines.append(f"| {'Index Counts':<24} | {idxs_tests:>7} | {idxs_pass:>7} | {idxs_fail:>6} |")
+                lines.append(f"| {'Index Counts':<24} | {idxs_tests:>7} | {idxs_pass:>7} | {idxs_fail:>6} | {total - idxs_tests:>13} |")
             if cons_tests > 0:
-                lines.append(f"| {'Constraint Counts':<24} | {cons_tests:>7} | {cons_pass:>7} | {cons_fail:>6} |")
+                lines.append(f"| {'Constraint Counts':<24} | {cons_tests:>7} | {cons_pass:>7} | {cons_fail:>6} | {total - cons_tests:>13} |")
+
+            if not_validated_count:
+                lines.append("")
+                lines.append(f"**{not_validated_count} of {total} table(s) could not be measured at all** - "
+                             f"marked `?` above. Not one check could be run against them, so this run says "
+                             f"nothing about whether they are correct; they are neither passed nor failed. "
+                             f"The reason per table is in the validation_message column of "
+                             f"{self.config_parser.get_validation_tables_name()} and in the log.")
 
             final_summary = "\n" + "\n".join(lines)
             if val_logger:

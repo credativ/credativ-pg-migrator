@@ -1,8 +1,77 @@
 import concurrent.futures
 import time
+from credativ_pg_migrator.constants import MigratorConstants
 from credativ_pg_migrator.migrator_tables import MigratorTables
 from credativ_pg_migrator.migrator_logging import MigratorLogger
 import traceback
+
+
+## The four checks a table can be measured with: the key which holds the verdict of each, the
+## key which holds its message, and the name it is called by. A check which did not run has
+## None where its verdict would be, and that is what tells "we could not tell" apart from "it
+## is correct".
+DATA_CHECKS = (
+    ('row_logic', 'row_msg', 'row counts'),
+    ('table_hash_logic', 'table_msg', 'table checksum'),
+    ('row_hash_logic', 'row_hash_msg', 'row sample'),
+    ('lob_size_logic', 'lob_size_msg', 'LOB sizes'),
+)
+
+
+def outcome_of(res):
+    """
+    What the validation of one table ended in, derived from the checks which really ran.
+
+    It used to be accumulated instead: `passed` started at **True** and the branches which
+    found a mismatch set it to False. A table where no branch ran at all - no primary key, so
+    no row sample and no LOB check; no checksum on that source; the checks switched off in the
+    configuration - therefore ended the run reported exactly like a table which passed every
+    one of them, and the line in the log said "passed all active validations", which was true
+    and told the reader the opposite of what had happened. P2-2 of
+    development/OPEN_ISSUES.md.
+
+    Three outcomes:
+
+      * FAILED - a check ran and said no, or the validation of the table crashed.
+      * PASSED - at least one check ran and every check which ran said yes.
+      * NOT VALIDATED - nothing could be measured. It is not a failure of the migration and it
+        is not evidence of one either, and it has to be visible as itself: a green report
+        which is green because nobody looked is the one thing a validator must not produce.
+    """
+    if res.get('error'):
+        return MigratorConstants.VALIDATION_FAILED
+    verdicts = [res.get(verdict) for verdict, _, _ in DATA_CHECKS]
+    if any(verdict is False for verdict in verdicts):
+        return MigratorConstants.VALIDATION_FAILED
+    if any(verdict is True for verdict in verdicts):
+        return MigratorConstants.VALIDATION_PASSED
+    return MigratorConstants.VALIDATION_NOT_VALIDATED
+
+
+def checks_which_ran(res):
+    """The names of the checks which produced a verdict, in the order they run."""
+    return [name for verdict, _, name in DATA_CHECKS if res.get(verdict) is not None]
+
+
+def why_nothing_ran(res, requested):
+    """
+    Why a table could not be measured, per check - what a NOT VALIDATED outcome has to say.
+
+    `requested` maps the name of a check to whether the configuration asked for it at all.
+    A check which was asked for and produced nothing says why (it has written its own 'Skip:'
+    message); one which was not asked for says so.
+    """
+    reasons = []
+    for verdict, message, name in DATA_CHECKS:
+        if res.get(verdict) is not None:
+            continue
+        if not requested.get(name, True):
+            reasons.append(f"{name}: switched off in the configuration")
+            continue
+        written = str(res.get(message) or '').strip()
+        reasons.append(f"{name}: {written}" if written else f"{name}: no result")
+    return reasons
+
 
 class Validator:
     def __init__(self, config_parser):
@@ -145,7 +214,13 @@ class Validator:
             'row_hash_msg': '',
             'lob_size_logic': None,
             'lob_size_msg': '',
-            'passed': True
+            ## Derived at the end from the four verdicts above and never accumulated - see
+            ## outcome_of(). 'error' holds the exception when the validation of this table
+            ## crashed, which is a failure and not an absence of one.
+            'outcome': None,
+            'error': '',
+            'checks_run': [],
+            'validation_message': '',
         }
         
         self.val_logger.logger.info(f"Validating {res['target_table']} ...")
@@ -219,14 +294,12 @@ class Validator:
                 if not action or action == 'replace':
                     res['row_logic'] = (s_count == t_count)
                     if not res['row_logic']:
-                        res['passed'] = False
                         res['row_msg'] = f"Fail: Src={s_count}, Tgt={t_count}"
                     else:
                         res['row_msg'] = f"Pass: {s_count} rows"
                 elif action == 'skip':
                     res['row_logic'] = (t_copy_count == t_count)
                     if not res['row_logic']:
-                        res['passed'] = False
                         res['row_msg'] = f"Fail (skip): OrigTgt={t_copy_count}, Tgt={t_count}"
                     else:
                         res['row_msg'] = f"Pass (skip): {t_count} rows untouched"
@@ -235,7 +308,6 @@ class Validator:
                     max_rows = t_copy_count + s_count
                     res['row_logic'] = (min_rows <= t_count <= max_rows)
                     if not res['row_logic']:
-                        res['passed'] = False
                         res['row_msg'] = f"Fail (merge): OrigTgt={t_copy_count}, Src={s_count}, Tgt={t_count} bounds [{min_rows}, {max_rows}]"
                     else:
                         res['row_msg'] = f"Pass (merge bounds): {t_count} rows"
@@ -265,7 +337,6 @@ class Validator:
                     if s_sum is not None and t_sum is not None:
                         res['table_hash_logic'] = (s_sum == t_sum)
                         if not res['table_hash_logic']:
-                            res['passed'] = False
                             res['table_msg'] = f"Fail: Src={s_sum}, Tgt={t_sum}"
                             
                             self.val_logger.logger.warning(f"Validator: Table {source_table} hash mismatch. Inspecting columns...")
@@ -350,7 +421,6 @@ class Validator:
                         
                         res['row_hash_logic'] = (mismatches == 0)
                         if mismatches > 0:
-                            res['passed'] = False
                             res['row_hash_msg'] = f"Fail: {mismatches}/{len(pks)} sample rows mismatched"
                         else:
                             res['row_hash_msg'] = f"Pass: {len(pks)} samples matched"
@@ -390,7 +460,6 @@ class Validator:
                                     
                             res['lob_size_logic'] = (mismatches == 0)
                             if mismatches > 0:
-                                res['passed'] = False
                                 res['lob_size_msg'] = f"Fail: {mismatches}/{len(pks)} sample LOB sizes mismatched"
                             else:
                                 res['lob_size_msg'] = f"Pass: {len(pks)} samples matched"
@@ -564,28 +633,49 @@ class Validator:
         except Exception as e:
             self.val_logger.logger.error(f"Validation crash on {res['target_table']}: {e}")
             self.val_logger.logger.error(traceback.format_exc())
-            res['passed'] = False
+            ## A table whose validation crashed has not been validated and has not passed
+            ## either - it is a failure, and it is recorded as one rather than as an absence.
+            res['error'] = str(e)
             res['row_msg'] = f"Error: {e}"
 
         details = []
-        if res.get('row_logic') is not None:
-            details.append(f"Row Counts ({res.get('row_msg', '').strip()})")
-        if res.get('table_hash_logic') is not None:
-            details.append(f"Table Checksum ({res.get('table_msg', '').strip()})")
-        if res.get('row_hash_logic') is not None:
-            details.append(f"Row Level Hash ({res.get('row_hash_msg', '').strip()})")
-        if res.get('lob_size_logic') is not None:
-            details.append(f"LOB Size Check ({res.get('lob_size_msg', '').strip()})")
-            
-        if not details and res.get('row_msg', '').startswith('Error:'):
-            details.append(f"Fatal Execution Details ({res.get('row_msg', '').strip()})")
-            
-        fail_str = ", ".join(details)
-        
-        if res['passed']:
-            self.val_logger.logger.info(f"OK: {res['target_table']} passed all active validations against source {source_schema}.{source_table}. Details: {fail_str}")
+        for verdict, message, name in DATA_CHECKS:
+            if res.get(verdict) is not None:
+                details.append(f"{name} ({str(res.get(message) or '').strip()})")
+
+        if res.get('error'):
+            details.append(f"validation crashed ({res['error']})")
+
+        res['outcome'] = outcome_of(res)
+        res['checks_run'] = checks_which_ran(res)
+        requested = {
+            'row counts': check_counts,
+            'table checksum': check_table_sum,
+            'row sample': check_random,
+            'LOB sizes': check_lob,
+        }
+
+        if res['outcome'] == MigratorConstants.VALIDATION_PASSED:
+            res['validation_message'] = ", ".join(details)
+            self.val_logger.logger.info(
+                f"PASSED: {res['target_table']} passed the {len(res['checks_run'])} check(s) "
+                f"which could be run against source {source_schema}.{source_table} "
+                f"({', '.join(res['checks_run'])}). Details: {res['validation_message']}")
+        elif res['outcome'] == MigratorConstants.VALIDATION_FAILED:
+            res['validation_message'] = ", ".join(details)
+            self.val_logger.logger.warning(
+                f"FAILED: {res['target_table']} failed validation against source "
+                f"{source_schema}.{source_table}. Details: {res['validation_message']}")
         else:
-            self.val_logger.logger.warning(f"FAIL: {res['target_table']} failed validation against source {source_schema}.{source_table}. Details: {fail_str}")
+            ## Nothing could be measured. This used to be reported as "passed all active
+            ## validations", which is the sentence P2-2 is about.
+            reasons = why_nothing_ran(res, requested)
+            res['validation_message'] = "; ".join(reasons)
+            self.val_logger.logger.warning(
+                f"NOT VALIDATED: {res['target_table']} - not one check could be run against "
+                f"source {source_schema}.{source_table}, so this run says NOTHING about "
+                f"whether the table is correct. It is not a table which passed. Why: "
+                f"{res['validation_message']}")
 
         try:
             self.migrator_tables.insert_validation_table_result(res)

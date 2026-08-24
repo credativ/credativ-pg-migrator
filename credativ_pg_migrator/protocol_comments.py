@@ -48,8 +48,8 @@ COMMON_COLUMN_COMMENTS = {
     'target_schema_name': 'Schema of the target PostgreSQL database the object is created in.',
     'target_table_name': 'Name of the table in the target PostgreSQL database - the name the table of the source was mapped to.',
     'target_alias_name': 'The second name the table is also known under in the target, created as a view over it, when the source knows the table under more than one name. Empty when there is none.',
-    'final_valid': 'Result of the check run at the end of the migration, which asks the target catalog whether the object really exists and can be used: true = valid, false = the object was created but the target reports it as broken (see final_valid_message), empty = it was not checked.',
-    'final_valid_message': 'What the closing validity check found. Empty for an object the target accepts.',
+    'final_valid': "Result of the check run at the end of the migration, which asks the catalogue of the target whether the object is THERE: true = it is, false = there is DDL for it and it is not there (see final_valid_message), empty = nothing was ever created for it, so there was nothing to look for. Being there is NOT the same as doing what the object of the source did, and no catalogue can say that: a view which is there has had its query resolved by PostgreSQL, and a PL/pgSQL routine which is there has had the syntax of its body parsed and nothing more - a body which reads a table that is not there is created without complaint and fails at the first call.",
+    'final_valid_message': 'What the closing check established for this object, and what it did not - it says which of the two it means, per kind of object.',
     'validated_at': 'When the validation wrote this result.',
     'passed': 'Whether the source and the target agree on everything this row compares.',
 }

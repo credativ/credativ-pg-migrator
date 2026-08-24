@@ -20,6 +20,14 @@ arrived with half its indexes was reported as validated. They can fail a table n
 deliberately, they cannot pass one: the number of columns matching says nothing about whether
 the rows arrived, so it must not turn a table nobody looked into a table which passed.
 
+**P2-5** is the fourth: a table was submitted for validation only when the row counts the
+*migration* had recorded said it held rows — and the decoded protocol row has no
+`source_table_rows` key at all (it has `source_table_rows_all` and `source_table_rows_limited`),
+so that half of the condition was always 0 and a standard migration validated a table only when
+the migration had already recorded rows in the **target**. A table whose data migration failed
+before the first row landed therefore had a target count of 0 and was never looked at: exactly
+the table most in need of it.
+
 **P2-4** is the third of them: a table the validator could not measure at all — the connectors
 could not be built, the databases could not be reached — was answered with `None`, and `run()`
 dropped a falsy result. The table was missing from the protocol table, from the report built
@@ -218,9 +226,10 @@ class ProtocolTables:
 
 
 class Config:
-    def __init__(self, migrate_indexes=True, migrate_constraints=True):
+    def __init__(self, migrate_indexes=True, migrate_constraints=True, migrate_data=True):
         self.migrate_indexes = migrate_indexes
         self.migrate_constraints = migrate_constraints
+        self.migrate_data = migrate_data
 
     def get_workflow(self):
         return 'migration'
@@ -230,6 +239,9 @@ class Config:
 
     def get_mapping_data_resolution(self, table):
         return None
+
+    def should_migrate_data(self, table_name=None):
+        return self.migrate_data
 
     def should_migrate_indexes(self, table_name=None):
         return self.migrate_indexes
@@ -382,6 +394,117 @@ def test_the_source_of_the_validator_no_longer_starts_a_table_at_passed():
     assert not offenders, (
         f'the table result carries a "passed" flag again, at line(s) {offenders} - the outcome '
         f'is derived by outcome_of() and must not be accumulated')
+
+
+# --------------------------------------------------------------------------------------
+# every table in scope is validated - P2-5
+
+
+def test_the_key_the_old_filter_read_does_not_exist():
+    """
+    The filter was `t.get('target_table_rows', 0) > 0 or t.get('source_table_rows', 0) > 0`,
+    and the decoded protocol row has no `source_table_rows`. Half of the condition was always
+    0, so a standard migration validated a table only when the migration had already recorded
+    rows in the target for it.
+    """
+    import inspect
+    import re
+
+    from credativ_pg_migrator.migrator_tables import MigratorTables
+
+    keys = set(re.findall(r"'(\w*table_rows\w*)'", inspect.getsource(MigratorTables.decode_table_row)))
+    assert 'source_table_rows_all' in keys
+    assert 'source_table_rows_limited' in keys
+    assert 'source_table_rows' not in keys
+
+
+def test_the_run_no_longer_asks_the_recorded_counts_which_tables_to_look_at():
+    """
+    The row counts of the migration decide nothing about which tables are validated. A table
+    whose data migration failed before the first row landed has a target count of 0, and that
+    is the table which most needs looking at.
+    """
+    import ast
+
+    path = os.path.join(REPO, 'credativ_pg_migrator', 'validator.py')
+    with open(path, encoding='utf-8') as handle:
+        tree = ast.parse(handle.read(), filename=path)
+    run = next(node for node in ast.walk(tree)
+               if isinstance(node, ast.FunctionDef) and node.name == 'run')
+    submits = [node for node in ast.walk(run)
+               if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+               and node.func.attr == 'submit']
+    assert submits, 'the workers are not submitted here any more - check this test'
+    for submit in submits:
+        for parent in ast.walk(run):
+            if isinstance(parent, ast.If) and submit in list(ast.walk(parent)):
+                condition = ast.dump(parent.test)
+                assert 'table_rows' not in condition, (
+                    'a table is submitted for validation only under a condition on the '
+                    'recorded row counts again')
+
+
+def test_an_empty_table_is_validated_and_passes():
+    """
+    An empty source and an empty target is a legitimate PASS - reached by looking, not by
+    skipping. It used to be one of the tables which never reached the report at all.
+    """
+    res, log, tables = validate(Connector(rows=0, checksum='e'), Connector(rows=0, checksum='e'))
+    assert res['outcome'] == PASSED
+    assert res['source_row_count'] == 0
+    assert res['target_row_count'] == 0
+    assert 'row counts' in res['checks_run']
+
+
+def test_a_table_which_should_have_had_rows_and_got_none_fails():
+    """The other half of the same rule, and the reason the filter was worth removing."""
+    res, log, tables = validate(Connector(rows=5000, checksum='a'), Connector(rows=0, checksum='b'))
+    assert res['outcome'] == FAILED
+    assert res['row_logic'] is False
+    assert 'Src=5000, Tgt=0' in res['row_msg']
+
+
+def test_a_row_count_which_cannot_be_read_is_not_a_count_of_zero():
+    res, log, tables = validate(Connector(rows=None), Connector(rows=0),
+                                checks=(True, False, False, False))
+    assert res['row_logic'] is None
+    assert 'not available on both sides' in res['row_msg']
+    assert res['outcome'] == NOT_VALIDATED, 'nothing was measured, and nothing is not a pass'
+
+
+def test_a_table_whose_data_was_not_migrated_is_not_reported_as_a_mismatch():
+    """
+    With migrate_data off the target holds none of the rows on purpose. Comparing them anyway
+    reports every such table as a mismatch - which is what removing the filter would otherwise
+    have produced for a whole run.
+    """
+    res, log, tables = validate(Connector(rows=5000, checksum='a'), Connector(rows=0, checksum='b'),
+                                config=Config(migrate_data=False))
+    assert res['row_logic'] is None
+    assert res['table_hash_logic'] is None
+    assert res['outcome'] == NOT_VALIDATED
+    assert 'migrate_data is off for it' in res['row_msg']
+
+
+def test_such_a_table_says_the_data_was_not_migrated_and_not_that_the_check_was_switched_off():
+    """
+    Two different reasons which must not be told as one: the check is on and there is nothing
+    to compare it against.
+    """
+    res, log, tables = validate(Connector(rows=5000), Connector(rows=0),
+                                config=Config(migrate_data=False))
+    written = log.levels('WARNING')[-1]
+    assert 'migrate_data is off for it' in written
+    assert 'switched off in the configuration' not in written
+
+
+def test_the_structure_of_such_a_table_is_still_compared():
+    """It was created, and it should look like the source even when it holds none of its rows."""
+    source = Connector(rows=5000, indexes=4)
+    target = Connector(rows=0, indexes=1)
+    res, log, tables = validate(source, target, config=Config(migrate_data=False))
+    assert res['indexes_logic'] is False
+    assert res['outcome'] == FAILED
 
 
 # --------------------------------------------------------------------------------------

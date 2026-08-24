@@ -203,12 +203,26 @@ class Validator:
                 ## gone from the report and from the count at the bottom of it. P2-4.
                 futures = {}
                 for t in tables:
-                    if self.config_parser.get_workflow() == 'mapping' or t.get('target_table_rows', 0) > 0 or t.get('source_table_rows', 0) > 0:
-                        future = executor.submit(
-                            self.validate_table, 
-                            t, check_counts, check_table_sum, check_random, check_lob, sample_size
-                        )
-                        futures[future] = t
+                    ## Every table in scope is validated. It used to depend on the row counts
+                    ## the MIGRATION had recorded:
+                    ##
+                    ##   if workflow == 'mapping' or t.get('target_table_rows', 0) > 0
+                    ##                              or t.get('source_table_rows', 0) > 0:
+                    ##
+                    ## and the decoded protocol row has no 'source_table_rows' key at all - it
+                    ## has source_table_rows_all and source_table_rows_limited - so that half
+                    ## was always 0 and a standard migration validated a table only when the
+                    ## migration had already recorded rows in the target for it. A table whose
+                    ## data migration failed before the first row landed therefore had a
+                    ## target count of 0 and was never looked at: exactly the table most in
+                    ## need of it. An empty source and an empty target is a legitimate pass,
+                    ## an empty target against a source which has rows is a failure, and
+                    ## neither of them is "do not look". P2-5.
+                    future = executor.submit(
+                        self.validate_table, 
+                        t, check_counts, check_table_sum, check_random, check_lob, sample_size
+                    )
+                    futures[future] = t
                 
                 for future in concurrent.futures.as_completed(futures):
                     table_info = futures[future]
@@ -423,6 +437,32 @@ class Validator:
         else:
             pk_cols_list = []
 
+        ## Which checks the configuration asked for, read before anything below can switch one
+        ## off - it is what the line of a table nothing could be measured on says.
+        requested = {
+            'row counts': check_counts,
+            'table checksum': check_table_sum,
+            'row sample': check_random,
+            'LOB sizes': check_lob,
+        }
+
+        ## The data of a table which was not migrated cannot be compared with the data of the
+        ## source: the target holds none of its rows on purpose. Comparing it anyway reports
+        ## every such table as a mismatch, which is what removing the row-count filter above
+        ## would otherwise have produced for a run with migrate_data off. The structure of the
+        ## table is still compared - it was created, and it should look like the source.
+        if not self.config_parser.should_migrate_data(source_table):
+            not_migrated = ('Skip: the data of this table is not migrated - migrate_data is '
+                            'off for it, so the target holds none of its rows on purpose')
+            res['row_msg'] = not_migrated
+            res['table_msg'] = not_migrated
+            res['row_hash_msg'] = not_migrated
+            res['lob_size_msg'] = not_migrated
+            check_counts = False
+            check_table_sum = False
+            check_random = False
+            check_lob = False
+
         try:
             target_copy_schema = None
             if target_copy_conn:
@@ -465,7 +505,10 @@ class Validator:
                 res['source_row_count'] = s_count
                 res['target_row_count'] = t_count
 
-                if not action or action == 'replace':
+                if not count_is_available(s_count) or not count_is_available(t_count):
+                    ## a count nobody could read is not a count of zero
+                    res['row_msg'] = f"Skip: row counts not available on both sides (Src={s_count}, Tgt={t_count})"
+                elif not action or action == 'replace':
                     res['row_logic'] = (s_count == t_count)
                     if not res['row_logic']:
                         res['row_msg'] = f"Fail: Src={s_count}, Tgt={t_count}"
@@ -822,12 +865,6 @@ class Validator:
 
         res['outcome'] = outcome_of(res)
         res['checks_run'] = checks_which_ran(res)
-        requested = {
-            'row counts': check_counts,
-            'table checksum': check_table_sum,
-            'row sample': check_random,
-            'LOB sizes': check_lob,
-        }
 
         if res['outcome'] == MigratorConstants.VALIDATION_PASSED:
             res['validation_message'] = ", ".join(details)

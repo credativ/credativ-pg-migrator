@@ -1316,11 +1316,101 @@ class MigratorTables:
                 ## not throw that record away again
                 self.config_parser.print_log_message('ERROR', f"migrator_tables: update_protocol_task_finished: ({func_run_id}): Error updating the journal for {journal_object} {row_id}: {e}")
 
+    ## Which protocol table holds the objects each phase of a migration works on. A phase
+    ## which closed itself with 'finished OK' is asked here whether the objects it was there
+    ## for really arrived - see update_main_status(). A phase which is not in this map creates
+    ## no objects of its own, and there is a test which will not let a new one be added
+    ## without one of the two being decided.
+    PHASE_OBJECT_TABLES = {
+        'tables migration': ('tables', 'tables'),
+        'user defined types migration': ('user_defined_types', 'user defined types'),
+        'collations migration': ('collations', 'collations'),
+        'text search objects migration': ('text_search', 'text search objects'),
+        'domains migration': ('domains', 'domains'),
+        'indexes migration': ('indexes', 'indexes'),
+        'constraints migration': ('constraints', 'constraints'),
+        'functions/procedures migration': ('funcprocs', 'functions/procedures'),
+        'triggers migration': ('triggers', 'triggers'),
+        'views migration': ('views', 'views'),
+        'sequences migration': ('sequences', 'sequences'),
+    }
+
+    ## The phases which create no objects of their own, so there is nothing to ask about them.
+    ## They are listed rather than left out, so that a phase which is neither is noticed.
+    PHASES_WITHOUT_OBJECTS = {
+        '': 'the run as a whole, and the planner as a whole',
+        'Resume after crash': 'reads the protocol tables of the run it resumes',
+        'Standard workflow': 'the planning of a standard migration - the objects it plans are counted by the phases which create them',
+        'Mapping workflow': 'the planning of a mapping run',
+        'Anonymization workflow': 'the planning of an anonymisation run',
+        'mapping data copy': 'copies rows into tables which already exist',
+        'comments migration': 'writes COMMENT ON statements, which are not objects of their own',
+        'objects validation': 'reads what the other phases created - its result is the final_valid column',
+        'data migration': 'the rows of the tables, counted in the data migration protocol',
+    }
+
+    def count_failed_objects(self, object_type):
+        """
+        `(total, failed)` over the protocol table of one kind of object.
+
+        `failed` counts the rows which were **attempted and did not succeed** - `success IS
+        FALSE`. A row whose success is still NULL was never attempted (an index which the
+        configuration excluded, a run which stopped before it) and is not a failure: counting
+        it as one would report a deliberate skip as a broken migration.
+
+        Answers `(None, None)` when the table is not there, which is what a phase of a
+        workflow that does not create it looks like.
+        """
+        method_name = f"get_protocol_name_{object_type}"
+        if not hasattr(self.config_parser, method_name):
+            return None, None
+        try:
+            table_name = getattr(self.config_parser, method_name)()
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(f"""
+                SELECT COUNT(*), COUNT(CASE WHEN success IS FALSE THEN 1 END)
+                FROM "{self.protocol_schema}"."{table_name}"
+            """)
+            row = cursor.fetchone()
+            cursor.close()
+            return (row[0], row[1]) if row else (None, None)
+        except Exception as e:
+            try:
+                self.protocol_connection.connection.rollback()
+            except Exception:
+                pass
+            self.config_parser.print_log_message('DEBUG', f"migrator_tables: count_failed_objects: {object_type}: {e}")
+            return None, None
+
+    def phase_result(self, subtask_name, success, message):
+        """
+        What a phase really ended in, from the objects it was there for.
+
+        Every phase used to close itself with `success: True, message: 'finished OK'` whatever
+        had happened inside it, so the summary read clean over a migration in which objects had
+        failed - and the failures were in their own protocol tables all along, one query away.
+        P2-7 of development/OPEN_ISSUES.md.
+
+        A phase which reports a failure of its own keeps it. A phase which reports success is
+        asked whether the objects it creates really arrived: if some of them did not, it did
+        not finish OK, and the message says how many of how many. The check is here, in the one
+        method every phase closes itself through, rather than in the nineteen places which call
+        it - a new phase cannot forget it, and no call site can go back to claiming success.
+        """
+        if str(success).upper() != 'TRUE':
+            return success, message
+        if subtask_name not in self.PHASE_OBJECT_TABLES:
+            return success, message
+        object_type, label = self.PHASE_OBJECT_TABLES[subtask_name]
+        total, failed = self.count_failed_objects(object_type)
+        if not failed:
+            return success, message
+        return False, f'finished, but {failed} of {total} {label} FAILED - see the {object_type} protocol table for which'
+
     def update_main_status(self, settings):
         task_name = settings.get('task_name')
         subtask_name = settings.get('subtask_name')
-        success = settings.get('success')
-        message = settings.get('message')
+        success, message = self.phase_result(subtask_name, settings.get('success'), settings.get('message'))
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_main()
         query = f"""
@@ -4699,9 +4789,12 @@ class MigratorTables:
             lines.append("")
 
         lines.append("[ TIMING & EXECUTION PROFILES ]")
-        lines.append("-" * 80)
-        lines.append(f"{'Phase / Step':<44} | {'Duration':<14} | Start Time")
-        lines.append("-" * 80)
+        lines.append("-" * 110)
+        ## The result of each phase, which this table did not show at all: a phase which failed
+        ## looked exactly like one which succeeded, so the status the phases were writing -
+        ## even once it was true - was read by nobody. P2-7.
+        lines.append(f"{'Phase / Step':<44} | {'Duration':<14} | {'Start':<10} | Result")
+        lines.append("-" * 110)
 
         try:
             query = f"""SELECT * FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_main()}" ORDER BY id"""
@@ -4721,9 +4814,19 @@ class MigratorTables:
                 sub = task_data['subtask_name']
                 display_name = f"  {sub}" if sub else name
                 display_name = display_name[:44]
-                lines.append(f"{display_name:<44} | {length_str:<14} | {started_str}")
-        except Exception:
-            pass
+
+                if not task_data['task_completed']:
+                    ## the phase was opened and never closed - the run did not get that far,
+                    ## or the phase does not close the row it opened
+                    result = 'DID NOT FINISH'
+                elif task_data['success'] is True:
+                    result = 'OK'
+                else:
+                    result = str(task_data['message'] or 'FAILED')
+
+                lines.append(f"{display_name:<44} | {length_str:<14} | {started_str:<10} | {result}")
+        except Exception as e:
+            self.config_parser.print_log_message('DEBUG', f"migrator_tables: print_migration_summary: timing table: {e}")
 
         lines.append("")
         if self.config_parser.get_workflow() == 'mapping':
@@ -4837,7 +4940,11 @@ class MigratorTables:
                             elif fv is False:
                                 invalid_count = c
                         if valid_count or invalid_count:
-                            details.append(f"Valid: {valid_count}, Invalid: {invalid_count}")
+                            ## "Valid" was what this said, and the pass behind it asks the
+                            ## catalogue whether the object is THERE. Being there is not doing
+                            ## what the object of the source did, and for a PL/pgSQL routine it
+                            ## is not even a promise that the body runs. P2-6.
+                            details.append(f"In target: {valid_count}, Missing: {invalid_count}")
                     except Exception:
                         self.protocol_connection.connection.rollback()
 

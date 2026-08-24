@@ -73,6 +73,12 @@ class Planner:
 
             self.check_pausing_resuming()
 
+            ## The row of the planner as a whole, opened by pre_planning(). Every branch below
+            ## used to close THIS row instead of the phase row it had opened itself, so the
+            ## phase of the workflow was never closed at all - no duration, no result, forever
+            ## - and this one was closed with 'finished OK' whatever the branch had done. P2-7.
+            planning_failed = False
+
             if self.config_parser.is_standard_workflow():
                 self.migrator_tables.insert_main({'task_name': 'Planner', 'subtask_name': 'Standard workflow'})
                 try:
@@ -105,7 +111,7 @@ class Planner:
                     ## the last moment at which a run which cannot come out right costs nothing
                     self.check_target_name_collisions()
 
-                    self.migrator_tables.update_main_status({'task_name': 'Planner', 'subtask_name': '', 'success': True, 'message': 'finished OK'})
+                    self.migrator_tables.update_main_status({'task_name': 'Planner', 'subtask_name': 'Standard workflow', 'success': True, 'message': 'finished OK'})
 
                     try:
                         self.source_connection.disconnect()
@@ -118,7 +124,8 @@ class Planner:
 
                     self.config_parser.print_log_message('INFO', "planner: create_plan: phase done successfully.")
                 except Exception as e:
-                    self.migrator_tables.update_main_status({'task_name': 'Planner', 'subtask_name': '', 'success': False, 'message': f'ERROR: {e}'})
+                    planning_failed = True
+                    self.migrator_tables.update_main_status({'task_name': 'Planner', 'subtask_name': 'Standard workflow', 'success': False, 'message': f'ERROR: {e}'})
                     self.handle_error(e, "Planner")
 
             elif self.config_parser.is_mapping_workflow():
@@ -127,10 +134,11 @@ class Planner:
 
                     self.mapping_match_tables()
 
-                    self.migrator_tables.update_main_status({'task_name': 'Planner', 'subtask_name': '', 'success': True, 'message': 'finished OK'})
+                    self.migrator_tables.update_main_status({'task_name': 'Planner', 'subtask_name': 'Mapping workflow', 'success': True, 'message': 'finished OK'})
 
                 except Exception as e:
-                    self.migrator_tables.update_main_status({'task_name': 'Planner', 'subtask_name': '', 'success': False, 'message': f'ERROR: {e}'})
+                    planning_failed = True
+                    self.migrator_tables.update_main_status({'task_name': 'Planner', 'subtask_name': 'Mapping workflow', 'success': False, 'message': f'ERROR: {e}'})
                     self.handle_error(e, "Planner")
 
             elif self.config_parser.is_anonymization_workflow():
@@ -161,7 +169,7 @@ class Planner:
 
                     self.check_pausing_resuming()
 
-                    self.migrator_tables.update_main_status({'task_name': 'Planner', 'subtask_name': '', 'success': True, 'message': 'finished OK'})
+                    self.migrator_tables.update_main_status({'task_name': 'Planner', 'subtask_name': 'Anonymization workflow', 'success': True, 'message': 'finished OK'})
 
                     try:
                         self.source_connection.disconnect()
@@ -174,12 +182,24 @@ class Planner:
 
                     self.config_parser.print_log_message('INFO', "planner: create_plan: phase done successfully.")
                 except Exception as e:
-                    self.migrator_tables.update_main_status({'task_name': 'Planner', 'subtask_name': '', 'success': False, 'message': f'ERROR: {e}'})
+                    planning_failed = True
+                    self.migrator_tables.update_main_status({'task_name': 'Planner', 'subtask_name': 'Anonymization workflow', 'success': False, 'message': f'ERROR: {e}'})
                     self.handle_error(e, "Planner")
 
             else:
                 self.config_parser.print_log_message('ERROR', f"planner: create_plan: Unknown workflow type: {self.config_parser.get_workflow()}")
                 exit(1)
+
+            ## and the planner as a whole says what its workflow did, rather than 'finished OK'
+            ## over a branch which ended in an error the configuration told the run to survive
+            if planning_failed:
+                self.migrator_tables.update_main_status({
+                    'task_name': 'Planner', 'subtask_name': '', 'success': False,
+                    'message': 'the planning of the workflow FAILED - see the phase of the workflow above'})
+            else:
+                self.migrator_tables.update_main_status({
+                    'task_name': 'Planner', 'subtask_name': '', 'success': True,
+                    'message': 'finished OK'})
 
     def load_connector(self, source_or_target):
         """Dynamically load the database connector."""

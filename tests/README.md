@@ -1,6 +1,6 @@
 # credativ-pg-migrator — test suite
 
-914 test functions in 50 files. **No test in this directory needs a database, a driver
+955 test functions in 52 files. **No test in this directory needs a database, a driver
 connection, or a network.** Everything that would talk to a server is either constructed
 with `Class.__new__(Class)` and fed a fake config, or replaced with `unittest.mock`. A
 full run touches nothing outside the repository and finishes in seconds.
@@ -473,7 +473,63 @@ happening because the missing method crashed first).
 **Expected result.** Passes. Nothing connects to anything: the protocol connection is a stub
 which records the SQL it was given.
 
-### `test_validation_outcome.py` — 45 functions, 50 tests
+### `test_phase_status.py` — 17 functions, 17 tests
+
+**Purpose.** A phase of a migration says what it really did. P2-7 of
+`development/OPEN_ISSUES.md`: nineteen places wrote
+`update_main_status({..., 'success': True, 'message': 'finished OK'})` on the way out of a
+phase, whatever had happened inside it — so the migration of the indexes reported `finished OK`
+over a run in which indexes had failed, and the failures were in the indexes protocol table all
+along, one query away.
+
+**Covers.** That a phase whose objects all arrived finishes OK and one which lost objects does
+not, with the message saying how many of how many and where to read which; that a phase
+reporting a failure of its own keeps it; that a phase creating no objects is left alone; and
+that an object which was never *attempted* (`success IS NULL` — an index the configuration
+excluded, a run which stopped before it) is not counted as a failure, because a deliberate skip
+is not a broken migration. That the check sits in the one method every phase closes itself
+through, so a new phase cannot forget it — with a guard which fails if a phase is added that is
+neither counted nor written off with a reason. Then the two defects reading it turned up: **the
+planner closed a row it had not opened** (each workflow branch opened `Planner / Standard
+workflow` and closed `Planner / ''`, so the phase row of the workflow was never closed at all —
+no duration, no result, in every migration ever run) and the orchestrator did the same for a
+resumed run; asserted by pairing every `insert_main` with an `update_main_status` in both
+modules. And that the summary **shows** it: the timing table was `Phase / Step | Duration |
+Start Time` with no status at all, so a phase which failed looked exactly like one which
+succeeded, and a phase which never finished is now shown as such.
+
+**Expected result.** Passes. Nothing connects to anything: the protocol connection is a stub
+which answers the counting query with whatever a test wants.
+
+### `test_object_presence_check.py` — 16 functions, 18 tests
+
+**Purpose.** The closing pass over the objects establishes **presence**, and says so. P2-6 of
+`development/OPEN_ISSUES.md`: at the end of a standard migration the orchestrator asks the
+catalogue of the target whether each migrated view, routine and trigger is there — worth having,
+because an object whose creation failed only because a dependency did not exist yet becomes
+creatable once the whole schema is present. What it recorded was `final_valid = true` and the
+word **"valid"**, and being in a catalogue is not doing what the object of the source did.
+
+**Covers.** That the word "valid" is not used for a name lookup, and that the message of every
+object says what presence means **for its kind** — one word could not carry it: a view which is
+there has had its query resolved by PostgreSQL and can be read; a PL/pgSQL routine which is
+there has had the *syntax* of its body parsed and nothing else, so a body which reads a table
+that is not there was created without complaint and fails at the first call; a trigger which is
+there is attached to its table, which is the wiring and not the behaviour. Then the defect
+reading it turned up, which is P2-2's shape one step down: the message was **carried over** from
+a step the next one overtook, so a retry which raised no exception left `valid after retry`
+standing even when the existence check right after it answered no — the row said an object was
+valid after a retry which had not put it there. The message is composed at the end now, from
+what really happened: a retry which worked, one which failed and carries its reason, one which
+raised nothing and put nothing there, and a check which could not be run at all and must not be
+read as an absent object. Finally that the stored DDL of a trigger which needs a hand is never
+executed, and that the summary and the run say `In target` / `Missing` rather than
+`Valid` / `Invalid`.
+
+**Expected result.** Passes. Nothing connects to anything: the target connector and the protocol
+tables are stubs.
+
+### `test_validation_outcome.py` — 53 functions, 58 tests
 
 **Purpose.** "We could not tell" is not "it is correct". P2-2 of
 `development/OPEN_ISSUES.md`: the validator started every table at `passed = True` and the
@@ -520,6 +576,18 @@ it is `FAILED` and not `NOT VALIDATED`, because an exception is not the ordinary
 that outcome is for; that a whole `run()` with one table which dies still reports both tables
 and names the one which died; and that a table which could not even be recorded says in as many
 words that the report is short of a row.
+
+And **P2-5**, which tables are looked at in the first place: a table was submitted for
+validation only when the row counts the *migration* had recorded said it held rows, and the
+decoded protocol row has no `source_table_rows` key at all — asserted here, because it is what
+made half of that condition dead and left a standard migration validating a table only when
+rows had already been recorded in the **target** for it. That the row counts of the migration
+now decide nothing about which tables are looked at (an `ast` check over `run()`), that an
+empty source against an empty target is a pass *reached by looking*, that a source with rows
+against an empty target fails, that a count nobody could read is not a count of zero, and that
+a table whose `migrate_data` is off is not reported as a mismatch for holding none of the rows
+it was never meant to hold — with its structure still compared, and with the reason told apart
+from "the check was switched off", which is a different thing.
 
 **Expected result.** Passes. Nothing here connects to anything: the connectors, the protocol
 tables and the log are stubs, and the summary is driven through a fake cursor.

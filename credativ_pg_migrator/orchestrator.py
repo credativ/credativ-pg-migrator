@@ -37,6 +37,10 @@ class Orchestrator:
         self.on_error_action = self.config_parser.get_on_error_action()
         self.source_schema_name = self.config_parser.get_source_schema()
         self.target_schema_name = self.config_parser.get_target_schema()
+        ## The phase row the orchestrator opens for itself, and closes at the end of run(). A
+        ## resumed run opened 'Resume after crash' and closed '' - a row it had never opened -
+        ## so the resume was never closed and the closing update matched nothing at all. P2-7.
+        self.main_subtask = 'Resume after crash' if self.config_parser.is_resume_after_crash() else ''
         if self.config_parser.is_resume_after_crash():
             self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'Resume after crash'})
             self.config_parser.print_log_message('INFO', "orchestrator: __init__: #############################################################################")
@@ -121,10 +125,10 @@ class Orchestrator:
                     self.config_parser.print_log_message('INFO', "orchestrator: run: Dry run mode enabled. No data migration performed.")
 
                 self.config_parser.print_log_message('INFO', "orchestrator: run: Orchestration complete.")
-                self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': '', 'success': True, 'message': 'finished OK'})
+                self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': self.main_subtask, 'success': True, 'message': 'finished OK'})
 
             except Exception as e:
-                self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': '', 'success': False, 'message': f'ERROR: {e}'})
+                self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': self.main_subtask, 'success': False, 'message': f'ERROR: {e}'})
                 self.handle_error(e, 'orchestration')
 
         elif self.config_parser.is_mapping_workflow():
@@ -2363,7 +2367,7 @@ class Orchestrator:
             return
 
         self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'objects validation'})
-        self.config_parser.print_log_message('INFO', f"orchestrator: stdwf_validate_objects: Starting final object validity check (mode={mode}).")
+        self.config_parser.print_log_message('INFO', f"orchestrator: stdwf_validate_objects: Starting the closing object check (mode={mode}). It asks the catalogue of the target whether each migrated view, routine and trigger is THERE. That is not the same as doing what the object of the source did - a catalogue cannot say that - and it means different things for the three: see the message recorded with each object.")
         try:
             target_conn = self.load_connector('target')
             target_conn.connect()
@@ -2404,7 +2408,7 @@ class Orchestrator:
                     elif final_valid is False:
                         invalid += 1
                     # final_valid is None -> object was never created (no DDL); not counted.
-                self.config_parser.print_log_message('INFO', f"orchestrator: stdwf_validate_objects: {group_label} - valid: {valid}, invalid: {invalid}" + (f", re-created on retry: {retried}" if retried else ""))
+                self.config_parser.print_log_message('INFO', f"orchestrator: stdwf_validate_objects: {group_label} - in the target: {valid}, missing: {invalid}" + (f", re-created on retry: {retried}" if retried else ""))
 
             target_conn.disconnect()
             self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'objects validation', 'success': True, 'message': 'finished OK'})
@@ -2412,12 +2416,50 @@ class Orchestrator:
             self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'objects validation', 'success': False, 'message': f'ERROR: {e}'})
             self.handle_error(e, 'stdwf_validate_objects')
 
+    ## What the closing pass really establishes, per kind of object. It asks the catalogue of
+    ## the target whether the object is there - and being there is not the same as doing what
+    ## the object of the source did, which is what the word "valid" was read as saying. Every
+    ## row it writes now says which of the two it means. P2-6 of development/OPEN_ISSUES.md.
+    WHAT_PRESENCE_MEANS = {
+        'view': ('PostgreSQL resolves the query of a view when the view is created and keeps '
+                 'the objects it reads from being dropped underneath it, so a view which is '
+                 'there can be read. That it answers the same rows as the view of the source '
+                 'is NOT established by this and cannot be established by a catalogue at all.'),
+        'funcproc': ('PostgreSQL checks the SYNTAX of a PL/pgSQL body when the routine is '
+                     'created and nothing else: a body which reads a table or a column which '
+                     'is not there is created without complaint and fails at the first call. '
+                     'A routine which is there has therefore been parsed, and no more than '
+                     'that. The check also matches the name alone, so one overload of a name '
+                     'is enough for all of them.'),
+        'trigger': ('the trigger is there and attached to its table, so the wiring arrived. '
+                    'It does NOT say that the function it calls does what the trigger of the '
+                    'source did: that is the row of the routine, and a PL/pgSQL body is only '
+                    'parsed when it is created.'),
+    }
+
     def _validate_one_object(self, target_conn, mode, object_type, obj):
-        """Determine whether a single migrated object exists (is valid) in the target, optionally
-        re-attempting its creation first (mode='retry'), and record the result in the protocol
-        table. Returns (final_valid, was_retried) where final_valid is True (present/valid),
-        False (has DDL but not present) or None (nothing was ever created for it, e.g. an object
-        with no converted DDL - left unchecked so it is not counted as invalid)."""
+        """
+        Whether one migrated object is **in the target**, optionally re-creating it first.
+
+        Returns `(final_valid, was_retried)`, where final_valid is True (the object is there),
+        False (there is DDL for it and it is not there) or None (nothing was ever created for
+        it - an object with no converted DDL, which is left uncounted rather than called
+        invalid).
+
+        Two things about it are worth knowing.
+
+        **It establishes presence, not equivalence.** The message of every object says which of
+        the two it means; WHAT_PRESENCE_MEANS above is the wording, per kind of object, and it
+        differs a great deal between them - a view which is there has had its query resolved by
+        PostgreSQL, while a PL/pgSQL routine which is there has had its body parsed and nothing
+        more. P2-6.
+
+        **The message is composed at the end from what happened**, and is no longer carried
+        over from an earlier step: a retry which raised no exception used to leave
+        `message = 'valid after retry'` standing even when the existence check right after it
+        answered no, so the protocol row said an object was valid after a retry which had not
+        put it there.
+        """
         schema = obj['schema']
         name = obj['name']
         ddl = obj.get('ddl')
@@ -2441,13 +2483,14 @@ class Orchestrator:
                 return target_conn.target_trigger_exists(schema, obj.get('table'), name)
             return False
 
-        message = ''
         was_retried = False
+        retry_error = ''
+        existence_error = ''
         try:
             present = _exists()
         except Exception as e:
             present = False
-            message = f'existence check error: {e}'
+            existence_error = str(e)
 
         if not present and mode == 'retry' and has_ddl:
             was_retried = True
@@ -2460,25 +2503,34 @@ class Orchestrator:
                 target_conn.execute_query(f'SET search_path TO "{schema}"')
                 target_conn.execute_query(ddl)
                 target_conn.execute_query('RESET search_path')
-                message = 'valid after retry'
                 self.config_parser.print_log_message('INFO', f"orchestrator: stdwf_validate_objects: Re-created {object_type} {obj['label']} on retry (dependency now present).")
             except Exception as e:
-                message = f'retry failed: {e}'
+                retry_error = str(e)
                 self.config_parser.print_log_message('DEBUG', f"orchestrator: stdwf_validate_objects: Retry of {object_type} {obj['label']} failed: {e}")
+            existence_error = ''
             try:
                 present = _exists()
             except Exception as e:
                 present = False
-                message = f'existence check error after retry: {e}'
+                existence_error = str(e)
 
+        ## The message says what was established and what was not - composed here, from what
+        ## really happened, and never carried over from a step which was overtaken by the next.
         if present:
             final_valid = True
-            if not message:
-                message = 'valid'
+            message = 'in the target' + (' after a retry' if was_retried else '')
+            explanation = self.WHAT_PRESENCE_MEANS.get(object_type)
+            if explanation:
+                message += f' - presence and not equivalence: {explanation}'
         elif has_ddl:
             final_valid = False
-            if not message:
-                message = 'not found in target'
+            message = 'NOT in the target'
+            if retry_error:
+                message += f' - the retry of its DDL failed: {retry_error}'
+            elif was_retried:
+                message += ' - the retry of its DDL raised nothing and the object is still not there'
+            if existence_error:
+                message += f' - the check itself could not be run: {existence_error}'
         elif obj.get('manual'):
             ## converted only in part - reported as failed by the migration, and the stored code
             ## is there to be completed by hand, never to be executed

@@ -25,6 +25,19 @@ import time
 import datetime
 
 class IbmDb2LuwConnector(Db2QueryConversion, DatabaseConnector):
+
+    ## What this connector does not read out of Db2 for LUW - see
+    ## DatabaseConnector.OBJECT_KINDS_NOT_READ.
+    OBJECT_KINDS_NOT_READ = {
+        'user_defined_types': ('Db2 has distinct types (CREATE DISTINCT TYPE), and also '
+                               'structured, array, row and cursor types, all in SYSCAT.DATATYPES '
+                               'with METATYPE telling them apart. This connector reads none of '
+                               'them.'),
+    }
+    OBJECT_KINDS_ABSENT = {
+        'domains': ('Db2 has no CREATE DOMAIN. A distinct type is what is used instead, and it '
+                    'belongs to the user defined types above.'),
+    }
     def __init__(self, config_parser, source_or_target):
         if source_or_target != 'source':
             raise ValueError("IBM DB2 is only supported as a source database")

@@ -27,6 +27,17 @@ import re
 import sqlglot
 
 class IbmDb2IConnector(Db2QueryConversion, DatabaseConnector):
+
+    ## What this connector does not read out of Db2 for i - see
+    ## DatabaseConnector.OBJECT_KINDS_NOT_READ.
+    OBJECT_KINDS_NOT_READ = {
+        'user_defined_types': ('Db2 for i has distinct types (CREATE DISTINCT TYPE), kept in '
+                               'QSYS2.SYSTYPES. This connector does not read them.'),
+    }
+    OBJECT_KINDS_ABSENT = {
+        'domains': ('Db2 has no CREATE DOMAIN - a distinct type is what is used instead, and it '
+                    'belongs to the user defined types above.'),
+    }
     """
     IBM DB2 for i (IBM i / AS/400) connector supporting DDL connectivity
     parsing DDL SQL files (with DB2 for i specific syntax like FOR SYSTEM NAME,
@@ -2017,14 +2028,34 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
             return getattr(e, 'partial_code', settings['view_code'])
 
     def convert_funcproc_code(self, settings: dict):
-        code = settings.get('code', '')
-        code = re.sub(
-            r"(?i)\bSIGNAL\s+SQLSTATE\s+(?:VALUE\s+)?'([^']+)'\s+SET\s+MESSAGE_TEXT\s*=\s*('[^']+'|[a-zA-Z0-9_.]+);?",
-            r"RAISE EXCEPTION \2 USING ERRCODE = '\1';",
-            code,
-            flags=re.MULTILINE | re.DOTALL
-        )
-        return code
+        """
+        One routine of Db2 for i, as far as this connector converts one.
+
+        It read `settings['code']`, and the orchestrator - the only caller there is - passes
+        the routine as `funcproc_code`, the name every other connector takes. So this answered
+        the empty string for **every routine of every Db2 for i migration**: nothing was
+        converted, nothing was created, and the run said only that the routine had no code.
+        Found by the measurement P3-2 of development/OPEN_ISSUES.md asked for.
+        """
+        code = settings.get('funcproc_code', settings.get('code', ''))
+        if isinstance(code, dict):
+            code = code.get('definition', '') or ''
+        if not str(code).strip():
+            return ''
+
+        ## What this connector does to a routine is rewrite SIGNAL SQLSTATE - it does not
+        ## convert the header, the parameters, the declarations or the body, so what would
+        ## come out is Db2 SQL PL with one statement changed, and PostgreSQL answers a syntax
+        ## error which says nothing about the reason. The routine is answered as one which was
+        ## NOT converted, which is what it is, and the run records it as such.
+        self.config_parser.print_log_message('WARNING',
+            f"ibm_db2_i_connector: convert_funcproc_code: "
+            f"{settings.get('funcproc_name') or 'the routine'} is NOT converted: this connector "
+            f"does not convert the routines of Db2 for i into PL/pgSQL - the header, the "
+            f"parameters, the declarations and the body would all have to be rewritten. The "
+            f"code of the source is recorded in the protocol table and the routine has to be "
+            f"written by hand in the target.")
+        return ''
 
     def convert_default_value(self, settings: dict):
         extracted_default_value = settings.get('extracted_default_value', '')

@@ -1485,6 +1485,55 @@ class DatabaseConnector(ABC):
         """
         return None
 
+    ## ------------------------------------------------------------------------------------
+    ## What a connector cannot read, said apart from what a source does not have.
+    ##
+    ## A fetch which answers {} says "the source holds none of these", and five connectors
+    ## answered that for objects their sources certainly do hold - Db2 distinct types,
+    ## Informix DISTINCT and named ROW types, the user-defined data types of SQL Anywhere, the
+    ## rules of SQL Server which the Sybase ASE connector of this same migrator reads as
+    ## domains. The planner then wrote "No user defined types found" and the summary showed 0,
+    ## and a reader who takes the summary at its word migrates a schema which is missing the
+    ## objects nobody said were missing. P2-8 of development/OPEN_ISSUES.md.
+    ##
+    ## The two are separated by declaration, per connector and per kind of object:
+    ##
+    ##   OBJECT_KINDS_NOT_READ - the source has them and this connector does not read them,
+    ##                           with what is really there;
+    ##   OBJECT_KINDS_ABSENT   - the source does not have them at all, so {} is the truth.
+    ##
+    ## A kind which is in neither, and whose fetch is a stub, is refused by the tests: the
+    ## question has to be answered rather than left to the empty dictionary.
+    OBJECT_KINDS_NOT_READ = {}
+    OBJECT_KINDS_ABSENT = {}
+
+    ## ------------------------------------------------------------------------------------
+    ## What a routine of this source keeps of the names its body was written with.
+    ##
+    ## The statements inside a routine of the Transact-SQL family go through the connector's
+    ## statement converter one at a time, so every name in them is spelled the way the target
+    ## has it. The other sources hand the body over as text, and the names inside it are the
+    ## ones the routine of the source wrote - which works with `names_case_handling: lower`,
+    ## because PostgreSQL folds an undelimited name to lower case and that is what the
+    ## migration created, and fails with `upper` and with `keep`: the routine is created
+    ## without complaint and the first call answers `relation "orders" does not exist`.
+    ##
+    ## The sentence is empty for a connector whose bodies are converted. P3-2 of
+    ## development/OPEN_ISSUES.md, which asked for exactly this to be measured first.
+    ROUTINE_BODY_NAMES_NOT_CONVERTED = ''
+
+    def routine_body_names_not_converted(self):
+        """What the body of a routine of this source keeps of its own names, or '' if nothing."""
+        return self.ROUTINE_BODY_NAMES_NOT_CONVERTED
+
+    def object_kind_not_read(self, kind):
+        """What the source holds of this kind which this connector cannot read, or None."""
+        return self.OBJECT_KINDS_NOT_READ.get(kind)
+
+    def object_kind_is_absent(self, kind):
+        """Whether the source has no such objects at all, so an empty answer is the truth."""
+        return kind in self.OBJECT_KINDS_ABSENT
+
     @abstractmethod
     def fetch_user_defined_types(self, schema: str):
         """

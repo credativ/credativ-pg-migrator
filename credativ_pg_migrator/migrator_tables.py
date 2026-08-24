@@ -4880,6 +4880,33 @@ class MigratorTables:
             ('Aliases', self.config_parser.get_protocol_name_aliases(), None)
         ]
 
+        ## Which kinds of object the run could not READ out of the source. A source which has
+        ## none of a kind and a connector which cannot read that kind both used to end as a 0
+        ## in this table, and only one of the two means the migration is complete. The planner
+        ## writes a row of type 'not read' into the journal for the second one. P2-8.
+        kinds_not_read = {}
+        try:
+            cursor.execute(f"""
+                SELECT object_type, execution_error_message
+                FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name()}"
+                WHERE row_type = 'not read'
+            """)
+            for object_type, what_is_there in cursor.fetchall():
+                kinds_not_read[object_type] = what_is_there
+        except Exception:
+            try:
+                self.protocol_connection.connection.rollback()
+            except Exception:
+                pass
+
+        ## the journal names an object in the singular, the summary in the plural
+        summary_name_to_object_type = {
+            'User Defined Types': 'user_defined_type',
+            'Domains': 'domain',
+            'Collations': 'collation',
+            'Text Search Objects': 'text search',
+        }
+
         for obj_name, table_name, add_cols in objects_to_check:
             try:
                 cursor.execute(f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{table_name}" """)
@@ -4948,7 +4975,15 @@ class MigratorTables:
                     except Exception:
                         self.protocol_connection.connection.rollback()
 
+                ## a kind the run could not read is not a kind the source has none of
+                not_read = kinds_not_read.get(summary_name_to_object_type.get(obj_name))
+                if not_read and not total:
+                    details.insert(0, f"NOT READ from this source - {not_read}")
+
                 details_str = ", ".join(details)
+                if not_read and not total:
+                    lines.append(f"{obj_name:<24} | {'?':>6} | {'-':>7} | {'-':>6} | {details_str}")
+                    continue
                 if obj_name == 'Altered Columns':
                     lines.append(f"{obj_name:<24} | {total:>6} | {'-':>7} | {'-':>6} | {details_str}")
                 else:

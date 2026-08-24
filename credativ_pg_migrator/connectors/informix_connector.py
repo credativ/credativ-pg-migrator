@@ -27,6 +27,26 @@ import datetime
 
 class InformixConnector(DatabaseConnector):
 
+    ## Measured for P3-2: the tables and the views inside the body are given the names the
+    ## target has for them (they are the one thing the conversion knows is a table); the
+    ## columns are still the ones the routine of the source wrote.
+    ROUTINE_BODY_NAMES_NOT_CONVERTED = (
+        'the COLUMNS inside the body are named as the routine of the source named them - the '
+        'tables and the views are given the names of the target. The columns are written '
+        'without quotes, so PostgreSQL folds them to lower case')
+
+    ## What this connector does not read out of Informix, and what Informix really has - see
+    ## DatabaseConnector.OBJECT_KINDS_NOT_READ. An empty answer would say the source has none.
+    OBJECT_KINDS_NOT_READ = {
+        'user_defined_types': ('Informix has DISTINCT types (CREATE DISTINCT TYPE) and named '
+                               'ROW types (CREATE ROW TYPE), both in informix.sysxtdtypes. '
+                               'This connector does not read either of them.'),
+    }
+    OBJECT_KINDS_ABSENT = {
+        'domains': ('Informix has no CREATE DOMAIN. What comes closest is a DISTINCT type, '
+                    'which belongs to the user defined types above.'),
+    }
+
     ## Informix refuses a query whose output row is wider than 32767 bytes. BSON and JSON
     ## columns are read as LVARCHAR, so such a cast cannot simply claim the whole LVARCHAR
     ## maximum - it has to share the row with all other columns of the SELECT list.
@@ -2478,21 +2498,23 @@ class InformixConnector(DatabaseConnector):
 
             self.config_parser.print_log_message('DEBUG3', f'informix_connector: convert_funcproc_code: Processing step 7: Replacing source schema and table names with target schema and table names ({len(table_list)} tables)')
 
+            ## The name a table has IN THE TARGET, and not the one the routine of the source
+            ## wrote. This is the one place in the body where the connector knows that a token
+            ## is a table, and it wrote the source spelling in quotes - which freezes it: with
+            ## names_case_handling: lower the migration created `orders` and the body of every
+            ## routine said `"migtest"."Orders"`, valid PL/pgSQL which fails the moment the
+            ## routine runs. P3-2 of development/OPEN_ISSUES.md.
             for table in table_list:
-                # self.config_parser.print_log_message('DEBUG3', f'informix_connector: convert_funcproc_code: Replacing table {table} from schema {source_schema_name} to {target_schema_name}')
-
+                target_table_name = f'"{target_schema_name}"."{self.config_parser.convert_names_case(table)}"'
                 source_table_pattern = re.compile(rf'("{source_schema_name}"\.)?"{table}"')
-                target_table_name = f'"{target_schema_name}"."{table}"'
                 postgresql_code = source_table_pattern.sub(target_table_name, postgresql_code)
 
                 source_table_pattern = re.compile(rf'\b{table}\b')
                 postgresql_code = source_table_pattern.sub(target_table_name, postgresql_code)
 
             for view in view_list:
-                # self.config_parser.print_log_message('DEBUG3', f'informix_connector: convert_funcproc_code: Replacing view {view} from schema {source_schema_name} to {target_schema_name}')
-
+                target_view = f'"{target_schema_name}"."{self.config_parser.convert_names_case(view)}"'
                 source_view_pattern = re.compile(rf'("{source_schema_name}"\.)?"{view}"')
-                target_view = f'"{target_schema_name}"."{view}"'
                 postgresql_code = source_view_pattern.sub(target_view, postgresql_code)
 
                 source_view_pattern = re.compile(rf'\b{view}\b')

@@ -26,6 +26,14 @@ import re
 import sqlglot
 
 class OracleConnector(OracleQueryConversion, DatabaseConnector):
+
+    ## Measured for P3-2: the body of a converted routine carries the names the routine of the
+    ## source wrote - only the schema in front of them is re-pointed at the target. They are
+    ## undelimited, so PostgreSQL folds them to lower case.
+    ROUTINE_BODY_NAMES_NOT_CONVERTED = (
+        'the tables and the columns inside the body are named as the routine of the source '
+        'named them - only the schema in front of them is re-pointed. They are written '
+        'without quotes, so PostgreSQL folds them to lower case')
     def __init__(self, config_parser, source_or_target):
         if source_or_target != 'source':
             raise ValueError("Oracle is only supported as a source database")

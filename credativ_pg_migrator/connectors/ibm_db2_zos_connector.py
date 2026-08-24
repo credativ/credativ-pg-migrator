@@ -27,6 +27,24 @@ import re
 import sqlglot
 
 class IbmDb2ZosConnector(Db2QueryConversion, DatabaseConnector):
+
+    ## Measured for P3-2: the header and the parameters are converted, and the body carries the
+    ## names the routine of the source wrote - only the schema in front of them is re-pointed.
+    ROUTINE_BODY_NAMES_NOT_CONVERTED = (
+        'the tables and the columns inside the body are named as the routine of the source '
+        'named them - only the schema in front of them is re-pointed. They are written '
+        'without quotes, so PostgreSQL folds them to lower case')
+
+    ## What this connector does not read out of Db2 for z/OS - see
+    ## DatabaseConnector.OBJECT_KINDS_NOT_READ.
+    OBJECT_KINDS_NOT_READ = {
+        'user_defined_types': ('Db2 for z/OS has distinct types (CREATE DISTINCT TYPE), kept in '
+                               'SYSIBM.SYSDATATYPES. This connector does not read them.'),
+    }
+    OBJECT_KINDS_ABSENT = {
+        'domains': ('Db2 has no CREATE DOMAIN - a distinct type is what is used instead, and it '
+                    'belongs to the user defined types above.'),
+    }
     def __init__(self, config_parser, source_or_target):
         if source_or_target != 'source':
             raise ValueError("IBM DB2 z/OS is only supported as a source database")

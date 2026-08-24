@@ -40,6 +40,7 @@ from credativ_pg_migrator.constants import MigratorConstants
 from credativ_pg_migrator.database_connector import first_line
 from credativ_pg_migrator.migrator_logging import MigratorLogger
 from credativ_pg_migrator.query_conversion import classifier
+from credativ_pg_migrator.query_conversion import name_map as name_map_module
 from credativ_pg_migrator.query_conversion import parameters as parameters_module
 from credativ_pg_migrator.query_conversion.splitter import split_statements
 from credativ_pg_migrator.query_conversion.writer import (
@@ -109,6 +110,10 @@ class QueryConverter:
         ## which one it is
         self.run_started = None
         self.results = []
+        ## §7.3 - what the migration called the objects a statement names. Read once, from the
+        ## protocol tables of the migration which has already run, and shared by the workers:
+        ## it is not written to after it is built.
+        self.name_map = None
 
     ## ------------------------------------------------------------------ connectors
 
@@ -415,6 +420,33 @@ class QueryConverter:
         result.warnings.extend(answer.get('warnings') or [])
         converted = bind_parameters.to_numbered(answer['code'])
 
+        ## §7.3 - the names of the target. The statement names the objects of the SOURCE, and
+        ## the target holds them under another schema, under the case names_case_handling gave
+        ## them and, where use_aliases_as_target_names is set, under the alias the mapping
+        ## chose. It runs before the case handling below, so what that folds is already the
+        ## name the target has - folding it again is the identity, because the protocol records
+        ## the name the object really got. Three things come out of it: the rewrite, the
+        ## objects the migration does not know, and W1 of the warning catalogue.
+        if self.name_map is not None and self.name_map.is_available:
+            rewrite = name_map_module.apply(converted, self.name_map)
+            if rewrite.mapped:
+                converted = rewrite.sql
+                result.unresolved_objects.extend(rewrite.unresolved)
+                result.warnings.extend(rewrite.warnings)
+                if rewrite.unresolved:
+                    result.warnings.append(
+                        f"the statement names {', '.join(rewrite.unresolved[:8])}"
+                        f"{', ...' if len(rewrite.unresolved) > 8 else ''}, which the migration "
+                        f"does not know: not migrated, excluded by the configuration, or an "
+                        f"object of another database. The name is written out as it stands, so "
+                        f"the target test answers for it - this line is why.")
+            else:
+                result.warnings.append(
+                    "the converted statement could not be read as PostgreSQL when the names of "
+                    "the target were to be applied, so the names of the source are used as they "
+                    "are. If the migration renamed anything the statement reads, it names the "
+                    "old object.")
+
         ## The names in the statement, spelled the way names_case_handling spelled the objects
         ## of the target. Without this a statement of a Sybase ASE or MS SQL Server
         ## application came out as SELECT "C"."ID" FROM "CUSTOMERS" - the identifiers of the
@@ -440,11 +472,11 @@ class QueryConverter:
             self.print_log_message('WARNING', f"query_conversion: [{statement.ordinal}] {statement.location}: refused after conversion - {after.reason}")
             return result
 
-        ## §7.3 is not implemented yet, so a name the statement carries without a schema is
-        ## written out as it stands - and the target test resolves it through the search_path
-        ## it sets itself, which the application does not necessarily have. Saying so is what
-        ## can be done before the name map exists: an OK which rests on a search_path must not
-        ## be read as an OK which does not.
+        ## A name the statement carries without a schema is left without one: which schema it
+        ## resolves to is the search_path of the application, and inventing one here would
+        ## answer a question the application has not asked. The target test resolves it through
+        ## the search_path it sets itself, which the application does not necessarily have - an
+        ## OK which rests on a search_path must not be read as an OK which does not.
         unqualified = classifier.unqualified_tables(after.parsed)
         if unqualified:
             result.warnings.append(
@@ -540,6 +572,19 @@ class QueryConverter:
         ## worker makes one of its own further down
         self.check_prerequisites(self.source_connection())
 
+        ## §7.3 - read once, before the first file, and shared by the workers. A run without it
+        ## converts the statements as before and says so in every output file, which is the
+        ## difference between a name which was mapped and a name which was left alone.
+        self.name_map = name_map_module.build(self.migrator_tables, self.config_parser,
+                                              self.print_log_message)
+        self.print_log_message('INFO', f"query_conversion: {self.name_map.describe()}")
+        if not self.name_map.is_available:
+            self.print_log_message('WARNING',
+                f"query_conversion: the statements are converted WITHOUT the name map: "
+                f"{self.name_map.reason}. A statement which reads an object the migration "
+                f"renamed - by a schema of another name, by names_case_handling or by an alias "
+                f"- is converted with the name of the source and will not find it.")
+
         files = self.input_files()
         if not files:
             raise ValueError(
@@ -562,8 +607,7 @@ class QueryConverter:
             'target_db_type': self.target_db_type,
             'target_schema': self.target_schema,
             'notes': [
-                'name mapping: off - the names of the source are used as they are '
-                '(the map of the migration is read from the protocol tables in a later version)',
+                self.name_map.describe(),
                 'source test: not run - the statements are never sent to the source database',
                 f"target test: {self.config_parser.get_query_conversion_target_test()} - inside a read only "
                 f"transaction which is rolled back",

@@ -1748,6 +1748,44 @@ class Planner:
 
         self.config_parser.print_log_message( 'INFO', "planner: stdwf_prepare_aliases: Aliases processing completed.")
 
+    def report_kind_not_read(self, kind, singular, phase):
+        """
+        Say that a kind of object was not read, where the source has such objects.
+
+        A fetch which answers {} says "the source holds none of these", and several connectors
+        answered that for objects their sources certainly do hold. The planner then wrote
+        "No user defined types found" and the summary showed 0 - and a reader who takes the
+        summary at its word migrates a schema which is missing the objects nobody said were
+        missing. P2-8 of development/OPEN_ISSUES.md.
+
+        Answers True when the kind was not read, so the caller can say the other thing when it
+        really was. The note is written into the journal of the run as well, with the row type
+        `not read`, which is where the summary picks it up.
+        """
+        what_is_there = self.source_connection.object_kind_not_read(kind)
+        if not what_is_there:
+            return False
+        message = (f"planner: {phase}: {kind.replace('_', ' ')} were NOT READ from this source. "
+                   f"This is not the same as the source having none: {what_is_there} Whatever "
+                   f"is there has to be migrated by hand.")
+        self.config_parser.print_log_message('WARNING', message)
+        try:
+            self.migrator_tables.insert_protocol({
+                'object_type': singular,
+                'object_name': f'({kind.replace("_", " ")} were not read)',
+                'object_action': 'not read',
+                'object_ddl': None,
+                'execution_timestamp': None,
+                'execution_success': None,
+                'execution_error_message': what_is_there,
+                'row_type': 'not read',
+                'execution_results': None,
+                'object_protocol_id': None,
+            })
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"planner: {phase}: the note that {kind} were not read could not be written into the protocol: {e}")
+        return True
+
     def stdwf_prepare_user_defined_types(self):
         self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_user_defined_types: Preparing user defined types...")
         # if self.source_db_config.get('connectivity') == 'ddl':
@@ -1814,8 +1852,9 @@ class Planner:
                 })
                 self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_user_defined_types: User defined type {type_name} processed successfully.")
             self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_user_defined_types: User defined types processed successfully.")
-        else:
-            self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_user_defined_types: No user defined types found.")
+        elif not self.report_kind_not_read('user_defined_types', 'user_defined_type',
+                                           'stdwf_prepare_user_defined_types'):
+            self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_user_defined_types: No user defined types found in the source.")
 
     def stdwf_prepare_collations(self):
         """
@@ -1935,7 +1974,8 @@ class Planner:
                 self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_domains: Domain {domain_info['domain_name']} processed successfully.")
             self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_domains: Domains processed successfully.")
         else:
-            self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_domains: No domains found.")
+            if not self.report_kind_not_read('domains', 'domain', 'stdwf_prepare_domains'):
+                self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_domains: No domains found in the source.")
 
     def stdwf_prepare_defaults(self):
         self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_defaults: Preparing defaults...")

@@ -237,6 +237,15 @@ UDT_MAP_LOCK = threading.Lock()
 
 class MsSQLConnector(DatabaseConnector):
 
+    ## What this connector does not read out of SQL Server - see
+    ## DatabaseConnector.OBJECT_KINDS_NOT_READ. The user defined types ARE read, above.
+    OBJECT_KINDS_NOT_READ = {
+        'domains': ('SQL Server has rules (CREATE RULE) bound to a type or a column, which are '
+                    'the closest thing it has to a domain constraint - the Sybase ASE connector '
+                    'of this same migrator reads exactly those as domains. This connector does '
+                    'not.'),
+    }
+
     ## The ODBC type codes whose values pyodbc hands over as bytes, with the name each of them
     ## has in SQL Server. A message about a value which could not be decoded says which type it
     ## came from - the converter is registered per type code and knows nothing else about where

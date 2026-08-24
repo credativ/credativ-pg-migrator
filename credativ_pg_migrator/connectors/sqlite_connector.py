@@ -56,6 +56,12 @@ from credativ_pg_migrator.text_decoding import TextDecoder
 
 class SQLiteConnector(DatabaseConnector):
 
+    ## SQLite has neither kind of object - see DatabaseConnector.OBJECT_KINDS_ABSENT.
+    OBJECT_KINDS_ABSENT = {
+        'user_defined_types': 'SQLite has no CREATE TYPE - a column carries a type affinity and nothing is declared apart from the table.',
+        'domains': 'SQLite has no CREATE DOMAIN. A CHECK constraint on the column is the nearest thing it has, and that is migrated with the table it stands on.',
+    }
+
     # Identifier as it can appear in SQLite DDL - double quoted, backtick quoted,
     # bracket quoted (MS Access style, accepted by SQLite) or a bare name.
     # The alternation is wrapped in a non-capturing group so that the pattern stays a

@@ -1,6 +1,6 @@
 # credativ-pg-migrator — test suite
 
-955 test functions in 52 files. **No test in this directory needs a database, a driver
+1010 test functions in 55 files. **No test in this directory needs a database, a driver
 connection, or a network.** Everything that would talk to a server is either constructed
 with `Class.__new__(Class)` and fed a fake config, or replaced with `unittest.mock`. A
 full run touches nothing outside the repository and finishes in seconds.
@@ -472,6 +472,56 @@ happening because the missing method crashed first).
 
 **Expected result.** Passes. Nothing connects to anything: the protocol connection is a stub
 which records the SQL it was given.
+
+### `test_routine_body_names.py` — 10 functions, 13 tests (15 with every driver installed)
+
+**Purpose.** The names inside the body of a migrated routine — measured, and then repaired.
+P3-2 of `development/OPEN_ISSUES.md` said **measure before building anything**: the
+`names_case_handling` repair reaches the statements inside a routine for ms_sql and sybase_ase,
+because those go through the connector's statement converter one at a time, and the other
+sources had never been looked at.
+
+**Covers.** What the measurement showed, locked in so it cannot drift. **Informix** wrote
+`"migtest"."Orders"` into every body — the source spelling, *in quotes*, which freezes it: with
+`lower` the migration created `orders` and the routine named `Orders`, valid PL/pgSQL which
+fails the moment it runs. It names the table as the target has it now, in both directions.
+**Db2 for i** read `settings['code']` while the one caller passes `funcproc_code`, so it
+answered the empty string for every routine of every Db2 for i migration; the key is right and
+what that connector really does — rewrite `SIGNAL SQLSTATE` and nothing else — is said out loud
+instead of being reached by accident. Then the declaration every connector carries: a source
+whose statements go through the statement converter declares nothing, and one whose body keeps
+its own names says **which** names and why `lower` is the one setting under which such a body
+finds the objects it names. And that the run warns only where the setting makes the body wrong,
+and not for a routine which was not converted at all.
+
+**Expected result.** Passes. Connectors whose driver is not installed are skipped.
+
+### `test_kinds_not_read.py` — 13 functions, 63 tests (81 with every driver installed)
+
+**Purpose.** "Not implemented" is not "the source has none". P2-8 of
+`development/OPEN_ISSUES.md`: `fetch_user_defined_types()` and `fetch_domains()` answered `{}`
+in connectors whose sources certainly do hold such objects — Db2 distinct types, the DISTINCT
+and named ROW types of Informix, the user-defined data types of SQL Anywhere, the rules of SQL
+Server which the **Sybase ASE connector of this same migrator** reads as domains. An empty
+answer says *the source holds none of these*, so the planner wrote "No user defined types
+found" and the summary showed `0`.
+
+**Covers.** The two declarations every connector now carries — `OBJECT_KINDS_NOT_READ` (the
+source has them and this connector does not read them, with what is really there and where it
+is kept) and `OBJECT_KINDS_ABSENT` (the source has none at all, so `{}` is the truth) — that no
+kind is called both, and that a reason of two words is refused. Then the guard which is what
+this repair is really made of, parametrised over **every connector and both kinds**: a fetch
+which answers without asking the source (`pass`, `return {}`, `return None` — read out of the
+method with `ast`, so a connector which grows a real implementation stops being a stub without
+anybody having to remember this file) and whose kind is in neither table **fails the suite**.
+The other direction too: a declaration which outlived the stub it described. And what the run
+says — that a kind which was not read is reported as that rather than as "none found", with a
+row of type `not read` written into the journal where the summary picks it up, that a source
+which really has none is left to say so, that a journal which cannot be written does not take
+the warning with it, and that the summary shows `?` rather than `0` for such a kind.
+
+**Expected result.** Passes. Connectors whose driver is not installed are skipped, which is why
+the count differs between a bare environment and one with everything installed.
 
 ### `test_phase_status.py` — 17 functions, 17 tests
 
@@ -1032,6 +1082,34 @@ path. None of these needs a conversion to be answered; they used to be answered 
 writer, which runs after a file has been converted and tested, so an existing output file on
 the first of twenty inputs threw that file's work away and stopped the run before the rest
 were read. Also that the check itself writes nothing.
+
+### `test_query_name_map.py` — 32 functions, 50 tests
+
+**Purpose.** A converted statement names the objects the target really has. P3-1 of
+`development/OPEN_ISSUES.md`, §7.3 and W1 of §9 of the conversion strategy: a statement names
+the objects of the **source**, the target holds them under another schema, under the case
+`names_case_handling` gave them and, where `use_aliases_as_target_names` is set, under the
+alias the mapping chose — and every output file said *"name mapping: off"*.
+
+**Covers.** The rewrite — schema, table and column, through the parsed statement, so a column
+named like a common word is not rewritten inside a string literal; a column resolved through
+the alias of its table and through the scopes above it, which is what a correlated `EXISTS`
+needs; an unqualified column of a join left alone, because guessing which of two tables it came
+from is how a rewrite breaks a statement which worked; a name without a schema left without
+one, because which schema it resolves to is the `search_path` of the application. The
+**unresolved-reference report** — the query which reads `AUDIT_LOG` in a run whose
+`exclude_tables` left `AUDIT_LOG` behind, named before the target test answers with a bare
+`relation does not exist`. **W1** — a column whose type *class* changed, in both directions,
+with the message saying what to write instead; and that a type which only changed its name
+(`VARCHAR2(30)` → `VARCHAR(30)`, `NUMBER` → `NUMERIC`) is **not** reported, because reporting
+those would bury the one which matters. Then the map itself: what it says when the protocol
+tables are not there, when they hold nothing, when they cannot be read; that a name is looked
+up without regard to case or quoting; that a view is an object a statement may read like a
+table. And the pipeline, through the real `convert_statement()`: that the names, the unresolved
+objects and W1 all reach the result, and that a run without a map converts as before.
+
+**Expected result.** Passes. Nothing connects to anything: the protocol tables and the source
+connector are stubs.
 
 ### `test_query_conversion_workflow.py` — 27 functions, 31 tests
 

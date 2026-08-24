@@ -26,6 +26,23 @@ import datetime
 import re
 
 class SQLAnywhereConnector(SqlAnywhereQueryConversion, DatabaseConnector):
+
+    ## Measured for P3-2: the header is converted and the body is carried over as text.
+    ROUTINE_BODY_NAMES_NOT_CONVERTED = (
+        'the body is carried over as text, so every name in it is the one the routine of the '
+        'source wrote. The names are written without quotes, so PostgreSQL folds them to '
+        'lower case')
+
+    ## What this connector does not read out of SQL Anywhere - see
+    ## DatabaseConnector.OBJECT_KINDS_NOT_READ.
+    OBJECT_KINDS_NOT_READ = {
+        'user_defined_types': ('SQL Anywhere has user-defined data types, created with CREATE '
+                               'DOMAIN or its synonym CREATE DATATYPE and kept in SYS.SYSDOMAIN '
+                               'and SYS.SYSUSERTYPE. This connector reads neither.'),
+        'domains': ('the same objects as the user defined types above: in SQL Anywhere CREATE '
+                    'DOMAIN and CREATE DATATYPE make one and the same kind of object, and a '
+                    'CHECK or a DEFAULT on such a type is carried with it.'),
+    }
     def __init__(self, config_parser, source_or_target):
         if source_or_target != 'source':
             raise ValueError("SQL Anywhere is only supported as a source database")

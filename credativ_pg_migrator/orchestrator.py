@@ -2182,6 +2182,33 @@ class Orchestrator:
                             'text_search_objects': self.migrator_tables.get_migrated_text_search_objects(),
                             })
 
+                        ## What the body of this routine keeps of the names it was written
+                        ## with. The statements inside a routine of the Transact-SQL family go
+                        ## through the statement converter one at a time and come out with the
+                        ## names of the target; the other sources hand the body over as text.
+                        ## That works with names_case_handling: lower, because PostgreSQL folds
+                        ## an undelimited name to lower case and that is what the migration
+                        ## created - and it fails with upper and with keep, where the routine is
+                        ## created without complaint and the first call answers `relation
+                        ## "orders" does not exist`. Measured per source for P3-2.
+                        body_names = self.source_connection.routine_body_names_not_converted()
+                        if body_names and converted_code and str(converted_code).strip():
+                            case_handling = self.config_parser.get_names_case_handling()
+                            if case_handling != 'lower':
+                                self.config_parser.print_log_message('WARNING',
+                                    f"orchestrator: run_migrate_funcprocs: {funcproc_type} "
+                                    f"{funcproc_data['name']}: {body_names}. With "
+                                    f"names_case_handling: {case_handling} the objects of the "
+                                    f"target are NOT spelled that way, so the routine is created "
+                                    f"without complaint and fails the first time it is called. "
+                                    f"Review the body before relying on it.")
+                            else:
+                                self.config_parser.print_log_message('DEBUG',
+                                    f"orchestrator: run_migrate_funcprocs: {funcproc_type} "
+                                    f"{funcproc_data['name']}: {body_names} - which resolves to "
+                                    f"the objects of the target because names_case_handling is "
+                                    f"lower.")
+
                         self.config_parser.print_log_message( 'DEBUG', "orchestrator: run_migrate_funcprocs: Checking for remote objects substitution in functions/procedures...")
                         rows = self.migrator_tables.get_records_remote_objects_substitution()
                         if rows:

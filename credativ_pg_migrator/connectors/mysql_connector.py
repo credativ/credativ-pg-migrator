@@ -32,6 +32,12 @@ import jaydebeapi
 import pyodbc
 
 class MySQLConnector(MySqlQueryConversion, DatabaseConnector):
+
+    ## MySQL has neither kind of object - see DatabaseConnector.OBJECT_KINDS_ABSENT.
+    OBJECT_KINDS_ABSENT = {
+        'user_defined_types': 'MySQL has no CREATE TYPE: a column takes a built-in type or an ENUM/SET declared on the column itself.',
+        'domains': 'MySQL has no CREATE DOMAIN. A CHECK constraint on the column is the nearest thing it has, and that is migrated with the table it stands on.',
+    }
     def __init__(self, config_parser, source_or_target):
         if source_or_target not in ['source', 'target']:
             raise ValueError("MySQL/MariaDB must be either source or target database")

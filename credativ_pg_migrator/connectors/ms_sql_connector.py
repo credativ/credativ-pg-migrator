@@ -2902,11 +2902,101 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
             arguments.append(current.strip())
         return arguments
 
+    ## The date and time styles of CONVERT(), as the format PostgreSQL writes with to_char()
+    ## and reads with to_date() / to_timestamp(). The style is what the value LOOKS like, so
+    ## dropping it does not drop a decoration: CONVERT(varchar(10), getdate(), 103) is
+    ## 24/08/2026 and the CAST which used to stand in its place is 2026-08-24. Every new row
+    ## got the other one.
+    CONVERT_STYLE_FORMATS = {
+        1: 'MM/DD/YY',                  101: 'MM/DD/YYYY',
+        2: 'YY.MM.DD',                  102: 'YYYY.MM.DD',
+        3: 'DD/MM/YY',                  103: 'DD/MM/YYYY',
+        4: 'DD.MM.YY',                  104: 'DD.MM.YYYY',
+        5: 'DD-MM-YY',                  105: 'DD-MM-YYYY',
+        6: 'DD Mon YY',                 106: 'DD Mon YYYY',
+        7: 'Mon DD, YY',                107: 'Mon DD, YYYY',
+        8: 'HH24:MI:SS',                108: 'HH24:MI:SS',
+        10: 'MM-DD-YY',                 110: 'MM-DD-YYYY',
+        11: 'YY/MM/DD',                 111: 'YYYY/MM/DD',
+        12: 'YYMMDD',                   112: 'YYYYMMDD',
+        13: 'DD Mon YYYY HH24:MI:SS:MS', 113: 'DD Mon YYYY HH24:MI:SS:MS',
+        14: 'HH24:MI:SS:MS',            114: 'HH24:MI:SS:MS',
+        20: 'YYYY-MM-DD HH24:MI:SS',    120: 'YYYY-MM-DD HH24:MI:SS',
+        21: 'YYYY-MM-DD HH24:MI:SS.MS', 121: 'YYYY-MM-DD HH24:MI:SS.MS',
+        23: 'YYYY-MM-DD',
+        24: 'HH24:MI:SS',
+        25: 'YYYY-MM-DD HH24:MI:SS.MS',
+        126: 'YYYY-MM-DD"T"HH24:MI:SS.MS',
+        127: 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"',
+    }
+
+    ## The styles which are NOT in the table above, and why. Transact-SQL pads the hour of
+    ## these with a space - `Aug 24 2026  9:30AM` - and PostgreSQL either pads it with a zero
+    ## (HH12) or removes the padding altogether (FMHH12), so there is no one format which
+    ## writes the same string. They are reported with what they mean instead of being
+    ## converted into something which is nearly right.
+    CONVERT_STYLES_WITHOUT_A_FORMAT = {
+        0: 'mon dd yyyy hh:miAM, the hour padded with a space',
+        100: 'mon dd yyyy hh:miAM, the hour padded with a space',
+        9: 'mon dd yyyy hh:mi:ss:mmmAM, the hour padded with a space',
+        109: 'mon dd yyyy hh:mi:ss:mmmAM, the hour padded with a space',
+        22: 'mm/dd/yy hh:mi:ss AM, the hour padded with a space',
+        130: 'day mon yyyy hh:mi:ss:mmmAM in the Hijri calendar',
+        131: 'dd/mm/yyyy hh:mi:ss:mmmAM in the Hijri calendar',
+    }
+
+    def _convert_style_argument(self, expression, target_type, style_argument):
+        """
+        `CONVERT(type, expression, style)` as PostgreSQL writes or reads that style.
+
+        The style decides what the value looks like, so it decides what is stored in every
+        row which takes the default. It used to be dropped with a warning and the call became
+        a plain CAST, which writes the ISO notation whatever the source asked for.
+
+        Answers None when the style cannot be carried over - an unknown one, one which no
+        single to_char() format can write, or a target type where the number does not mean a
+        date format at all (the styles of BINARY and MONEY are a different table) - and says
+        so. The caller then falls back to the CAST, which is what happened before.
+        """
+        style_text = self.strip_enclosing_parentheses(str(style_argument).strip()).strip()
+        try:
+            style = int(style_text)
+        except (TypeError, ValueError):
+            self.config_parser.print_log_message('WARNING', f"ms_sql_connector: convert_default_value: CONVERT style '{style_argument}' is not a number - it is dropped and the value is CAST instead, which writes the ISO notation.")
+            return None
+
+        upper_type = str(target_type).upper()
+        is_text = 'CHAR' in upper_type or 'TEXT' in upper_type
+        is_date = upper_type.startswith('DATE') and 'TIME' not in upper_type
+        is_timestamp = 'TIMESTAMP' in upper_type
+        style_format = self.CONVERT_STYLE_FORMATS.get(style)
+
+        if style_format and (is_text or is_date or is_timestamp):
+            if is_text:
+                ## the CAST is kept around it: Transact-SQL truncates the styled value to the
+                ## length of the target type, and so does a cast to varchar(n)
+                return f"CAST(to_char({expression}, '{style_format}') AS {target_type})"
+            if is_date:
+                return f"to_date({expression}, '{style_format}')"
+            return f"to_timestamp({expression}, '{style_format}')::{target_type}"
+
+        if style in self.CONVERT_STYLES_WITHOUT_A_FORMAT:
+            self.config_parser.print_log_message('WARNING', f"ms_sql_connector: convert_default_value: CONVERT style {style} writes {self.CONVERT_STYLES_WITHOUT_A_FORMAT[style]}, which no single PostgreSQL to_char() format writes - the value is CAST instead, so it comes out in the ISO notation and NOT as the source wrote it. Write the default by hand if the notation matters.")
+            return None
+
+        if style_format:
+            self.config_parser.print_log_message('WARNING', f"ms_sql_connector: convert_default_value: CONVERT style {style} is a date format, but the target type {target_type} is not a text, date or timestamp type - the style is dropped.")
+            return None
+
+        self.config_parser.print_log_message('WARNING', f"ms_sql_connector: convert_default_value: CONVERT style {style} is not one this migrator knows - it is dropped and the value is CAST instead, which may not write what the source wrote. Check what style {style} produces on the source.")
+        return None
+
     def _convert_convert_calls(self, text: str, settings) -> str:
         """
         Rewrites T-SQL CONVERT(data_type, expression [, style]) into PostgreSQL
-        CAST(expression AS data_type). The optional style argument has no PostgreSQL
-        counterpart and is dropped with a warning.
+        CAST(expression AS data_type), or into the to_char() / to_date() / to_timestamp()
+        which writes and reads what the style argument asked for - see
+        _convert_style_argument().
         """
         target_db_type = settings.get('target_db_type', self.config_parser.get_target_db_type())
         types_mapping = self.get_types_mapping({'target_db_type': target_db_type})
@@ -2938,8 +3028,6 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
             arguments = self._split_top_level_arguments(text[arguments_start:position - 1])
             if len(arguments) < 2:
                 return text
-            if len(arguments) > 2:
-                self.config_parser.print_log_message('WARNING', f"ms_sql_connector: convert_default_value: CONVERT style argument '{arguments[2]}' has no PostgreSQL equivalent and is dropped.")
             data_type = self.strip_enclosing_parentheses(arguments[0]).strip()
             type_length = ''
             length_match = re.search(r'(\(\s*[^()]*\s*\))\s*$', data_type)
@@ -2950,7 +3038,12 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
             data_type = types_mapping.get(data_type, data_type)
             if type_length and '(' not in data_type:
                 data_type += type_length
-            replacement = f"CAST({arguments[1]} AS {data_type})"
+
+            replacement = None
+            if len(arguments) > 2:
+                replacement = self._convert_style_argument(arguments[1], data_type, arguments[2])
+            if replacement is None:
+                replacement = f"CAST({arguments[1]} AS {data_type})"
             text = text[:start] + replacement + text[position:]
 
     def convert_default_value(self, settings) -> dict:

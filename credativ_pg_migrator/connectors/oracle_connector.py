@@ -2802,7 +2802,18 @@ class OracleConnector(OracleQueryConversion, DatabaseConnector):
         if re.fullmatch(r"(?i)SYS_GUID\s*\(\s*\)", bare_value):
             if column_type.startswith('UUID') or self.is_string_type(column_type) or column_type.startswith('TEXT'):
                 return self.config_parser.get_uuid_default_function(column_type)
-            self.config_parser.print_log_message('WARNING', f"oracle_connector: convert_default_value: SYS_GUID() default on a {column_type} column has no PostgreSQL equivalent - default value is dropped.")
+            if column_type.startswith('BYTEA'):
+                ## SYS_GUID() answers a RAW(16), which is migrated as BYTEA, and 16 random
+                ## bytes are exactly what the hexadecimal of a generated UUID decodes to.
+                ## This used to be dropped as "no PostgreSQL equivalent" - it has one, and a
+                ## column which was filled with a unique value per row was left with none.
+                uuid_function = str(self.config_parser.get_uuid_default_function('TEXT')).strip()
+                if not uuid_function.endswith('::text'):
+                    ## replace() reads text and PostgreSQL does not cast a uuid to one on its
+                    ## own, so the cast is made sure of here rather than assumed
+                    uuid_function = f"({uuid_function})::text"
+                return f"decode(replace({uuid_function}, '-', ''), 'hex')"
+            self.config_parser.print_log_message('WARNING', f"oracle_connector: convert_default_value: SYS_GUID() default on a {column_type} column has no PostgreSQL equivalent - the column has NO default in the target and new rows get NULL where the source generated a unique value.")
             return ''
 
         return default_value

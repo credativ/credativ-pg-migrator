@@ -1,6 +1,6 @@
 # credativ-pg-migrator — test suite
 
-828 test functions in 47 files. **No test in this directory needs a database, a driver
+856 test functions in 48 files. **No test in this directory needs a database, a driver
 connection, or a network.** Everything that would talk to a server is either constructed
 with `Class.__new__(Class)` and fed a fake config, or replaced with `unittest.mock`. A
 full run touches nothing outside the repository and finishes in seconds.
@@ -336,6 +336,34 @@ function returning set").
 **Expected result.** Passes. Note the assertions are at module level, so they run at
 **collection** time — a failure appears as a collection error, not a test failure. Worth
 turning into proper test functions when this file is next touched.
+
+### `test_column_defaults.py` — 28 functions, 52 tests
+
+**Purpose.** A column keeps the DEFAULT it had, or the run says what it lost. P1-4 of
+`development/OPEN_ISSUES.md`. A default is not decoration: it is the value **every row
+inserted after the migration** gets, so a dropped one is a column full of NULLs where the
+source generated something, and a half-converted one is a column full of a different value.
+
+**Covers.** **Oracle** — `SYS_CONTEXT('USERENV', ...)` translated where PostgreSQL has a
+counterpart and reported where it has none; `SYS_GUID()` on a UUID, a text and a BYTEA column,
+the last of which used to be dropped although PostgreSQL can express it (a RAW(16) is 16 random
+bytes, which is what the hexadecimal of a generated UUID decodes to), and reported with what
+the column loses where it can be expressed by nothing. **MS SQL Server** — the **style**
+argument of `CONVERT`, which is what the value looks like: thirteen styles asserted against
+the `to_char()` format which writes the same string, both directions (a datetime written as
+text and a string read into a date), that the CAST is kept around the styled value because
+Transact-SQL truncates it to the length of the target type, and that the styles which no
+single format can write — Transact-SQL pads the hour with a space, `Aug 24 2026  9:30AM` — are
+reported with what they mean rather than converted into something nearly right. **SQL
+Anywhere** — that a double-quoted token in a DEFAULT is a *string* and not a column reference,
+which is what the grammar of that DEFAULT settles, so `'a' || "b"` is converted instead of
+being thrown away at INFO; the special values of the grammar, including the two UTC ones and
+the bare `TIMESTAMP` which used to be handed to PostgreSQL as a type name; and that
+`DEFAULT TIMESTAMP` and `DEFAULT LAST USER` say that only their INSERT half was migrated,
+because the UPDATE half needs a trigger nobody creates.
+
+**Expected result.** Passes. Each connector group is skipped where its driver is not installed
+— with all of them present the file is 52 tests, without Oracle and SQL Anywhere it is 28.
 
 ### `test_index_collations.py` — 26 functions, 46 tests
 

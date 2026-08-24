@@ -1,6 +1,6 @@
 # credativ-pg-migrator — test suite
 
-586 test functions in 37 files. **No test in this directory needs a database, a driver
+809 test functions in 47 files. **No test in this directory needs a database, a driver
 connection, or a network.** Everything that would talk to a server is either constructed
 with `Class.__new__(Class)` and fed a fake config, or replaced with `unittest.mock`. A
 full run touches nothing outside the repository and finishes in seconds.
@@ -336,6 +336,34 @@ function returning set").
 **Expected result.** Passes. Note the assertions are at module level, so they run at
 **collection** time — a failure appears as a collection error, not a test failure. Worth
 turning into proper test functions when this file is next touched.
+
+### `test_undecodable_bytes.py` — 31 tests
+
+**Purpose.** A byte the assumed encoding cannot read is never deleted from a value. P1-1 of
+`development/OPEN_ISSUES.md`: the MS SQL Server connector decoded the values pyodbc hands
+over as bytes with `errors='ignore'` three times, so such a byte was removed from the value —
+the row reached the target shorter than it left the source and nothing said so, not the row
+counts and not the validator, which reads both sides through the same decoder.
+
+**Covers.** `migration.on_undecodable_bytes` in all three of its settings, over
+`text_decoding.TextDecoder`: that `substitute` loses no byte (what comes out re-encodes to
+exactly the bytes which went in), that `fail` refuses the value in a message which names the
+setting, and that `remove` — the behaviour from before the repair — is still reachable and is
+now reported for every value it happens to. That U+FFFD is never written, whatever the
+setting. That a value the first expected encoding reads is not reported at all and one a
+later expected encoding reads is counted without a line per value, with the detailed reports
+limited per place and the totals in the summary. The limit of the detection is asserted
+rather than left to be discovered: **utf-16 reads almost any byte string of even length**, so
+four bytes of Windows-1252 come out as two characters nobody wrote, and the count is the only
+evidence there is. And the connector: that every ODBC converter goes through the decision,
+that all five are callable the way pyodbc calls them — with the value alone — that a
+`datetimeoffset` which is not the 20 byte structure is read as text rather than as the repr
+of its bytes, that the summary is written when the connection is closed and that a connection
+which read nothing odd says nothing. The last test reads `ms_sql_connector.py` and fails if
+`errors='ignore'` or `errors='replace'` is added back to it.
+
+**Expected result.** Passes. The connector half is skipped where the ODBC and JDBC drivers
+are not installed; the decoder half needs nothing beyond the standard library.
 
 ---
 

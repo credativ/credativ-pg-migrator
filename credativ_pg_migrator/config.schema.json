@@ -614,6 +614,19 @@
           "default": "stop",
           "description": "Whether a failed object or table stops the migration or is recorded and skipped."
         },
+        "on_undecodable_bytes": {
+          "type": "string",
+          "enum": [
+            "substitute",
+            "fail",
+            "remove"
+          ],
+          "default": "substitute",
+          "description": "What happens to a value which none of the encodings expected for it can read. 'substitute' keeps it with the last resort encoding latin1, which maps every one of the 256 byte values and therefore loses no byte - the characters may be spelled wrongly and the original bytes can be read again - and reports every occurrence. 'fail' refuses the value, so the table or the chunk is recorded as failed and nothing is guessed. 'remove' deletes the byte, which is what the migrator did before 0.16.0; it is reported now rather than silent. Read case-insensitively, validated at startup.",
+          "x-applies-to-engines": [
+            "mssql"
+          ]
+        },
         "parallel_workers": {
           "type": "integer",
           "minimum": 1,

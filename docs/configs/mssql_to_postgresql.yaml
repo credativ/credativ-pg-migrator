@@ -82,6 +82,11 @@ migration:
   migrate_views: true
   set_sequences: true
   on_error: continue
+  # A value the ODBC driver hands over as bytes which is neither utf-8 nor utf-16 -
+  # a column written in Windows-1252, for instance. "substitute" keeps it with
+  # latin1, which loses no byte, and reports every occurrence; "fail" refuses the
+  # value so the table is recorded as failed and nothing is guessed.
+  on_undecodable_bytes: substitute
   parallel_workers: 8         # >>> ADJUST
   batch_size: 25000
   # ODBC round trips are comparatively expensive; chunking keeps the workers

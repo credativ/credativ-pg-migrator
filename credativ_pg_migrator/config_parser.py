@@ -19,6 +19,7 @@ import fnmatch
 import json
 import yaml
 from credativ_pg_migrator.constants import MigratorConstants
+from credativ_pg_migrator import text_decoding
 import re
 import csv
 from datetime import datetime, date, timedelta
@@ -57,6 +58,7 @@ class ConfigParser:
     CASE_INSENSITIVE_SETTINGS = (
         ('pattern_syntax',),
         ('migration', 'names_case_handling'),
+        ('migration', 'on_undecodable_bytes'),
         ('migration', 'packages_as'),
         ('migration', 'validate_objects'),
         ('query_conversion', 'target_test'),
@@ -186,6 +188,12 @@ class ConfigParser:
         names_case_handling = self.get_names_case_handling().lower()
         if names_case_handling not in ['lower', 'upper', 'keep']:
             raise ValueError(f"Invalid names_case_handling in the config file: {names_case_handling}. Must be one of 'lower', 'upper', or 'keep'.")
+
+        on_undecodable_bytes = self.get_on_undecodable_bytes_action()
+        if on_undecodable_bytes not in text_decoding.POLICIES:
+            raise ValueError(
+                f"Invalid on_undecodable_bytes in the config file: {on_undecodable_bytes}. "
+                f"Must be one of {', '.join(repr(policy) for policy in text_decoding.POLICIES)}.")
 
         pattern_syntax = self.get_pattern_syntax()
         configured_syntax = self.config.get('pattern_syntax', None)
@@ -1057,6 +1065,16 @@ class ConfigParser:
 
     def get_on_error_action(self):
         return (self.config.get('migration') or {}).get('on_error', 'stop')
+
+    def get_on_undecodable_bytes_action(self):
+        """
+        What happens to a value the encodings expected for it cannot read.
+
+        The decision itself, and why deleting the byte is not one of the acceptable answers,
+        is in credativ_pg_migrator/text_decoding.py, which is the only place which applies it.
+        """
+        return str((self.config.get('migration') or {}).get(
+            'on_undecodable_bytes', text_decoding.DEFAULT_POLICY)).strip().lower()
 
     def get_pre_migration_script(self):
         return (self.config.get('migration') or {}).get('pre_migration_script', None)

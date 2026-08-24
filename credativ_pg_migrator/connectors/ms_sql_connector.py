@@ -24,6 +24,7 @@ from credativ_pg_migrator.connectors.tsql_parser import TsqlParser
 from credativ_pg_migrator.query_conversion import outer_joins as query_outer_joins
 from credativ_pg_migrator.query_conversion.outer_joins import outer_join_warnings
 from credativ_pg_migrator.jvm_helper import detach_thread_from_jvm
+from credativ_pg_migrator.text_decoding import TextDecoder
 import re
 import struct
 import threading
@@ -235,6 +236,19 @@ UDT_MAP_LOCK = threading.Lock()
 
 
 class MsSQLConnector(DatabaseConnector):
+
+    ## The ODBC type codes whose values pyodbc hands over as bytes, with the name each of them
+    ## has in SQL Server. A message about a value which could not be decoded says which type it
+    ## came from - the converter is registered per type code and knows nothing else about where
+    ## the value stood.
+    ODBC_TYPE_NAMES = {
+        -155: 'datetimeoffset',
+        -154: 'time',
+        -152: 'xml',
+        -151: 'udt',
+        -150: 'sql_variant',
+    }
+
     def __init__(self, config_parser, source_or_target):
         if source_or_target not in ['source']:
             raise ValueError(f"MS SQL Server is only supported as a source database. Current value: {source_or_target}")
@@ -245,12 +259,47 @@ class MsSQLConnector(DatabaseConnector):
         self.on_error_action = self.config_parser.get_on_error_action()
         self.logger = MigratorLogger(self.config_parser.get_log_file()).logger
 
+    ## ------------------------------------------------------------------------------------
+    ## Bytes to text.
+    ##
+    ## The ODBC driver hands the wide and the extended types over as bytes and does not say
+    ## which encoding they are in - which of utf-8 and utf-16 arrives depends on how the
+    ## driver was built and configured, so both are tried and neither is a guess. What is a
+    ## guess is what happens when neither reads the value, and until 0.16.0 the answer was
+    ## errors='ignore' three times over: the byte was deleted from the value, the row reached
+    ## the target shorter than it left the source, and nothing said so. The decision is
+    ## migration.on_undecodable_bytes now and it is applied in text_decoding.py, which counts
+    ## every value it had to touch and reports the total when the connection is closed.
+
+    def text_decoder(self):
+        """The decoder of this connection, created on first use so that it is never missing."""
+        decoder = getattr(self, '_text_decoder', None)
+        if decoder is None:
+            decoder = TextDecoder(self.config_parser, 'ms_sql_connector')
+            self._text_decoder = decoder
+        return decoder
+
+    def decode_odbc_value(self, value, type_code):
+        """
+        One value of one of the byte-valued ODBC types, as text.
+
+        A value which carries a byte order mark is utf-16 whatever the driver was built for,
+        so that encoding is tried first for it; everything else follows the order the
+        connector has always used, utf-8 before utf-16.
+        """
+        if isinstance(value, (bytes, bytearray)) and bytes(value[:2]) in (b'\xff\xfe', b'\xfe\xff'):
+            encodings = ('utf-16', 'utf-8')
+        else:
+            encodings = None
+        place = f"SQL type {type_code} ({self.ODBC_TYPE_NAMES.get(type_code, 'unknown')})"
+        return self.text_decoder().decode(value, place=place, encodings=encodings)
+
     def connect(self):
         if self.config_parser.get_connectivity(self.source_or_target) == 'odbc':
             connection_string = self.config_parser.get_connect_string(self.source_or_target)
             self.connection = pyodbc.connect(connection_string, autocommit=True)
 
-            def handle_datetimeoffset(value):
+            def handle_datetimeoffset(value, type_code=-155):
                 if value is None:
                     return None
                 if isinstance(value, bytes) and len(value) == 20:
@@ -262,37 +311,22 @@ class MsSQLConnector(DatabaseConnector):
                     abs_tz_h = abs_tz_min // 60
                     abs_tz_m = abs_tz_min % 60
                     return f"{year:04d}-{month:02d}-{day:02d} {hour:02d}:{minute:02d}:{second:02d}.{sec_frac:06d}{tz_sign}{abs_tz_h:02d}:{abs_tz_m:02d}"
-                elif isinstance(value, bytes):
-                    try:
-                        return value.decode('utf-8')
-                    except Exception:
-                        return str(value)
-                return str(value)
+                ## Not the 20 byte structure the type has: it is read as text rather than as
+                ## str(value), which used to write the repr of the bytes - b'...' - into the
+                ## target as if it were the value.
+                return self.decode_odbc_value(value, type_code)
 
-            def handle_ss_udt(value):
+            def handle_ss_udt(value, type_code=-151):
                 if value is None:
                     return None
                 if isinstance(value, bytes):
                     return value
                 return str(value).encode('utf-8')
 
-            def handle_string_converter(value):
+            def handle_string_converter(value, type_code=None):
                 if value is None:
                     return None
-                if isinstance(value, bytes):
-                    if value.startswith(b'\xff\xfe') or value.startswith(b'\xfe\xff'):
-                        try:
-                            return value.decode('utf-16')
-                        except Exception:
-                            return value.decode('utf-16', errors='ignore')
-                    try:
-                        return value.decode('utf-8')
-                    except Exception:
-                        try:
-                            return value.decode('utf-16', errors='ignore')
-                        except Exception:
-                            return value.decode('latin1', errors='ignore')
-                return str(value)
+                return self.decode_odbc_value(value, type_code)
 
             for type_code, converter in [
                 (-155, handle_datetimeoffset),
@@ -302,7 +336,12 @@ class MsSQLConnector(DatabaseConnector):
                 (-154, handle_string_converter),
             ]:
                 try:
-                    self.connection.add_output_converter(type_code, converter)
+                    ## pyodbc calls a converter with the value alone, so the type code the
+                    ## converter is registered for is bound here - it is the only thing a
+                    ## message about an undecodable value can say about where it stood.
+                    self.connection.add_output_converter(
+                        type_code, lambda value, converter=converter, type_code=type_code:
+                            converter(value, type_code))
                 except Exception as e:
                     self.config_parser.print_log_message('DEBUG', f"ms_sql_connector: connect: Warning registering output converter for {type_code}: {e}")
         elif self.config_parser.get_connectivity(self.source_or_target) == 'jdbc':
@@ -325,6 +364,14 @@ class MsSQLConnector(DatabaseConnector):
             pass
 
     def disconnect(self):
+        try:
+            ## How many values did not fit any of the encodings expected for them, before the
+            ## connection which read them is gone. Nothing is written when there were none.
+            decoder = getattr(self, '_text_decoder', None)
+            if decoder is not None:
+                decoder.log_summary()
+        except Exception:
+            pass
         try:
             if self.connection:
                 self.connection.close()
@@ -1646,6 +1693,9 @@ class MsSQLConnector(DatabaseConnector):
 
                     cursor.execute(query)
                     total_inserted_rows = 0
+                    ## The values are decoded while they are fetched - an undecodable one is
+                    ## reported from here and not from the query which asked for them.
+                    part_name = 'reading data'
                     while True:
                         records = cursor.fetchmany(batch_size)
                         if not records:

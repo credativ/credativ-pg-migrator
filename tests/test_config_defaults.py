@@ -74,6 +74,7 @@ DEFAULT_READERS = {
     'migration.migrate_lob_values': 'should_migrate_lob_values',
     'migration.validate_objects': 'get_validate_objects_mode',
     'migration.on_error': 'get_on_error_action',
+    'migration.on_undecodable_bytes': 'get_on_undecodable_bytes_action',
     'migration.parallel_workers': 'get_parallel_workers_count',
     'migration.batch_size': 'get_batch_size',
     'migration.chunk_size': 'get_chunk_size',

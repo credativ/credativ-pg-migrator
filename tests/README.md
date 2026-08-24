@@ -1,6 +1,6 @@
 # credativ-pg-migrator — test suite
 
-892 test functions in 50 files. **No test in this directory needs a database, a driver
+914 test functions in 50 files. **No test in this directory needs a database, a driver
 connection, or a network.** Everything that would talk to a server is either constructed
 with `Class.__new__(Class)` and fed a fake config, or replaced with `unittest.mock`. A
 full run touches nothing outside the repository and finishes in seconds.
@@ -473,7 +473,7 @@ happening because the missing method crashed first).
 **Expected result.** Passes. Nothing connects to anything: the protocol connection is a stub
 which records the SQL it was given.
 
-### `test_validation_outcome.py` — 23 functions, 23 tests
+### `test_validation_outcome.py` — 45 functions, 50 tests
 
 **Purpose.** "We could not tell" is not "it is correct". P2-2 of
 `development/OPEN_ISSUES.md`: the validator started every table at `passed = True` and the
@@ -494,6 +494,32 @@ on its own, that a table which failed the row sample is no longer shown as `PASS
 checks were recorded in no column at all, so the summary could not see them), that a `SKIP` is
 not counted as a check which passed, and that a protocol row written before the outcome existed
 is still rendered.
+
+It also covers **P2-3**, the structural counts, which were recorded from the first day and
+compared by nothing — a table which arrived with half its indexes was reported as validated.
+That the columns are compared **exactly** (one column fewer is data which did not arrive) and
+the indexes and constraints only for a **shortfall**, because the two sides do not count the
+same things and were never going to: PostgreSQL creates an index for every primary key and
+every unique constraint, the migration adds one to the parent of a foreign key which has none,
+and the SQLite connector counts neither the primary key nor a unique constraint as a
+constraint at all — comparing those for equality reports a table which arrived complete as
+broken, which is how a check earns being ignored. That a count of `None` or `-1` is not a
+count. That objects the configuration did not ask to migrate are not missed. And the asymmetry
+which keeps P2-3 from undoing P2-2: **a structural check can fail a table and cannot pass
+one**, because the number of columns matching says nothing about whether the rows arrived.
+Finally that the summary reads the recorded verdict instead of comparing the numbers for
+equality again, and shows what the comparison said next to them — `6/8 PASS` and `6/5 X`,
+because `5/6` alone does not say which of the two it is.
+
+And **P2-4**, the tables which used to vanish: a table whose connectors could not be built or
+whose databases could not be reached was answered with `None` and dropped, so it was missing
+from the protocol table, from the report and from the count at the bottom of it. That such a
+table now gets a row; that the row says the **validation** failed and not the table, so a red
+line cannot be read as "this table is broken" when what broke was the measurement of it; that
+it is `FAILED` and not `NOT VALIDATED`, because an exception is not the ordinary state which
+that outcome is for; that a whole `run()` with one table which dies still reports both tables
+and names the one which died; and that a table which could not even be recorded says in as many
+words that the report is short of a row.
 
 **Expected result.** Passes. Nothing here connects to anything: the connectors, the protocol
 tables and the log are stubs, and the summary is driven through a fake cursor.

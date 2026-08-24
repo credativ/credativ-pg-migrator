@@ -14,6 +14,19 @@ There are three outcomes now, derived from the checks which really ran and never
 FAILED, PASSED, and NOT VALIDATED. The third one is neither of the other two and is counted,
 recorded and printed as itself.
 
+The structural counts joined it two days later (P2-3): the number of columns, of indexes and
+of constraints was recorded from the first day and **compared by nothing**, so a table which
+arrived with half its indexes was reported as validated. They can fail a table now — and,
+deliberately, they cannot pass one: the number of columns matching says nothing about whether
+the rows arrived, so it must not turn a table nobody looked into a table which passed.
+
+**P2-4** is the third of them: a table the validator could not measure at all — the connectors
+could not be built, the databases could not be reached — was answered with `None`, and `run()`
+dropped a falsy result. The table was missing from the protocol table, from the report built
+out of it, and from the count at the bottom of that report: what the reader saw was a report of
+the tables which happened to work, all green, over a total which did not say how many tables
+the validation had really been asked about.
+
 Reading the validator for this turned up two more holes of the same shape, repaired with it:
 
   * the **row sample** and the **LOB size** checks were written into no column of the protocol
@@ -137,7 +150,10 @@ class Log:
 class Connector:
     """A source or a target which answers exactly what a test wants it to answer."""
 
-    def __init__(self, rows=0, checksum=None, samples=(), row_hashes=None, lob_sizes=None):
+    def __init__(self, rows=0, checksum=None, samples=(), row_hashes=None, lob_sizes=None,
+                 indexes=None, constraints=None):
+        self.indexes = indexes
+        self.constraints = constraints
         self.rows = rows
         self.checksum = checksum
         self.samples = list(samples)
@@ -160,10 +176,10 @@ class Connector:
         return dict(self.lob_sizes)
 
     def get_indexes_count(self, schema, table):
-        return None
+        return self.indexes
 
     def get_constraints_count(self, schema, table):
-        return None
+        return self.constraints
 
     def get_column_statistics(self, schema, table, column, data_type, force_round_0=False):
         return {}
@@ -202,6 +218,10 @@ class ProtocolTables:
 
 
 class Config:
+    def __init__(self, migrate_indexes=True, migrate_constraints=True):
+        self.migrate_indexes = migrate_indexes
+        self.migrate_constraints = migrate_constraints
+
     def get_workflow(self):
         return 'migration'
 
@@ -211,11 +231,18 @@ class Config:
     def get_mapping_data_resolution(self, table):
         return None
 
+    def should_migrate_indexes(self, table_name=None):
+        return self.migrate_indexes
 
-def validate(source, target, primary_key='', checks=(True, True, True, True), columns=1):
+    def should_migrate_constraints(self, table_name=None):
+        return self.migrate_constraints
+
+
+def validate(source, target, primary_key='', checks=(True, True, True, True), columns=1,
+             target_columns=None, config=None):
     """One table through the real _validate_table_inner(), with everything else stubbed."""
     made = Validator.__new__(Validator)
-    made.config_parser = Config()
+    made.config_parser = config or Config()
     made.val_logger = type('L', (), {'logger': Log()})()
     made.migrator_tables = ProtocolTables(primary_key)
 
@@ -223,7 +250,8 @@ def validate(source, target, primary_key='', checks=(True, True, True, True), co
         'source_schema_name': 'src', 'source_table_name': 'customers',
         'target_schema_name': 'tgt', 'target_table_name': 'customers',
         'source_columns': [{'column_name': f'c{i}', 'data_type': 'varchar'} for i in range(columns)],
-        'target_columns': [{'column_name': f'c{i}', 'data_type': 'varchar'} for i in range(columns)],
+        'target_columns': [{'column_name': f'c{i}', 'data_type': 'varchar'}
+                           for i in range(columns if target_columns is None else target_columns)],
     }
     res = made._validate_table_inner(source, target, None, table_info, *checks, 10)
     return res, made.val_logger.logger, made.migrator_tables
@@ -234,7 +262,7 @@ def test_a_table_which_agrees_on_every_check_passes():
     target = Connector(rows=10, checksum='abc')
     res, log, tables = validate(source, target)
     assert res['outcome'] == PASSED
-    assert res['checks_run'] == ['row counts', 'table checksum']
+    assert res['checks_run'] == ['row counts', 'table checksum', 'column counts']
     assert log.levels('INFO')[-1].startswith('PASSED:')
 
 
@@ -255,7 +283,9 @@ def test_a_table_with_no_check_available_is_not_validated():
     res, log, tables = validate(source, target, primary_key='',
                                 checks=(False, True, True, True))
     assert res['outcome'] == NOT_VALIDATED
-    assert res['checks_run'] == []
+    ## the column count was compared - and a structural check cannot pass a table, because it
+    ## says nothing about whether the rows arrived
+    assert res['checks_run'] == ['column counts']
     written = log.levels('WARNING')[-1]
     assert written.startswith('NOT VALIDATED:')
     assert 'says NOTHING' in written
@@ -276,7 +306,7 @@ def test_a_table_whose_checksum_is_unavailable_still_passes_on_its_row_count():
     res, log, tables = validate(Connector(rows=7, checksum=None), Connector(rows=7, checksum=None),
                                 checks=(True, True, False, False))
     assert res['outcome'] == PASSED
-    assert res['checks_run'] == ['row counts']
+    assert res['checks_run'] == ['row counts', 'column counts']
     assert 'Skip: Table checksum unavailable' in res['table_msg']
 
 
@@ -355,6 +385,338 @@ def test_the_source_of_the_validator_no_longer_starts_a_table_at_passed():
 
 
 # --------------------------------------------------------------------------------------
+# a table which could not be validated at all - P2-4
+
+
+class VLogger:
+    """The logger holder the validator keeps, with the stop_logging() run() calls at the end."""
+
+    def __init__(self):
+        self.logger = Log()
+        self.stopped = 0
+
+    def stop_logging(self):
+        self.stopped += 1
+
+
+class RunConfig(Config):
+    """The configuration run() reads before it starts the workers."""
+
+    def get_log_file(self):
+        return None
+
+    def get_validation_report_filename(self):
+        return 'report.md'
+
+    def get_validation_workers(self):
+        return 1
+
+    def is_validation_row_counts_enabled(self):
+        return True
+
+    def is_validation_table_checksums_enabled(self):
+        return False
+
+    def is_validation_random_sample_enabled(self):
+        return False
+
+    def is_validation_lob_sizes_enabled(self):
+        return False
+
+    def get_validation_sample_size(self):
+        return 10
+
+
+class RunProtocolTables(ProtocolTables):
+    def __init__(self, tables):
+        super().__init__()
+        self.tables = tables
+        self.summaries = 0
+        self.created = 0
+
+    def create_table_for_validation(self):
+        self.created += 1
+
+    def fetch_all_tables(self, only_unfinished=False):
+        return list(self.tables)
+
+    def decode_table_row(self, row):
+        return row
+
+    def print_validation_summary(self, val_logger=None):
+        self.summaries += 1
+
+
+def table_info(name='customers', rows=10):
+    return {'source_schema_name': 'src', 'source_table_name': name,
+            'target_schema_name': 'tgt', 'target_table_name': name,
+            'source_table_rows': rows, 'target_table_rows': rows,
+            'source_columns': [], 'target_columns': []}
+
+
+def validator_for(tables, connector_factory):
+    made = Validator.__new__(Validator)
+    made.config_parser = RunConfig()
+    made.val_logger = VLogger()
+    made.migrator_tables = RunProtocolTables(tables)
+    made._get_connector = connector_factory
+    return made
+
+
+def test_a_table_whose_connectors_cannot_be_built_still_gets_a_row():
+    """
+    `_get_connector()` was called outside every try of validate_table(), so the exception
+    travelled up into run(), which logged it without naming the table and wrote nothing
+    anywhere: the table was simply not in the report.
+    """
+    def explode(direction):
+        raise ValueError('Unsupported database type: nosuchdb')
+
+    made = validator_for([table_info()], explode)
+    res = made.validate_table(table_info(), True, False, False, False, 10)
+    assert res is not None
+    assert res['outcome'] == FAILED
+    assert made.migrator_tables.table_results[0]['target_table_name'] == 'customers'
+    assert 'connectors for the validation could not be built' in res['validation_message']
+
+
+def test_a_table_whose_databases_cannot_be_reached_still_gets_a_row():
+    class Unreachable(Connector):
+        def connect(self):
+            raise OSError('could not connect to server: Connection refused')
+
+    made = validator_for([table_info()], lambda direction: Unreachable())
+    res = made.validate_table(table_info(), True, False, False, False, 10)
+    assert res['outcome'] == FAILED
+    assert 'Connection refused' in res['validation_message']
+    assert made.migrator_tables.table_results[0]['outcome'] == FAILED
+
+
+def test_the_row_says_that_the_validation_failed_and_not_the_table():
+    """
+    A red row which reads as "this table is broken" when what broke was the validation of it
+    is the other way to mislead the reader.
+    """
+    made = validator_for([table_info()], lambda direction: (_ for _ in ()).throw(OSError('down')))
+    res = made.validate_table(table_info(), True, False, False, False, 10)
+    assert 'failure of the VALIDATION and not a measurement of the table' in res['validation_message']
+    assert 'nothing about it was compared' in res['validation_message']
+
+
+def test_such_a_table_is_failed_and_not_merely_not_validated():
+    """
+    NOT VALIDATED means the checks do not apply - no primary key, no checksum on that source -
+    which is an ordinary state of an ordinary migration. An exception is not an ordinary state
+    and must not be filed with them.
+    """
+    made = validator_for([table_info()], lambda direction: (_ for _ in ()).throw(OSError('down')))
+    res = made.validate_table(table_info(), True, False, False, False, 10)
+    assert res['outcome'] == FAILED
+    assert res['outcome'] != NOT_VALIDATED
+
+
+def test_every_table_the_run_was_asked_about_is_in_the_report():
+    """
+    The whole of P2-4: one table which cannot be reached must not take itself out of the
+    report, and must not take the count of the others with it.
+    """
+    class Reachable(Connector):
+        def connect(self):
+            pass
+
+        def disconnect(self):
+            pass
+
+    made = validator_for([table_info('customers'), table_info('orders')],
+                         lambda direction: Reachable(rows=10))
+
+    real_validate = made.validate_table
+
+    def validate_or_explode(info, *arguments):
+        if info['source_table_name'] == 'orders':
+            raise RuntimeError('the worker died')
+        return real_validate(info, *arguments)
+
+    made.validate_table = validate_or_explode
+    made.run()
+
+    recorded = {row['target_table_name']: row['outcome']
+                for row in made.migrator_tables.table_results}
+    assert set(recorded) == {'customers', 'orders'}, 'both tables belong in the report'
+    assert recorded['orders'] == FAILED
+    assert 'orders' in made.val_logger.logger.written(), 'the failing table is named'
+    assert made.migrator_tables.summaries == 1
+
+
+def test_a_worker_which_answers_nothing_at_all_is_still_recorded():
+    made = validator_for([table_info()], lambda direction: Connector())
+    made.validate_table = lambda info, *arguments: None
+    made.run()
+    assert len(made.migrator_tables.table_results) == 1
+    assert made.migrator_tables.table_results[0]['outcome'] == FAILED
+    assert 'ended without a result' in made.migrator_tables.table_results[0]['validation_message']
+
+
+def test_a_table_which_could_not_even_be_recorded_says_so():
+    """The last place which could have recorded it - the log has to say the report is short."""
+    made = validator_for([table_info()], lambda direction: Connector())
+
+    def refuse(settings):
+        raise RuntimeError('protocol database is gone')
+
+    made.migrator_tables.insert_validation_table_result = refuse
+    made.could_not_be_validated(table_info(), OSError('down'), 'the databases could not be reached')
+    assert 'MISSING from the validation report' in made.val_logger.logger.written()
+
+
+# --------------------------------------------------------------------------------------
+# the structural checks - P2-3
+
+
+from credativ_pg_migrator.validator import compare_counts, count_is_available
+
+
+@pytest.mark.parametrize('count,available', [
+    (0, True), (1, True), (99, True),
+    (None, False),   ## the connector does not count that
+    (-1, False),     ## it tried and the query failed
+    (True, False),   ## a bool is not a count
+])
+def test_only_a_real_number_is_a_count(count, available):
+    assert count_is_available(count) is available
+
+
+def test_the_columns_are_compared_exactly():
+    """A migrated table holds the columns of the source: one fewer is data which did not arrive."""
+    assert compare_counts(5, 5, 'columns', exact=True)[0] is True
+    assert compare_counts(5, 4, 'columns', exact=True)[0] is False
+    assert compare_counts(5, 6, 'columns', exact=True)[0] is False
+
+
+def test_the_indexes_and_constraints_are_compared_for_a_shortfall():
+    """
+    The two sides do not count the same things and were never going to: PostgreSQL creates an
+    index for every primary key and every unique constraint, the migration adds one to the
+    parent of a foreign key which has none, and the SQLite connector counts neither the
+    primary key nor a unique constraint as a constraint at all. Comparing those for equality
+    reports a table which arrived complete as broken.
+    """
+    assert compare_counts(6, 7, 'indexes', exact=False)[0] is True, 'more is normal'
+    assert compare_counts(6, 6, 'indexes', exact=False)[0] is True
+    assert compare_counts(6, 3, 'indexes', exact=False)[0] is False, 'fewer is a loss'
+
+
+def test_a_shortfall_says_how_many_and_where_to_read_which():
+    verdict, message = compare_counts(6, 3, 'indexes', exact=False)
+    assert verdict is False
+    assert '3 of the indexes' in message
+    assert 'protocol table' in message
+
+
+def test_a_count_which_is_not_available_on_both_sides_is_not_a_check():
+    for source, target in ((None, 3), (3, None), (-1, 3), (3, -1), (None, None)):
+        verdict, message = compare_counts(source, target, 'indexes', exact=False)
+        assert verdict is None
+        assert message.startswith('Skip:')
+
+
+def test_a_table_which_lost_indexes_is_not_reported_as_validated():
+    """
+    P2-3 in one line: the counts were recorded and compared by nothing, so `passed` was set to
+    False only by the row count, the checksum and the samples - and a table which arrived with
+    half its indexes came out validated.
+    """
+    source = Connector(rows=10, checksum='a', indexes=6, constraints=2)
+    target = Connector(rows=10, checksum='a', indexes=3, constraints=2)
+    res, log, tables = validate(source, target)
+    assert res['indexes_logic'] is False
+    assert res['outcome'] == FAILED, 'every data check agreed - the structure did not'
+    assert 'index counts' in log.written()
+
+
+def test_a_target_with_more_indexes_than_the_source_still_passes():
+    source = Connector(rows=10, checksum='a', indexes=6, constraints=2)
+    target = Connector(rows=10, checksum='a', indexes=8, constraints=5)
+    res, log, tables = validate(source, target)
+    assert res['outcome'] == PASSED
+    assert res['indexes_logic'] is True
+    assert res['constraints_logic'] is True
+
+
+def test_a_missing_column_fails_the_table():
+    source = Connector(rows=10, checksum='a')
+    target = Connector(rows=10, checksum='a')
+    res, log, tables = validate(source, target, columns=5, target_columns=4)
+    assert res['columns_logic'] is False
+    assert res['outcome'] == FAILED
+
+
+def test_a_structural_check_alone_cannot_pass_a_table():
+    """
+    The asymmetry which keeps P2-3 from undoing P2-2. The columns match, and that says nothing
+    about whether the rows arrived - so the table is still NOT VALIDATED and the line says
+    which of the two happened.
+    """
+    source = Connector(rows=1, checksum=None, indexes=3)
+    target = Connector(rows=1, checksum=None, indexes=3)
+    res, log, tables = validate(source, target, checks=(False, False, False, False))
+    assert res['columns_logic'] is True
+    assert res['indexes_logic'] is True
+    assert res['outcome'] == NOT_VALIDATED
+    written = log.levels('WARNING')[-1]
+    assert 'not one check of the DATA' in written
+    assert 'the structure was compared' in written
+    assert 'nothing looked at the data' in written
+
+
+def test_a_structural_failure_fails_a_table_nothing_else_could_measure():
+    """The other half of the asymmetry: it cannot pass a table and it can certainly fail one."""
+    source = Connector(rows=1, checksum=None, indexes=9)
+    target = Connector(rows=1, checksum=None, indexes=1)
+    res, log, tables = validate(source, target, checks=(False, False, False, False))
+    assert res['outcome'] == FAILED
+
+
+def test_objects_the_configuration_did_not_ask_for_are_not_missed():
+    """
+    With migrate_indexes off the target has none of them on purpose, and a check which fails a
+    table for doing what it was told is a check nobody will keep.
+    """
+    source = Connector(rows=10, checksum='a', indexes=6, constraints=4)
+    target = Connector(rows=10, checksum='a', indexes=0, constraints=0)
+    res, log, tables = validate(source, target,
+                                config=Config(migrate_indexes=False, migrate_constraints=False))
+    assert res['indexes_logic'] is None
+    assert res['constraints_logic'] is None
+    assert res['outcome'] == PASSED
+    assert 'not migrated for this table' in res['indexes_msg']
+
+
+def test_the_structural_verdicts_are_written_into_the_protocol_row():
+    source = Connector(rows=10, checksum='a', indexes=6, constraints=2)
+    target = Connector(rows=10, checksum='a', indexes=3, constraints=2)
+    res, log, tables = validate(source, target)
+    recorded = tables.table_results[0]
+    assert recorded['indexes_logic'] is False
+    assert recorded['columns_logic'] is True
+    assert recorded['source_indexes_count'] == 6
+    assert recorded['target_indexes_count'] == 3
+
+
+def test_oracle_does_not_count_the_index_of_a_lob_column():
+    """
+    Oracle keeps one index per LOB column in all_indexes and PostgreSQL keeps the value out of
+    line without an index of any kind, so counting it made every table with a CLOB look as
+    though an index had been lost.
+    """
+    path = os.path.join(REPO, 'credativ_pg_migrator', 'connectors', 'oracle_connector.py')
+    with open(path, encoding='utf-8') as handle:
+        source = handle.read()
+    body = source.split('def get_indexes_count')[1].split('def ')[0]
+    assert "index_type <> 'LOB'" in body
+
+
+# --------------------------------------------------------------------------------------
 # the summary, which is where the verdict is read
 
 
@@ -425,9 +787,12 @@ class SummaryConfig:
         pass
 
 
-def validation_row(table, row_cnt='PASS', tbl_hash='PASS', row_hash='-', lob='-', outcome=PASSED):
+def validation_row(table, row_cnt='PASS', tbl_hash='PASS', row_hash='-', lob='-', outcome=PASSED,
+                   cols='PASS', idxs='-', cons='-'):
+    ## the columns of the summary query, in its order: the counts, then the mark of every
+    ## check, then the outcome, then the three structural marks
     return ('tgt', table, 'src', table, 10, 10, 'h', 'h', 3, 3, None, None, None, None,
-            row_cnt, tbl_hash, row_hash, lob, outcome)
+            row_cnt, tbl_hash, row_hash, lob, outcome, cols, idxs, cons)
 
 
 def summary_of(rows, tmp_path):
@@ -491,6 +856,30 @@ def test_a_skipped_check_is_not_counted_as_a_check_which_passed(tmp_path):
 def test_the_summary_says_nothing_extra_when_every_table_was_measured(tmp_path):
     summary, details = summary_of([validation_row('a'), validation_row('b')], tmp_path)
     assert 'could not be measured at all' not in summary
+
+
+def test_the_summary_no_longer_compares_the_counts_for_equality(tmp_path):
+    """
+    It worked the structural verdict out again from the two numbers, by comparing them for
+    equality - so a table whose target holds more indexes than the source, which is what
+    PostgreSQL and the migration between them produce for almost every table with a primary
+    key, was marked X. The verdict the validator recorded is read now.
+    """
+    row = list(validation_row('customers', idxs='PASS'))
+    row[10], row[11] = 6, 8          ## the target holds two indexes more
+    summary, details = summary_of([tuple(row)], tmp_path)
+    line = [line for line in details.splitlines() if 'tgt.customers' in line][0]
+    assert '6/8 PASS' in line
+    assert line.split('|')[4].strip() == 'PASS'
+
+
+def test_the_summary_shows_what_the_comparison_of_the_counts_said(tmp_path):
+    """`5/6` alone does not say whether that is a shortfall or the target holding more."""
+    row = list(validation_row('orders', idxs='X', outcome=FAILED))
+    row[10], row[11] = 6, 5
+    summary, details = summary_of([tuple(row)], tmp_path)
+    line = [line for line in details.splitlines() if 'tgt.orders' in line][0]
+    assert '6/5 X' in line
 
 
 def test_a_table_which_failed_the_row_sample_is_no_longer_shown_as_passed(tmp_path):

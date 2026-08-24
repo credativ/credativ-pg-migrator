@@ -993,11 +993,20 @@ class OracleConnector(OracleQueryConversion, DatabaseConnector):
         return ""
 
     def get_indexes_count(self, schema_name: str, table_name: str) -> int:
+        """
+        How many indexes the table has, as the validator compares them.
+
+        The internal index of a LOB column is not one of them. Oracle keeps one per LOB
+        column in all_indexes, PostgreSQL keeps the value out of line without an index of any
+        kind, and counting it made every table with a CLOB or a BLOB look as though an index
+        had been lost - which is how a check earns being ignored.
+        """
         query = """
             SELECT count(*)
             FROM all_indexes
             WHERE table_owner = :owner
             AND table_name = :table_name
+            AND index_type <> 'LOB'
         """
         try:
             self.connect()

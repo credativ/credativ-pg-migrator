@@ -6422,6 +6422,9 @@ class MigratorTables:
                 table_hash_passed text,
                 row_hash_passed text,
                 lob_size_passed text,
+                columns_count_passed text,
+                indexes_count_passed text,
+                constraints_count_passed text,
                 validation_outcome text,
                 validation_message text,
                 validated_at timestamp default current_timestamp
@@ -6558,6 +6561,15 @@ class MigratorTables:
         row_hash_res = verdict_mark(settings.get('row_hash_logic'), settings.get('row_hash_msg'))
         lob_size_res = verdict_mark(settings.get('lob_size_logic'), settings.get('lob_size_msg'))
 
+        ## The structural checks. The four counts beside them were recorded from the first
+        ## day and compared by nothing, so a table which arrived with half its indexes was
+        ## reported as validated; the summary later worked out a verdict of its own from the
+        ## numbers, by comparing them for equality, which is not what they mean. The verdict
+        ## the validator reached is recorded here and the summary reads it. P2-3.
+        columns_count_res = verdict_mark(settings.get('columns_logic'), settings.get('columns_msg'))
+        indexes_count_res = verdict_mark(settings.get('indexes_logic'), settings.get('indexes_msg'))
+        constraints_count_res = verdict_mark(settings.get('constraints_logic'), settings.get('constraints_msg'))
+
         ## The outcome the validator derived - PASSED, FAILED or NOT VALIDATED. The summary
         ## reads it instead of deriving a verdict of its own out of two of the four columns.
         validation_outcome = settings.get('outcome')
@@ -6565,10 +6577,10 @@ class MigratorTables:
 
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{self.config_parser.get_validation_tables_name()}"
-            (source_schema_name, source_table_name, source_row_count, target_schema_name, target_table_name, target_row_count, source_table_hash, target_table_hash, source_columns_count, target_columns_count, source_indexes_count, target_indexes_count, source_constraints_count, target_constraints_count, row_count_passed, table_hash_passed, row_hash_passed, lob_size_passed, validation_outcome, validation_message)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (source_schema_name, source_table_name, source_row_count, target_schema_name, target_table_name, target_row_count, source_table_hash, target_table_hash, source_columns_count, target_columns_count, source_indexes_count, target_indexes_count, source_constraints_count, target_constraints_count, row_count_passed, table_hash_passed, row_hash_passed, lob_size_passed, columns_count_passed, indexes_count_passed, constraints_count_passed, validation_outcome, validation_message)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
-        params = (source_schema_name, source_table_name, source_row_count, target_schema_name, target_table_name, target_row_count, str(source_table_hash) if source_table_hash is not None else None, str(target_table_hash) if target_table_hash is not None else None, source_columns_count, target_columns_count, source_indexes_count, target_indexes_count, source_constraints_count, target_constraints_count, row_cnt_res, tbl_hash_res, row_hash_res, lob_size_res, validation_outcome, validation_message)
+        params = (source_schema_name, source_table_name, source_row_count, target_schema_name, target_table_name, target_row_count, str(source_table_hash) if source_table_hash is not None else None, str(target_table_hash) if target_table_hash is not None else None, source_columns_count, target_columns_count, source_indexes_count, target_indexes_count, source_constraints_count, target_constraints_count, row_cnt_res, tbl_hash_res, row_hash_res, lob_size_res, columns_count_res, indexes_count_res, constraints_count_res, validation_outcome, validation_message)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -6687,7 +6699,8 @@ class MigratorTables:
             SELECT v.target_schema_name, v.target_table_name, MAX(t.source_schema_name), MAX(t.source_table_name), MAX(v.source_row_count), MAX(v.target_row_count), MAX(v.source_table_hash), MAX(v.target_table_hash),
                    MAX(v.source_columns_count), MAX(v.target_columns_count), MAX(v.source_indexes_count), MAX(v.target_indexes_count), MAX(v.source_constraints_count), MAX(v.target_constraints_count),
                    MAX(v.row_count_passed), MAX(v.table_hash_passed),
-                   MAX(v.row_hash_passed), MAX(v.lob_size_passed), MAX(v.validation_outcome)
+                   MAX(v.row_hash_passed), MAX(v.lob_size_passed), MAX(v.validation_outcome),
+                   MAX(v.columns_count_passed), MAX(v.indexes_count_passed), MAX(v.constraints_count_passed)
             FROM "{self.protocol_schema}"."{self.config_parser.get_validation_tables_name()}" v
             LEFT JOIN "{self.protocol_schema}"."{protocol_tables}" t
             ON v.target_schema_name = t.target_schema_name AND v.target_table_name = t.target_table_name
@@ -6765,7 +6778,7 @@ class MigratorTables:
                 header = f"| {'No.':>{max_num_len}} | {'Source Table':<{max_source_len}} | {'Target Table':<{max_target_len}} |"
                 if is_mapping:
                     header += f" {'Action':<15} |"
-                header += f" {'Status':<6} | {'RowCnt':<6} | {'SrcRows':>10} | {'TgtRows':>10} | {'TblHash':<7} | {'SrcHash':<15} | {'TgtHash':<15} | {'RowHash':<7} | {'LOBs':<7} | {'Cols':<7} | {'Idxs':<7} | {'Cons':<7} |"
+                header += f" {'Status':<6} | {'RowCnt':<6} | {'SrcRows':>10} | {'TgtRows':>10} | {'TblHash':<7} | {'SrcHash':<15} | {'TgtHash':<15} | {'RowHash':<7} | {'LOBs':<7} | {'Cols':<11} | {'Idxs':<11} | {'Cons':<11} |"
                 sep = "|" + "|".join(['-' * len(c) for c in header.split('|')[1:-1]]) + "|"
                 details_lines.append(header)
                 details_lines.append(sep)
@@ -6814,41 +6827,41 @@ class MigratorTables:
 
                     outcome = r[18]
 
-                    cols_str = "-"
-                    cols_res = "-"
-                    if src_cols_cnt is not None and tgt_cols_cnt is not None:
-                        cols_tests += 1
-                        cols_str = f"{src_cols_cnt}/{tgt_cols_cnt}"
-                        if src_cols_cnt == tgt_cols_cnt:
-                            cols_res = "PASS"
-                            cols_pass += 1
-                        else:
-                            cols_res = "X"
-                            cols_fail += 1
+                    ## The verdict of the validator, as it recorded it. It used to be
+                    ## worked out here by comparing the two numbers for **equality**, which
+                    ## is not what they mean: PostgreSQL creates an index for every primary
+                    ## key and the migrator adds one to the parent of a foreign key, so a
+                    ## table which arrived complete was reported as broken. What the numbers
+                    ## can say is a shortfall - see compare_counts() in validator.py.
+                    def structural(mark, source_count, target_count, tests, passes, failures):
+                        text = "-"
+                        if source_count is not None and target_count is not None:
+                            text = f"{source_count}/{target_count}"
+                        if mark is None:
+                            ## a row written by an older run, which has no verdict recorded
+                            mark = "-"
+                            if source_count is not None and target_count is not None:
+                                mark = "PASS" if source_count == target_count else "X"
+                        tests, passes, failures = tally(mark, tests, passes, failures)
+                        return mark, text, tests, passes, failures
 
-                    idxs_str = "-"
-                    idxs_res = "-"
-                    if src_idxs_cnt is not None and tgt_idxs_cnt is not None:
-                        idxs_tests += 1
-                        idxs_str = f"{src_idxs_cnt}/{tgt_idxs_cnt}"
-                        if src_idxs_cnt == tgt_idxs_cnt:
-                            idxs_res = "PASS"
-                            idxs_pass += 1
-                        else:
-                            idxs_res = "X"
-                            idxs_fail += 1
+                    cols_res, cols_str, cols_tests, cols_pass, cols_fail = structural(
+                        r[19], src_cols_cnt, tgt_cols_cnt, cols_tests, cols_pass, cols_fail)
+                    idxs_res, idxs_str, idxs_tests, idxs_pass, idxs_fail = structural(
+                        r[20], src_idxs_cnt, tgt_idxs_cnt, idxs_tests, idxs_pass, idxs_fail)
+                    cons_res, cons_str, cons_tests, cons_pass, cons_fail = structural(
+                        r[21], src_cons_cnt, tgt_cons_cnt, cons_tests, cons_pass, cons_fail)
 
-                    cons_str = "-"
-                    cons_res = "-"
-                    if src_cons_cnt is not None and tgt_cons_cnt is not None:
-                        cons_tests += 1
-                        cons_str = f"{src_cons_cnt}/{tgt_cons_cnt}"
-                        if src_cons_cnt == tgt_cons_cnt:
-                            cons_res = "PASS"
-                            cons_pass += 1
-                        else:
-                            cons_res = "X"
-                            cons_fail += 1
+                    ## the two numbers and what the comparison of them said: 5/6 alone does
+                    ## not say whether that is a shortfall or the target simply holding more
+                    def structural_cell(text, mark):
+                        if text == '-' and mark == '-':
+                            return '-'
+                        return f"{text} {mark}".strip()
+
+                    cols_cell = structural_cell(cols_str, cols_res)
+                    idxs_cell = structural_cell(idxs_str, idxs_res)
+                    cons_cell = structural_cell(cons_str, cons_res)
 
                     ## The verdict of the validator, as the validator recorded it. It used to
                     ## be worked out again here out of two of the four checks, so a table
@@ -6885,7 +6898,7 @@ class MigratorTables:
                     else:
                         action_str = ""
 
-                    details_lines.append(f"| {idx:>{max_num_len}} | {source_table:<{max_source_len}} | {target_table:<{max_target_len}} |{action_str} {status:<6} | {row_cnt_res:<6} | {src_rows_str:>10} | {tgt_rows_str:>10} | {tbl_hash_res:<7} | {src_hash_str:<15} | {tgt_hash_str:<15} | {row_hash_res:<7} | {lob_res:<7} | {cols_str:<7} | {idxs_str:<7} | {cons_str:<7} |")
+                    details_lines.append(f"| {idx:>{max_num_len}} | {source_table:<{max_source_len}} | {target_table:<{max_target_len}} |{action_str} {status:<6} | {row_cnt_res:<6} | {src_rows_str:>10} | {tgt_rows_str:>10} | {tbl_hash_res:<7} | {src_hash_str:<15} | {tgt_hash_str:<15} | {row_hash_res:<7} | {lob_res:<7} | {cols_cell:<11} | {idxs_cell:<11} | {cons_cell:<11} |")
 
             failed_count = total - passed_count - not_validated_count
 

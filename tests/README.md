@@ -1,6 +1,6 @@
 # credativ-pg-migrator — test suite
 
-802 test functions in 46 files. **No test in this directory needs a database, a driver
+828 test functions in 47 files. **No test in this directory needs a database, a driver
 connection, or a network.** Everything that would talk to a server is either constructed
 with `Class.__new__(Class)` and fed a fake config, or replaced with `unittest.mock`. A
 full run touches nothing outside the repository and finishes in seconds.
@@ -336,6 +336,36 @@ function returning set").
 **Expected result.** Passes. Note the assertions are at module level, so they run at
 **collection** time — a failure appears as a collection error, not a test failure. Worth
 turning into proper test functions when this file is next touched.
+
+### `test_index_collations.py` — 26 functions, 46 tests
+
+**Purpose.** A functional index means in the target what it meant in the source. P1-3 of
+`development/OPEN_ISSUES.md`, and what reading it turned up next to it.
+
+**Covers.** Three things which happened to the expression of a functional index without a word
+being written. **The collation was deleted** — by `clean_index_expression()` of the MySQL and
+MariaDB connectors, and by `get_create_index_sql()` of the PostgreSQL target, which does it to
+every source which is not PostgreSQL. A collation decides which strings count as equal, so a
+case-insensitive index became a case-sensitive one: it answers a query with fewer rows, and a
+UNIQUE one stops refusing two values which differ only in case. What `credativ_pg_migrator/
+collations.py` decides per collation is asserted here — a `_bin` collation is carried over as
+`COLLATE "C"`, which compares byte for byte exactly as MySQL does; a `_ci` or `_ai` one cannot
+be said in PostgreSQL without a non-deterministic ICU collation and is reported with what
+changes and how to get it back; a `_cs` one becomes the default of the target, which compares
+the same way; and a name nobody knows is reported rather than assumed harmless. That the
+catalogue of the target is asked before the name is read, because `fr_CI.utf8` is Côte d'Ivoire
+and not a case-insensitive collation. **A `sqlglot.transpile` which raised** was answered with
+`except Exception: pass`, which left the raw MySQL expression standing as the PostgreSQL one —
+`a || b` is an OR in MySQL and a concatenation in PostgreSQL, and both are valid. Such an
+expression is refused now, with the text of the source in the message. **Every identifier
+became a string literal**: the backticks were replaced with double quotes before the text was
+handed to sqlglot as MySQL, where a double quote starts a STRING, so an index on `lower(email)`, with the column
+name in backticks as MySQL writes it, was converted into `lower('email')` — an index on a
+constant, on every functional index of every MySQL and MariaDB source. And that the name of a collation is not folded by
+`names_case_handling`: `COLLATE "C"` became `COLLATE "c"`, which PostgreSQL does not have.
+
+**Expected result.** Passes. The connector groups are skipped where their drivers are not
+installed; the decision itself needs nothing beyond the standard library.
 
 ### `test_undecodable_bytes.py` — 53 functions, 58 tests
 

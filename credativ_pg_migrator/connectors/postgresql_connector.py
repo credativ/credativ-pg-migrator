@@ -21,6 +21,7 @@ from psycopg2 import sql
 from credativ_pg_migrator.database_connector import DatabaseConnector
 from credativ_pg_migrator.migrator_logging import MigratorLogger
 from credativ_pg_migrator.constants import MigratorConstants
+from credativ_pg_migrator import collations
 import traceback
 import re
 import json
@@ -1482,6 +1483,12 @@ class PostgreSQLConnector(DatabaseConnector):
 
             # An element of a function-based index is an expression
             if self.expression_is_parenthesized(col) or (is_function_based and '(' in col):
+                ## The collations are taken out of the expression before anything reads it:
+                ## the name of a collation is not an identifier of this migration, and the
+                ## conversion below folds it with the rest of them - COLLATE "C" became
+                ## COLLATE "c" under names_case_handling: lower, which PostgreSQL does not
+                ## have. They are put back at the end of this branch.
+                col, found_collations = collations.take_out(col)
                 expression = self.convert_expression_identifiers(col, target_columns)
                 expression = expression.replace(r"\'", "'").replace(r'\"', '"')
                 if self.config_parser.get_source_db_type() != 'postgresql':
@@ -1495,12 +1502,25 @@ class PostgreSQLConnector(DatabaseConnector):
                 if self.config_parser.get_source_db_type() == 'postgresql':
                     # PostgreSQL collations are migrated with the schema - keep them in the
                     # expression, only point them to the collation in the target schema.
-                    expression = re.sub(
-                        r'(?i)\bCOLLATE\s+((?:"(?:[^"]|"")+"|[a-zA-Z0-9_]+)(?:\.(?:"(?:[^"]|"")+"|[a-zA-Z0-9_]+))?)',
-                        lambda match: self.get_collate_clause(match.group(1), user_collations).strip(),
-                        expression)
+                    expression, _ = collations.put_back(
+                        expression, found_collations,
+                        resolve=lambda name: self.get_collate_clause(name, user_collations))
                 else:
-                    expression = re.sub(r'(?i)\bCOLLATE\s+[`\'"]?[a-zA-Z0-9_]+[`\'"]?', '', expression)
+                    ## A collation of another engine used to be deleted here without a word,
+                    ## for every source which is not PostgreSQL. It decides which strings
+                    ## count as equal, so a case-insensitive index became a case-sensitive
+                    ## one - it answers a query with fewer rows than the source did, and a
+                    ## unique one stops refusing two values which differ only in case. What
+                    ## PostgreSQL can say is carried over now (`_bin` compares byte by byte,
+                    ## which is COLLATE "C") and what it cannot is reported. P1-3.
+                    expression, _ = collations.put_back(
+                        expression, found_collations,
+                        existing_names=self.get_existing_collation_names(),
+                        report=self.config_parser.print_log_message,
+                        where=(f"postgresql_connector: get_create_index_sql: index "
+                               f"'{index_name}' on table "
+                               f"'{target_schema_name}.{target_table_name}'"),
+                        index_type=index_type)
                 expression = self.qualify_text_search_references(expression, text_search_objects)
                 if not self.expression_is_parenthesized(expression):
                     expression = f"({expression})"

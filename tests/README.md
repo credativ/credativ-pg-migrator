@@ -1,6 +1,6 @@
 # credativ-pg-migrator — test suite
 
-1203 test functions in 60 files. **No test in this directory needs a database, a driver
+1216 test functions in 61 files. **No test in this directory needs a database, a driver
 connection, or a network.** Everything that would talk to a server is either constructed
 with `Class.__new__(Class)` and fed a fake config, or replaced with `unittest.mock`. A
 full run touches nothing outside the repository and finishes in seconds.
@@ -37,7 +37,7 @@ tests, and no test depends on the order of the others.
 | configuration & logging | `pyyaml`, `jsonschema`, `pytest` | the 5 `test_config_*` / `test_logging_*` / `test_object_*` files, and `test_schema_names.py` |
 | query conversion | `sqlglot`, `pytest` | the 6 `test_query_*` files and the `test_*_query_conversion.py` of Db2, Oracle and SQL Anywhere |
 | anonymization, Db2 CSV | nothing beyond the standard library | 3 files |
-| everything else | the package's own dependencies — `psycopg2`, `tabulate`, `jaydebeapi`, `pyodbc` | 26 files, `test_informix_query_conversion.py`, `test_mysql_query_conversion.py`, `test_ms_sql_query_conversion.py` and `test_sybase_query_conversion.py`, `test_tsql_outer_joins.py`, `test_oracle_outer_joins.py`, `test_oracle_fk_dependencies.py`, `test_sqlite_query_conversion.py`, `test_postgresql_query_conversion.py` and `test_query_source_test.py` among them |
+| everything else | the package's own dependencies — `psycopg2`, `tabulate`, `jaydebeapi`, `pyodbc` | 27 files, `test_informix_query_conversion.py`, `test_mysql_query_conversion.py`, `test_ms_sql_query_conversion.py` and `test_sybase_query_conversion.py`, `test_tsql_outer_joins.py`, `test_oracle_outer_joins.py`, `test_oracle_fk_dependencies.py`, `test_sqlite_query_conversion.py`, `test_postgresql_query_conversion.py` and `test_query_source_test.py` among them |
 
 The third group imports the connectors, which import their drivers at module level, so
 those files fail to **collect** if the drivers are absent — the message is
@@ -61,7 +61,8 @@ python3 -m pytest tests/ -q \
   --ignore=tests/test_sqlite_query_conversion.py \
   --ignore=tests/test_postgresql_query_conversion.py \
   --ignore=tests/test_query_source_test.py \
-  --ignore=tests/test_partitioning.py
+  --ignore=tests/test_partitioning.py \
+  --ignore=tests/test_comments_migration.py
 ```
 
 **Expected result: `545 passed, 6 skipped`** (13 files; the count is higher than the number
@@ -546,6 +547,26 @@ the warning with it, and that the summary shows `?` rather than `0` for such a k
 
 **Expected result.** Passes. Connectors whose driver is not installed are skipped, which is why
 the count differs between a bare environment and one with everything installed.
+
+### `test_comments_migration.py` — 24 tests
+
+**Purpose.** `COMMENT ON …` for everything a migration created — the phase which ended on its
+first refusal and reported success anyway. `COMMENT ON TRIGGER "migtest"."c_customers_audit"` is
+a syntax error at the dot: a trigger is not a schema object, it belongs to its table. The whole
+phase stood in one `try/except`, so that one statement ended it and every comment behind it — the
+views, and the user defined types, whose branch had a `KeyError: 'type_name'` of its own which
+nobody had ever reached — was never attempted. And the summary counted the comments the protocol
+holds and printed that as the number set, with a hard-coded `0` failed.
+
+**Covers.** The statements PostgreSQL really takes, per kind, asserted as text. That one refusal
+is one refusal: the phase goes on, the transaction is rolled back so the next statement does not
+answer `current transaction is aborted`, the object is named in the log and in the phase status.
+That a comment whose object was never created is **skipped** rather than counted as a failed
+comment — the failed view is already recorded as one. And two guards read with `ast`, which are
+the durable half: every key the phase reads out of a decoded protocol row has to exist in the
+decoder it came from, and every decoder it uses has to be able to say whether its object was
+created. The second one found `decode_index_row()`, which had the same gap as the view decoder
+and which nobody had noticed.
 
 ### `test_phase_status.py` — 17 functions, 17 tests
 

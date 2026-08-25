@@ -16,6 +16,7 @@
 
 import concurrent.futures
 import importlib
+from credativ_pg_migrator.database_connector import first_line
 from credativ_pg_migrator.migrator_logging import MigratorLogger
 from credativ_pg_migrator.migrator_tables import MigratorTables
 from credativ_pg_migrator.constants import MigratorConstants
@@ -2666,12 +2667,63 @@ class Orchestrator:
             self.config_parser.print_log_message('INFO', "orchestrator: run_migrate_views: Skipping view migration as requested.")
         self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'views migration', 'success': True, 'message': 'finished OK'})
 
+    def comment_object_was_created(self, object_data, description):
+        """
+        Whether the object a comment belongs to is there to carry it.
+
+        An object whose own migration failed has no comment to set, and reporting that as a
+        failed comment counts one defect twice - the view which could not be created is already
+        recorded as a failed view. It is skipped and said, not attempted and blamed.
+        """
+        if object_data.get('success') is False:
+            self.comments_skipped.append(
+                f"{description}: the object itself was not created, so it has nothing to carry "
+                f"a comment")
+            self.config_parser.print_log_message(
+                'INFO', f"orchestrator: run_migrate_comments: the comment of {description} is "
+                        f"not set - the object itself was not created.")
+            return False
+        return True
+
+    def set_comment(self, query, description):
+        """
+        One COMMENT ON statement, and what became of it.
+
+        Every comment is its own statement and its own answer. The whole phase used to stand in
+        one try/except: the first comment the target refused ended it, and every comment behind
+        it - the views, the user defined types - was never even attempted, while the summary
+        went on reporting all of them as migrated. A comment which cannot be set is worth a line
+        in the log and nothing more; it is not a reason to throw away the rest.
+        """
+        self.comments_attempted += 1
+        try:
+            self.target_connection.execute_query(query)
+            self.comments_succeeded += 1
+            return True
+        except Exception as e:
+            self.comments_failed.append(f"{description}: {first_line(e)}")
+            self.config_parser.print_log_message(
+                'WARNING', f"orchestrator: run_migrate_comments: the comment of {description} "
+                           f"could not be set: {first_line(e)}. The migration goes on - a comment "
+                           f"is not data.")
+            ## the failed statement left the session in an aborted transaction on PostgreSQL,
+            ## and every statement behind it would answer 'current transaction is aborted'
+            try:
+                self.target_connection.connection.rollback()
+            except Exception:
+                pass
+            return False
+
     def stdwf_migrate_comments(self):
         self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'comments migration'})
         self.config_parser.print_log_message('INFO', "orchestrator: run_migrate_comments: Migrating comments.")
         all_tables = self.migrator_tables.fetch_all_tables()
         self.target_connection.connect()
         use_aliases_as_target_names = self.config_parser.get_use_aliases_as_target_names()
+        self.comments_attempted = 0
+        self.comments_succeeded = 0
+        self.comments_failed = []
+        self.comments_skipped = []
 
         try:
             for table_detail in all_tables:
@@ -2685,7 +2737,7 @@ class Orchestrator:
                     IS '{safe_table_comment}'"""
                     self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_comments: Setting comment for table {table_data['target_table_name']} in target database.")
                     self.config_parser.print_log_message( 'DEBUG', f"orchestrator: run_migrate_comments: Executing comment query: {query}")
-                    self.target_connection.execute_query(query)
+                    self.set_comment(query, f"table {table_data['target_table_name']}")
 
                 for col in table_data['target_columns'].keys():
                     column_comment = table_data['target_columns'][col]['column_comment']
@@ -2699,7 +2751,7 @@ class Orchestrator:
                         IS '{safe_column_comment}'"""
                         self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_comments: Setting comment for column {table_data['target_columns'][col]['column_name']} in target database.")
                         self.config_parser.print_log_message( 'DEBUG', f"orchestrator: run_migrate_comments: Executing comment query: {query}")
-                        self.target_connection.execute_query(query)
+                        self.set_comment(query, f"column {target_table_name}.{table_data['target_columns'][col]['column_name']}")
 
             all_indexes = self.migrator_tables.fetch_all_indexes()
             for index_detail in all_indexes:
@@ -2714,7 +2766,8 @@ class Orchestrator:
                     IS '{safe_index_comment}'"""
                     self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_comments: Setting comment for index {index_name} in target database.")
                     self.config_parser.print_log_message( 'DEBUG', f"orchestrator: run_migrate_comments: Executing comment query: {query}")
-                    self.target_connection.execute_query(query)
+                    if self.comment_object_was_created(index_data, f"index {index_name}"):
+                        self.set_comment(query, f"index {index_name}")
 
             all_constraints = self.migrator_tables.fetch_all_constraints()
             for constraint_detail in all_constraints:
@@ -2735,7 +2788,8 @@ class Orchestrator:
                     IS '{safe_constraint_comment}'"""
                     self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_comments: Setting comment for constraint {constraint_data['constraint_name']} in target database.")
                     self.config_parser.print_log_message( 'DEBUG', f"orchestrator: run_migrate_comments: Executing comment query: {query}")
-                    self.target_connection.execute_query(query)
+                    if self.comment_object_was_created(constraint_data, f"constraint {constraint_name} on {target_table_name}"):
+                        self.set_comment(query, f"constraint {constraint_name} on {target_table_name}")
 
             all_triggers = self.migrator_tables.fetch_all_triggers()
             for trigger_detail in all_triggers:
@@ -2743,12 +2797,23 @@ class Orchestrator:
                 if trigger_data['trigger_comment']:
                     # Escape single quotes in the comment to prevent SQL injection
                     safe_trigger_comment = trigger_data['trigger_comment'].replace("'", "''")
-                    query = f"""COMMENT ON TRIGGER
-                    "{trigger_data['target_schema_name']}"."{self.config_parser.convert_names_case(trigger_data['trigger_name'])}"
+                    # A trigger is not addressed the way a table is. COMMENT ON TRIGGER takes
+                    # the BARE name of the trigger and the table it stands on - a trigger is
+                    # not a schema object of its own, it belongs to its table, and two tables
+                    # may carry triggers of one name. Writing it "schema"."trigger", which is
+                    # what this did, is a syntax error at the dot, and it took every comment
+                    # behind it in this phase with it.
+                    target_trigger_name = (trigger_data.get('target_trigger_name')
+                                           or self.config_parser.convert_names_case(trigger_data['trigger_name']))
+                    target_table_name = (trigger_data.get('target_table_name')
+                                         or trigger_data['source_table_name'])
+                    query = f"""COMMENT ON TRIGGER "{target_trigger_name}"
+                    ON "{trigger_data['target_schema_name']}"."{self.config_parser.convert_names_case(target_table_name)}"
                     IS '{safe_trigger_comment}'"""
                     self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_comments: Setting comment for trigger {trigger_data['trigger_name']} in target database.")
                     self.config_parser.print_log_message( 'DEBUG', f"orchestrator: run_migrate_comments: Executing comment query: {query}")
-                    self.target_connection.execute_query(query)
+                    if self.comment_object_was_created(trigger_data, f"trigger {target_trigger_name} on {target_table_name}"):
+                        self.set_comment(query, f"trigger {target_trigger_name} on {target_table_name}")
 
             all_views = self.migrator_tables.fetch_all_views()
             for view_detail in all_views:
@@ -2768,7 +2833,8 @@ class Orchestrator:
                     IS '{safe_view_comment}'"""
                     self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_comments: Setting comment for view {target_view_name} in target database.")
                     self.config_parser.print_log_message( 'DEBUG', f"orchestrator: run_migrate_comments: Executing comment query: {query}")
-                    self.target_connection.execute_query(query)
+                    if self.comment_object_was_created(view_data, f"{view_object_type.lower()} {target_view_name}"):
+                        self.set_comment(query, f"{view_object_type.lower()} {target_view_name}")
 
             all_user_defined_types = self.migrator_tables.fetch_all_user_defined_types()
             for type_detail in all_user_defined_types:
@@ -2776,16 +2842,43 @@ class Orchestrator:
                 if type_data['type_comment']:
                     # Escape single quotes in the comment to prevent SQL injection
                     safe_type_comment = type_data['type_comment'].replace("'", "''")
+                    ## The row of a user defined type has no 'type_name' - it has
+                    ## source_type_name and target_type_name, and reading a key which is not
+                    ## there raised KeyError and ended the whole phase. It was never noticed,
+                    ## because the trigger comments above it ended the phase first.
+                    target_type_name = (type_data.get('target_type_name')
+                                        or self.config_parser.convert_names_case(type_data['source_type_name']))
                     query = f"""COMMENT ON TYPE
-                    "{type_data['target_schema_name']}"."{self.config_parser.convert_names_case(type_data['type_name'])}"
+                    "{type_data['target_schema_name']}"."{target_type_name}"
                     IS '{safe_type_comment}'"""
-                    self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_comments: Setting comment for user defined type {type_data['type_name']} in target database.")
+                    self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_comments: Setting comment for user defined type {target_type_name} in target database.")
                     self.config_parser.print_log_message( 'DEBUG', f"orchestrator: run_migrate_comments: Executing comment query: {query}")
-                    self.target_connection.execute_query(query)
+                    if self.comment_object_was_created(type_data, f"type {target_type_name}"):
+                        self.set_comment(query, f"type {target_type_name}")
 
             self.target_connection.disconnect()
-            self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'comments migration', 'success': True, 'message': 'finished OK'})
-            self.config_parser.print_log_message('INFO', "orchestrator: run_migrate_comments: Comments migrated successfully.")
+            ## What the phase really did, in the shape P2-7 gave every other phase: a comment
+            ## which was refused is named, and the phase does not report success over it.
+            self.migrator_tables.comments_result = {
+                'attempted': self.comments_attempted,
+                'succeeded': self.comments_succeeded,
+                'failed': len(self.comments_failed),
+            }
+            self.migrator_tables.comments_result['skipped'] = len(self.comments_skipped)
+            for skipped in self.comments_skipped:
+                self.config_parser.print_log_message(
+                    'INFO', f"orchestrator: run_migrate_comments: not set - {skipped}")
+            if self.comments_failed:
+                for failure in self.comments_failed:
+                    self.config_parser.print_log_message(
+                        'WARNING', f"orchestrator: run_migrate_comments: NOT set - {failure}")
+                message = (f"finished, but {len(self.comments_failed)} of "
+                           f"{self.comments_attempted} comments FAILED - see the log for which")
+                self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'comments migration', 'success': False, 'message': message})
+                self.config_parser.print_log_message('WARNING', f"orchestrator: run_migrate_comments: {message}.")
+            else:
+                self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'comments migration', 'success': True, 'message': 'finished OK'})
+                self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_comments: {self.comments_succeeded} comment(s) migrated successfully.")
         except Exception as e:
             self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'comments migration', 'success': False, 'message': f'ERROR: {e}'})
             self.handle_error(e, 'migrate_comments')

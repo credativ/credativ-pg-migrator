@@ -110,6 +110,10 @@ class MigratorTables:
             raise ValueError("The schema of the migrator metadata (migrator -> schema) cannot be 'public' - it is dropped with everything in it at the start of every run.")
         self.protocol_connection.connect()
         self.drop_table_sql = """DROP TABLE IF EXISTS "{protocol_schema}"."{table_name}";"""
+        ## What the comments phase did, recorded by it and read by the summary. None means the
+        ## phase has not run - which the summary says, rather than reporting a count it does
+        ## not have.
+        self.comments_result = None
 
     def create_all(self):
         self.create_protocol()
@@ -3493,7 +3497,16 @@ class MigratorTables:
             'index_sql': row[11],
             'index_columns': row[12],
             'index_comment': row[13],
-            'is_function_based': row[14]
+            'is_function_based': row[14],
+            'task_created': row[15],
+            'task_started': row[16],
+            'task_completed': row[17],
+            ## what became of the index itself. The decoder stopped at is_function_based, so
+            ## every caller which asked whether the index had been created got None - and a
+            ## comment on an index which was never created was attempted and reported as a
+            ## failed comment, counting one defect twice.
+            'success': row[18],
+            'message': row[19],
         }
 
     def decode_funcproc_row(self, row):
@@ -3579,7 +3592,18 @@ class MigratorTables:
             'target_view_alias': row[7],
             'target_view_sql': row[8],
             'alias_view': row[9],
-            'view_comment': row[10]
+            'view_comment': row[10],
+            'task_created': row[11],
+            'task_started': row[12],
+            'task_completed': row[13],
+            ## what became of the view itself. The decoder stopped at the comment, so every
+            ## caller which asked whether the view had been created got None - and a comment on
+            ## a view which was never created was attempted and reported as a failed comment,
+            ## counting one defect twice.
+            'success': row[14],
+            'message': row[15],
+            'final_valid': row[16],
+            'final_valid_message': row[17],
         }
 
     def insert_protocol(self, settings):
@@ -5025,9 +5049,33 @@ class MigratorTables:
             except Exception:
                 self.protocol_connection.connection.rollback()
 
-            success_str = str(comments_total) if not self.config_parser.is_dry_run() else '-'
-            failed_str = '0' if not self.config_parser.is_dry_run() else '-'
-            lines.append(f"{'Comments':<24} | {comments_total:>6} | {success_str:>7} | {failed_str:>6} | ")
+            ## What the phase really did. This row used to read `success = every comment the
+            ## protocol holds, failed = 0` whatever had happened - so a comments phase which
+            ## ended on the first statement the target refused, and set none of the comments
+            ## behind it, was reported as having set all of them. The phase records its own
+            ## tally now; where it did not run there is nothing to report and the row says so.
+            result = self.comments_result
+            if self.config_parser.is_dry_run():
+                success_str, failed_str, details = '-', '-', ''
+            elif result is None:
+                success_str, failed_str = '?', '?'
+                details = 'the comments phase did not run'
+            else:
+                success_str = str(result['succeeded'])
+                failed_str = str(result['failed'])
+                notes = []
+                if result['failed']:
+                    notes.append(f"{result['failed']} refused by the target - see the log")
+                if result.get('skipped'):
+                    notes.append(f"{result['skipped']} not set: their object was not created")
+                ## the total counts every comment the protocol holds, and this phase is not
+                ## responsible for all of them - the comment of a routine, a collation and a
+                ## text search object is set with the object itself
+                elsewhere = comments_total - result['attempted'] - result.get('skipped', 0)
+                if elsewhere > 0:
+                    notes.append(f"{elsewhere} set with their own object")
+                details = ', '.join(notes)
+            lines.append(f"{'Comments':<24} | {comments_total:>6} | {success_str:>7} | {failed_str:>6} | {details}")
         except Exception:
             self.protocol_connection.connection.rollback()
 

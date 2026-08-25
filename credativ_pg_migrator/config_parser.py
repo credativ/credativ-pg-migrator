@@ -19,6 +19,7 @@ import fnmatch
 import json
 import yaml
 from credativ_pg_migrator.constants import MigratorConstants
+from credativ_pg_migrator import text_decoding
 import re
 import csv
 from datetime import datetime, date, timedelta
@@ -57,8 +58,12 @@ class ConfigParser:
     CASE_INSENSITIVE_SETTINGS = (
         ('pattern_syntax',),
         ('migration', 'names_case_handling'),
+        ('migration', 'on_undecodable_bytes'),
         ('migration', 'packages_as'),
         ('migration', 'validate_objects'),
+        ('query_conversion', 'source_test'),
+        ('query_conversion', 'target_test'),
+        ('query_conversion', 'output', 'sidecar'),
     )
 
     @classmethod
@@ -185,6 +190,12 @@ class ConfigParser:
         if names_case_handling not in ['lower', 'upper', 'keep']:
             raise ValueError(f"Invalid names_case_handling in the config file: {names_case_handling}. Must be one of 'lower', 'upper', or 'keep'.")
 
+        on_undecodable_bytes = self.get_on_undecodable_bytes_action()
+        if on_undecodable_bytes not in text_decoding.POLICIES:
+            raise ValueError(
+                f"Invalid on_undecodable_bytes in the config file: {on_undecodable_bytes}. "
+                f"Must be one of {', '.join(repr(policy) for policy in text_decoding.POLICIES)}.")
+
         pattern_syntax = self.get_pattern_syntax()
         configured_syntax = self.config.get('pattern_syntax', None)
         if configured_syntax is not None and self.resolve_standard_value(
@@ -214,6 +225,17 @@ class ConfigParser:
             for entry in data_types_substitution:
                 if not isinstance(entry, (list, tuple)) or len(entry) != 5:
                     raise ValueError("Please update your config file. Each entry in data_types_substitution must have 5 elements - [table_name, column_name, source_type, target_type, comment].")
+
+        ## Read, echoed into the mapping report and applied to nothing. Saying so at the
+        ## start is the difference between a setting which does nothing and a setting which
+        ## looks as though it had worked - the report shows the entries either way.
+        forced_column_mappings = self.get_forced_column_mappings()
+        if forced_column_mappings:
+            self.print_log_message('WARNING',
+                f"config_parser: validate_config: mapping.forced_column_mappings names "
+                f"{len(forced_column_mappings)} column pair(s), which are NOT applied to the column "
+                f"matching - they are only written into the mapping report. Correct a column match "
+                f"with mapping.heuristics, or by renaming the column in the target.")
 
         self.validate_schema_names()
         self.validate_anonymization_config()
@@ -1045,6 +1067,29 @@ class ConfigParser:
     def get_on_error_action(self):
         return (self.config.get('migration') or {}).get('on_error', 'stop')
 
+    def get_on_undecodable_bytes_action(self):
+        """
+        What happens to a value the encodings expected for it cannot read.
+
+        The decision itself, and why deleting the byte is not one of the acceptable answers,
+        is in credativ_pg_migrator/text_decoding.py, which is the only place which applies it.
+        """
+        return str((self.config.get('migration') or {}).get(
+            'on_undecodable_bytes', text_decoding.DEFAULT_POLICY)).strip().lower()
+
+    def data_file_decoder(self, input_data_file, character_set):
+        """
+        The decoder of one exported data file, whose encoding the data source declares.
+
+        There is nothing to try here and therefore nothing to detect: `character_set` is what
+        the file was said to be written in, so a byte which does not fit it means the
+        declaration is wrong or the file is damaged. Both CSV readers used errors='replace'
+        for those, which writes U+FFFD into the converted file and from there into the target
+        as if it were the data. What happens instead is migration.on_undecodable_bytes - see
+        credativ_pg_migrator/text_decoding.py - and its default keeps every byte.
+        """
+        return text_decoding.TextDecoder(self, 'config_parser', encodings=(character_set,))
+
     def get_pre_migration_script(self):
         return (self.config.get('migration') or {}).get('pre_migration_script', None)
 
@@ -1103,6 +1148,98 @@ class ConfigParser:
 
     def get_validation_constraints_name(self):
         return "validation_constraints"
+
+    def get_config_directory(self):
+        """
+        The directory the configuration file stands in. Every relative path of the
+        configuration is resolved against it and not against the working directory, so a run
+        started from anywhere reads the same files.
+        """
+        return os.path.dirname(os.path.abspath(self.args.config))
+
+    ## Conversion of the SELECT statements an application holds as text - the step which
+    ## runs after a migration and answers which of them still work on the target.
+    def get_query_conversion_config(self):
+        return (self.config.get('query_conversion') or {})
+
+    def is_query_conversion_enabled(self):
+        return bool(self.get_query_conversion_config().get('enabled', False))
+
+    def should_run_query_conversion_after_migration(self):
+        return bool(self.get_query_conversion_config().get('run_after_migration', False))
+
+    def get_query_conversion_input(self):
+        patterns = self.get_query_conversion_config().get('input') or []
+        return [patterns] if isinstance(patterns, str) else list(patterns)
+
+    def get_query_conversion_encoding(self):
+        return self.get_query_conversion_config().get('encoding', 'utf-8')
+
+    def get_query_conversion_statement_separator(self):
+        return self.get_query_conversion_config().get('statement_separator', 'auto')
+
+    def get_query_conversion_parameter_style(self):
+        return self.get_query_conversion_config().get('parameter_style', 'auto')
+
+    def get_query_conversion_parameter_output(self):
+        return self.get_query_conversion_config().get('parameter_output', 'original')
+
+    def get_query_conversion_source_test(self):
+        # 'off', written unquoted, reaches this as False - see resolve_off_on_value().
+        settings = self.get_query_conversion_config()
+        if 'source_test' not in settings:
+            return 'prepare'
+        return self.resolve_off_on_value(settings.get('source_test'),
+                                         self.QUERY_CONVERSION_SOURCE_TEST_STANDARD,
+                                         self.QUERY_CONVERSION_SOURCE_TEST_ALIASES, 'prepare')
+
+    def get_query_conversion_target_test(self):
+        # 'off', written unquoted, reaches this as False - see resolve_off_on_value().
+        settings = self.get_query_conversion_config()
+        if 'target_test' not in settings:
+            return 'explain'
+        return self.resolve_off_on_value(settings.get('target_test'),
+                                         self.QUERY_CONVERSION_TARGET_TEST_STANDARD,
+                                         self.QUERY_CONVERSION_TARGET_TEST_ALIASES, 'explain')
+
+    def get_query_conversion_timeout(self):
+        return self.get_query_conversion_config().get('timeout', '30s')
+
+    def get_query_conversion_workers(self):
+        return int(self.get_query_conversion_config().get('workers', 4))
+
+    def get_query_conversion_on_error(self):
+        return self.get_query_conversion_config().get('on_error', 'continue')
+
+    def get_query_conversion_output(self):
+        return self.get_query_conversion_config().get('output') or {}
+
+    def get_query_conversion_output_directory(self):
+        return self.get_query_conversion_output().get('directory', '')
+
+    def get_query_conversion_output_prefix(self):
+        return self.get_query_conversion_output().get('prefix', '')
+
+    def get_query_conversion_output_suffix(self):
+        return self.get_query_conversion_output().get('suffix', '_pg')
+
+    def get_query_conversion_output_overwrite(self):
+        return bool(self.get_query_conversion_output().get('overwrite', False))
+
+    def get_query_conversion_output_include_original(self):
+        return bool(self.get_query_conversion_output().get('include_original', True))
+
+    def get_query_conversion_output_sidecar(self):
+        # 'off', written unquoted, reaches this as False - see resolve_off_on_value().
+        output = self.get_query_conversion_output()
+        if 'sidecar' not in output:
+            return 'json'
+        return self.resolve_off_on_value(output.get('sidecar'),
+                                         self.QUERY_CONVERSION_SIDECAR_STANDARD,
+                                         self.QUERY_CONVERSION_SIDECAR_ALIASES, 'json')
+
+    def get_protocol_name_queries(self):
+        return f"{self.get_protocol_name()}_queries"
 
     def get_validation_config(self):
         return (self.config.get('validation') or {})
@@ -1187,6 +1324,29 @@ class ConfigParser:
         'false': 'off', 'no': 'off', 'none': 'off', 'skip': 'off',
     }
 
+    ## Both of these take the word 'off', which PyYAML reads as the boolean False - see
+    ## resolve_off_on_value() for why they need aliases at all.
+    QUERY_CONVERSION_SOURCE_TEST_STANDARD = ('off', 'prepare')
+    QUERY_CONVERSION_SOURCE_TEST_ALIASES = {
+        'true': 'prepare', 'yes': 'prepare', 'on': 'prepare',
+        ## the strategy calls the level 'prepare' and the mechanisms behind it parse - a
+        ## configuration which wrote the verb rather than the value means the same thing
+        'parse': 'prepare',
+        'false': 'off', 'no': 'off', 'none': 'off', 'skip': 'off',
+    }
+
+    QUERY_CONVERSION_TARGET_TEST_STANDARD = ('off', 'parse', 'explain')
+    QUERY_CONVERSION_TARGET_TEST_ALIASES = {
+        'true': 'explain', 'yes': 'explain', 'on': 'explain',
+        'false': 'off', 'no': 'off', 'none': 'off', 'skip': 'off',
+    }
+
+    QUERY_CONVERSION_SIDECAR_STANDARD = ('json', 'csv', 'off')
+    QUERY_CONVERSION_SIDECAR_ALIASES = {
+        'true': 'json', 'yes': 'json', 'on': 'json',
+        'false': 'off', 'no': 'off', 'none': 'off', 'skip': 'off',
+    }
+
     PACKAGES_AS_STANDARD = ('functions', 'schemas')
     PACKAGES_AS_ALIASES = {
         'function': 'functions', 'prefixed_functions': 'functions', 'prefix': 'functions',
@@ -1205,6 +1365,28 @@ class ConfigParser:
         if text in standard_values:
             return text
         return aliases.get(text)
+
+    @classmethod
+    def resolve_off_on_value(cls, value, standard_values, aliases, on_value):
+        """
+        The standard value a written value stands for, for a setting whose values include
+        the word 'off'.
+
+        The configuration is read with PyYAML, which follows YAML 1.1: an unquoted off, on,
+        yes and no are the booleans False and True there, not the words they were written
+        as. A setting which takes 'off' therefore has to read False as 'off' - otherwise
+        the documented value, written the way it reads best, is refused at the start of the
+        run. True stands for the value the setting has when it is on, and a key left empty
+        asks for nothing and is 'off' as well.
+
+        A value which is neither a standard value nor an alias is returned unchanged, so
+        that the code which uses it names it in its own message.
+        """
+        if value is None or value is False:
+            return 'off'
+        if value is True:
+            return on_value
+        return cls.resolve_standard_value(value, standard_values, aliases) or value
 
     OBJECT_FILTER_KEYS = {
         'table':    ('include_tables', 'exclude_tables'),
@@ -2256,7 +2438,12 @@ class ConfigParser:
         rows_read = 0
         processing_start_time = datetime.now()
 
-        with open(input_csv_data_file, 'r', encoding=character_set, errors='replace', newline='') as infile:
+        decoder = self.data_file_decoder(input_csv_data_file, character_set)
+        ## the pass which reads the file to work out the date order is named apart from the
+        ## conversion, so that the same file is not reported twice as if it were two
+        place = f'{os.path.basename(input_csv_data_file)} (working out the date order)'
+        with decoder.open_text(input_csv_data_file, character_set, place=place,
+                               newline='') as infile:
             if reader_quoting is None:
                 reader = csv.reader(infile, delimiter=csv_delimiter)
             else:
@@ -2284,6 +2471,7 @@ class ConfigParser:
                     if narrowed != remaining and len(narrowed) == 1:
                         deciding[column_index] = field
                     candidates[column_index] = narrowed
+        decoder.log_summary()
 
         resolved = {}
         for column_index, remaining in candidates.items():
@@ -2403,7 +2591,8 @@ class ConfigParser:
                 self.print_log_message('WARNING',
                     "config_parser: convert_csv_to_utf8: This Python cannot distinguish an unquoted empty CSV field from a quoted one (csv.QUOTE_NOTNULL needs Python 3.12). An empty field is migrated as an empty string, which a column that is not text refuses - Python 3.12 or newer is needed for such a file.")
 
-            with open(input_csv_data_file, 'r', encoding=character_set, errors='replace', newline='') as infile, \
+            decoder = self.data_file_decoder(input_csv_data_file, character_set)
+            with decoder.open_text(input_csv_data_file, character_set, newline='') as infile, \
                  open(output_csv_data_file, 'w', encoding='utf-8', newline='') as outfile:
 
                 if reader_quoting is None:
@@ -2519,6 +2708,8 @@ class ConfigParser:
                     writer.writerow(processed_row)
                     counter += 1
 
+            ## what of the file did not fit the encoding it was declared to be written in
+            decoder.log_summary()
             self.print_log_message('INFO', f"config_parser: convert_csv_to_utf8: Processed {counter} lines from {input_csv_data_file} and wrote to {output_csv_data_file} - source file size: {source_file_size} - processing time: {datetime.now() - processing_start_time}")
             if converted_temporal_values:
                 self.print_log_message('INFO',

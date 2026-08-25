@@ -14,7 +14,8 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-from credativ_pg_migrator.database_connector import DatabaseConnector
+from credativ_pg_migrator.database_connector import DatabaseConnector, first_line
+from credativ_pg_migrator.connectors.db2_query_conversion import Db2QueryConversion
 from credativ_pg_migrator.migrator_logging import MigratorLogger
 from credativ_pg_migrator.migrator_tables import MigratorTables
 import psycopg2
@@ -25,7 +26,25 @@ import glob
 import re
 import sqlglot
 
-class IbmDb2ZosConnector(DatabaseConnector):
+class IbmDb2ZosConnector(Db2QueryConversion, DatabaseConnector):
+
+    ## Measured for P3-2: the header and the parameters are converted, and the body carries the
+    ## names the routine of the source wrote - only the schema in front of them is re-pointed.
+    ROUTINE_BODY_NAMES_NOT_CONVERTED = (
+        'the tables and the columns inside the body are named as the routine of the source '
+        'named them - only the schema in front of them is re-pointed. They are written '
+        'without quotes, so PostgreSQL folds them to lower case')
+
+    ## What this connector does not read out of Db2 for z/OS - see
+    ## DatabaseConnector.OBJECT_KINDS_NOT_READ.
+    OBJECT_KINDS_NOT_READ = {
+        'user_defined_types': ('Db2 for z/OS has distinct types (CREATE DISTINCT TYPE), kept in '
+                               'SYSIBM.SYSDATATYPES. This connector does not read them.'),
+    }
+    OBJECT_KINDS_ABSENT = {
+        'domains': ('Db2 has no CREATE DOMAIN - a distinct type is what is used instead, and it '
+                    'belongs to the user defined types above.'),
+    }
     def __init__(self, config_parser, source_or_target):
         if source_or_target != 'source':
             raise ValueError("IBM DB2 z/OS is only supported as a source database")
@@ -761,63 +780,6 @@ class IbmDb2ZosConnector(DatabaseConnector):
         self.config_parser.print_log_message('INFO', "ibm_db2_zos_connector: parse_ddl_files: DDL parsing completed and unified protocol tables populated with DB2 source metadata.")
 
 
-    def get_sql_functions_mapping(self, settings):
-        target_db_type = settings['target_db_type']
-        if target_db_type == 'postgresql':
-            return {
-                # --- Special Registers (Session Variables) ---
-                "CURRENT SQLID": "CURRENT_USER",
-                "CURRENT USER": "CURRENT_USER",
-                "USER": "SESSION_USER",          # SESSION_USER tracks the original login role
-                "CURRENT DATE": "CURRENT_DATE",
-                "CURRENT TIME": "CURRENT_TIME",
-                "CURRENT TIMESTAMP": "CURRENT_TIMESTAMP",
-                "CURRENT SCHEMA": "CURRENT_SCHEMA",
-                "CURRENT SERVER": "current_database()",
-
-                # --- Null Handling & Control Flow ---
-                "VALUE(": "COALESCE(",
-                "IFNULL(": "COALESCE(",
-                "NVL(": "COALESCE(",
-                ## "DECODE(expr, search, result, default)": "CASE expr WHEN search THEN result ELSE default END",
-
-                # --- String Functions ---
-                "SUBSTR(": "SUBSTRING(",
-                "POSSTR(": "STRPOS(",       # DB2's POSSTR takes (source, search)
-                "LOCATE(": "POSITION(", # DB2's LOCATE takes (search, source)
-                "UCASE(": "UPPER(",
-                "LCASE(": "LOWER(",
-                "STRIP(": "TRIM(",
-                "LENGTH(": "LENGTH(",
-                "CONCAT(": "CONCAT(",                 # Or simply use the str1 || str2 operator
-
-                # --- Date and Time Functions ---
-                "YEAR(": "EXTRACT(YEAR FROM ",
-                "MONTH(": "EXTRACT(MONTH FROM ",
-                "DAY(": "EXTRACT(DAY FROM ",
-                "HOUR(": "EXTRACT(HOUR FROM ",
-                "MINUTE(": "EXTRACT(MINUTE FROM ",
-                "SECOND(": "EXTRACT(SECOND FROM ",
-
-                # Db2 DAYS() returns the integer number of days since Jan 1, 0001.
-                # To replicate this exact integer in Postgres, you subtract that date from your column.
-                ## "DAYS(date_col)": "(date_col::DATE - '0001-01-01'::DATE)",
-
-                # "DATE(expr)": "expr::DATE",                                 # Or CAST(expr AS DATE)
-                # "TIMESTAMP(expr)": "expr::TIMESTAMP",                       # Or CAST(expr AS TIMESTAMP)
-                # "ADD_DAYS(date_col, n)": "date_col + (n || ' days')::INTERVAL",
-                # "ADD_MONTHS(date_col, n)": "date_col + (n || ' months')::INTERVAL",
-
-                # --- Math & Numeric Functions ---
-                "CEILING(": "CEIL(",
-                "TRUNCATE(": "TRUNC(",
-                "RAND()": "RANDOM()",
-                "DECFLOAT(": "num::NUMERIC",                            # PostgreSQL uses NUMERIC for arbitrary precision
-            }
-        else:
-            self.config_parser.print_log_message('ERROR', f"ibm_db2_zos_connector: get_sql_functions_mapping: Unsupported target database type: {target_db_type}")
-            return {}
-
     def fetch_table_names(self, table_schema: str):
         return self.fetch_all_tables(table_schema)
 
@@ -1533,7 +1495,7 @@ class IbmDb2ZosConnector(DatabaseConnector):
         # Target Generation
         target_table_name = self.config_parser.convert_names_case(target_table_name)
         converted_trigger_name = self.config_parser.convert_names_case(trigger_name)
-        func_name = f"{converted_trigger_name}_func"
+        func_name = self.config_parser.convert_names_case(f"{converted_trigger_name}_func")
 
         if for_each_scope == 'STATEMENT' or timing == 'AFTER':
             return_stmt = "RETURN NULL;"
@@ -2127,7 +2089,19 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
             return 'NULL'
         return extracted_default_value
 
-    def convert_view_code(self, settings: dict):
+    def convert_statement_code(self, settings: dict):
+        """
+        One statement of the source converted for PostgreSQL, without a wrapper around it.
+
+        This is the conversion the query of a view is given - LISTAGG, the functions of Db2,
+        the special registers written without parentheses, the labelled durations, the
+        isolation clause and the optimizer hints of z/OS, and the names of the target schema.
+        It is used for the query of a view and for a statement of an application; 'view_code'
+        carries the statement.
+
+        Raises ValueError when the statement cannot be parsed. The error carries the text as
+        far as the conversion got in its 'partial_code' attribute.
+        """
 
         def convert_identifier_case(name, quoted):
             """
@@ -2223,6 +2197,11 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
             return node
 
         def replace_functions(node):
+            ## YEAR(x) and its siblings are nodes of their own, not a function call carrying a
+            ## name - the mapping below cannot reach them
+            extracted = self.db2_date_part_to_extract(node)
+            if extracted is not node:
+                return extracted
             mapping = self.get_sql_functions_mapping({ 'target_db_type': settings['target_db_type'] })
             func_name_map = {}
             for k, v in mapping.items():
@@ -2355,6 +2334,10 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                 converted_code,
             )
             converted_code = self.convert_db2_operators(converted_code)
+            ## the special registers, labelled durations, isolation clause, the optimizer
+            ## hints and the other constructs which no PostgreSQL parser can read - see
+            ## db2_query_conversion.py
+            converted_code = self.prepare_query_for_parsing(converted_code)
 
             sql_functions_mapping = self.get_sql_functions_mapping({ 'target_db_type': settings['target_db_type'] })
             if sql_functions_mapping:
@@ -2372,16 +2355,21 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                 # adding explicit NULLS FIRST / NULLS LAST which inverts the original ordering.
                 parsed_code = sqlglot.parse_one(converted_code, read="postgres")
             except Exception as e:
-                self.config_parser.print_log_message('ERROR', f"ibm_db2_zos_connector: convert_view_code: Error parsing View code: {e}")
-                # Fallback to the unparsed converted_code instead of empty string to avoid crashes
-                return converted_code + check_option
+                ## no conversion of a statement which could not be read - what the caller does
+                ## with that is the caller's decision, and nothing here answers with a text
+                ## which was not converted as if it had been
+                error = ValueError(f"the statement could not be parsed: {first_line(e)}")
+                error.partial_code = converted_code + check_option
+                raise error
 
             # sqlglot does not raise on unknown syntax - it silently falls back to a plain
             # Command node. All transformations below would then be no-ops and the untranslated
             # DB2 code would be handed over to the target database, so this is reported here.
             if isinstance(parsed_code, sqlglot.exp.Command):
-                self.config_parser.print_log_message('ERROR', f"ibm_db2_zos_connector: convert_view_code: View code contains syntax unsupported by the SQL parser, it is left unconverted: {converted_code}")
-                return converted_code + check_option
+                error = ValueError("the SQL parser does not model this statement of Db2 for z/OS, "
+                                   "so none of the conversion was applied to it")
+                error.partial_code = converted_code + check_option
+                raise error
 
             parsed_code = parsed_code.transform(quote_column_names)
             parsed_code = parsed_code.transform(convert_string_concatenation)
@@ -2398,6 +2386,20 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
             self.config_parser.print_log_message('ERROR', f"ibm_db2_zos_connector: convert_view_code: Unsupported target database type: {settings['target_db_type']}")
 
         return converted_code
+
+    def convert_view_code(self, settings: dict):
+        """
+        The query of a view, converted for the target.
+
+        A statement which cannot be parsed keeps the text of the source, exactly as before:
+        the view is reported as failed by the migration and its source code stays readable
+        in the protocol.
+        """
+        try:
+            return self.convert_statement_code(settings)
+        except ValueError as e:
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_zos_connector: convert_view_code: {e}")
+            return getattr(e, 'partial_code', settings['view_code'])
 
     def get_sequence_current_value(self, sequence_id: int):
         return 0

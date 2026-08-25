@@ -37,6 +37,10 @@ class Orchestrator:
         self.on_error_action = self.config_parser.get_on_error_action()
         self.source_schema_name = self.config_parser.get_source_schema()
         self.target_schema_name = self.config_parser.get_target_schema()
+        ## The phase row the orchestrator opens for itself, and closes at the end of run(). A
+        ## resumed run opened 'Resume after crash' and closed '' - a row it had never opened -
+        ## so the resume was never closed and the closing update matched nothing at all. P2-7.
+        self.main_subtask = 'Resume after crash' if self.config_parser.is_resume_after_crash() else ''
         if self.config_parser.is_resume_after_crash():
             self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'Resume after crash'})
             self.config_parser.print_log_message('INFO', "orchestrator: __init__: #############################################################################")
@@ -115,14 +119,16 @@ class Orchestrator:
                     # Final validity pass: re-attempt failed objects (if configured) and mark
                     # which views / functions / triggers are valid at the end of the migration.
                     self.stdwf_validate_objects()
+
+                    self.stdwf_convert_queries()
                 else:
                     self.config_parser.print_log_message('INFO', "orchestrator: run: Dry run mode enabled. No data migration performed.")
 
                 self.config_parser.print_log_message('INFO', "orchestrator: run: Orchestration complete.")
-                self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': '', 'success': True, 'message': 'finished OK'})
+                self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': self.main_subtask, 'success': True, 'message': 'finished OK'})
 
             except Exception as e:
-                self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': '', 'success': False, 'message': f'ERROR: {e}'})
+                self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': self.main_subtask, 'success': False, 'message': f'ERROR: {e}'})
                 self.handle_error(e, 'orchestration')
 
         elif self.config_parser.is_mapping_workflow():
@@ -1901,9 +1907,18 @@ class Orchestrator:
             create_index_sql = index_data['index_sql']
 
             if not create_index_sql or not create_index_sql.strip():
-                self.migrator_tables.update_protocol_task_finished('indexes', index_data['id'], 'skipped (empty index)')
-                self.config_parser.print_log_message('WARNING', f"orchestrator: index_worker: Worker {worker_id}: Skipping creation of index {index_name} because its SQL is empty.")
-                return True
+                ## There is nothing to run: no CREATE INDEX statement could be built for this
+                ## index - its column list came out empty, or the expression it is built on
+                ## could not be converted. The index is therefore NOT in the target, and the
+                ## worker answers False for it: answering True let the caller overwrite this
+                ## very row with 'migrated OK' for an index which does not exist. P2-1.
+                not_created = ('not created - no CREATE INDEX statement could be built for it. '
+                               'Its column list came out empty, or the expression it is built '
+                               'on could not be converted to PostgreSQL. Create it by hand in '
+                               'the target if the queries need it.')
+                self.migrator_tables.update_protocol_task_finished('indexes', index_data['id'], not_created)
+                self.config_parser.print_log_message('WARNING', f"orchestrator: index_worker: Worker {worker_id}: Index '{index_name}' on table '{index_data.get('target_table_name', '')}' is {not_created}")
+                return False
 
             self.migrator_tables.update_protocol_task_started('indexes', index_data['id'])
             self.config_parser.print_log_message('INFO', f"orchestrator: index_worker: Worker {worker_id}: Creating index {index_name} in target database.")
@@ -2063,6 +2078,42 @@ class Orchestrator:
             self.handle_error(e, f"constraint_worker {worker_id} {constraint_name}")
             return False
 
+    def check_funcproc_name_collisions(self, funcproc_names):
+        """
+        Whether names_case_handling makes one routine of the target out of two of the source.
+
+        The planner checks every object it plans itself - see
+        planner.check_target_name_collisions(). The routines are read here instead, so they are
+        checked here, by the same rule and with the same answer: the run stops, and it stops
+        before the first of them has been converted or created.
+
+        Two routines of one name and different arguments are not a collision - PostgreSQL tells
+        those apart by their arguments as the source does, so the arguments are part of the
+        identity which is compared.
+        """
+        if not funcproc_names or self.config_parser.get_names_case_handling() == 'keep':
+            return
+        by_target = {}
+        for funcproc_data in funcproc_names.values():
+            name = funcproc_data.get('name')
+            if not name:
+                continue
+            identity = (self.config_parser.convert_names_case(name),
+                        funcproc_data.get('arguments') or '')
+            by_target.setdefault(identity, set()).add(name)
+        collisions = [f"{funcproc_type} {', '.join(sorted(sources))} of the source all become "
+                      f"\"{identity[0]}\""
+                      for identity, sources in by_target.items() if len(sources) > 1
+                      for funcproc_type in ('routines',)]
+        if collisions:
+            listed = '\n  - '.join(collisions)
+            raise ValueError(
+                f"names_case_handling is '{self.config_parser.get_names_case_handling()}', and it "
+                f"would make one routine of the target out of two or more of the source:\n"
+                f"  - {listed}\n"
+                f"The source tells them apart by the case of their letters and the target would "
+                f"not. Use names_case_handling: keep, or rename the routines which clash.")
+
     def stdwf_migrate_funcprocs(self):
         self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'functions/procedures migration'})
         include_funcprocs = self.config_parser.get_include_funcprocs()
@@ -2072,6 +2123,13 @@ class Orchestrator:
             self.config_parser.print_log_message('INFO', "orchestrator: run_migrate_funcprocs: Migrating functions and procedures.")
             funcproc_names = self.source_connection.fetch_funcproc_names(self.config_parser.get_source_schema())
             self.config_parser.print_log_message( 'DEBUG', f"orchestrator: run_migrate_funcprocs: Function/procedure names: {funcproc_names}")
+
+            ## The routines are planned here and not by the planner, so the collision check of
+            ## the planner never sees them. Case folding is not injective: a source holding
+            ## GET_TOTAL and Get_Total holds two routines, and with names_case_handling: lower
+            ## the second would be created over the first. Checked before any of them is
+            ## converted, so that a run which cannot come out right stops before it writes.
+            self.check_funcproc_name_collisions(funcproc_names)
 
             if funcproc_names:
                 for order_num, funcproc_data in funcproc_names.items():
@@ -2107,9 +2165,14 @@ class Orchestrator:
                             self.handle_error(e, 'fetching view names')
 
                         self.config_parser.print_log_message( 'DEBUG', f"orchestrator: run_migrate_funcprocs: Converting {funcproc_type} {funcproc_data['name']} code...")
+                        ## The routine is created with the name names_case_handling gives it -
+                        ## the COMMENT ON below has always used that spelling, so a routine used
+                        ## to be created under one name and commented under another, and the
+                        ## comment failed. 'source_funcproc_name' keeps the spelling of the
+                        ## source in the protocol.
                         converted_code = self.source_connection.convert_funcproc_code({
                             'funcproc_code': funcproc_code,
-                            'funcproc_name': funcproc_data['name'],
+                            'funcproc_name': self.config_parser.convert_names_case(funcproc_data['name']),
                             'target_db_type': self.config_parser.get_target_db_type(),
                             'source_schema_name': self.config_parser.get_source_schema(),
                             'target_schema_name': self.config_parser.get_target_schema(),
@@ -2118,6 +2181,33 @@ class Orchestrator:
                             'migrator_tables': self.migrator_tables,
                             'text_search_objects': self.migrator_tables.get_migrated_text_search_objects(),
                             })
+
+                        ## What the body of this routine keeps of the names it was written
+                        ## with. The statements inside a routine of the Transact-SQL family go
+                        ## through the statement converter one at a time and come out with the
+                        ## names of the target; the other sources hand the body over as text.
+                        ## That works with names_case_handling: lower, because PostgreSQL folds
+                        ## an undelimited name to lower case and that is what the migration
+                        ## created - and it fails with upper and with keep, where the routine is
+                        ## created without complaint and the first call answers `relation
+                        ## "orders" does not exist`. Measured per source for P3-2.
+                        body_names = self.source_connection.routine_body_names_not_converted()
+                        if body_names and converted_code and str(converted_code).strip():
+                            case_handling = self.config_parser.get_names_case_handling()
+                            if case_handling != 'lower':
+                                self.config_parser.print_log_message('WARNING',
+                                    f"orchestrator: run_migrate_funcprocs: {funcproc_type} "
+                                    f"{funcproc_data['name']}: {body_names}. With "
+                                    f"names_case_handling: {case_handling} the objects of the "
+                                    f"target are NOT spelled that way, so the routine is created "
+                                    f"without complaint and fails the first time it is called. "
+                                    f"Review the body before relying on it.")
+                            else:
+                                self.config_parser.print_log_message('DEBUG',
+                                    f"orchestrator: run_migrate_funcprocs: {funcproc_type} "
+                                    f"{funcproc_data['name']}: {body_names} - which resolves to "
+                                    f"the objects of the target because names_case_handling is "
+                                    f"lower.")
 
                         self.config_parser.print_log_message( 'DEBUG', "orchestrator: run_migrate_funcprocs: Checking for remote objects substitution in functions/procedures...")
                         rows = self.migrator_tables.get_records_remote_objects_substitution()
@@ -2264,6 +2354,29 @@ class Orchestrator:
         except Exception as e:
             self.handle_error(e, 'migrate_triggers')
 
+    def stdwf_convert_queries(self):
+        """
+        The closing step of a migration which was asked to convert the statements of an
+        application as well - query_conversion.run_after_migration.
+
+        It runs here, at the very end, because it reads the migrated objects: every converted
+        statement is tested against them. It never stops the migration - the data is migrated
+        by then, and a query file which cannot be read is not a reason to end the run with an
+        error - what it could not do is reported.
+        """
+        if not self.config_parser.is_query_conversion_enabled():
+            return
+        if not self.config_parser.should_run_query_conversion_after_migration():
+            self.config_parser.print_log_message('INFO', "orchestrator: stdwf_convert_queries: query_conversion.run_after_migration is false - the statements are converted by --convert-queries instead.")
+            return
+
+        try:
+            from credativ_pg_migrator.query_conversion import QueryConverter
+            self.config_parser.print_log_message('INFO', "orchestrator: stdwf_convert_queries: Converting the statements of the application.")
+            QueryConverter(self.config_parser, self.migrator_tables).run()
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"orchestrator: stdwf_convert_queries: The query conversion could not be carried out: {e}")
+
     def stdwf_validate_objects(self):
         """Final validity pass over migrated views, functions/procedures and triggers, run at
         the end of a standard migration (before the summary). An object whose creation failed
@@ -2281,7 +2394,7 @@ class Orchestrator:
             return
 
         self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'objects validation'})
-        self.config_parser.print_log_message('INFO', f"orchestrator: stdwf_validate_objects: Starting final object validity check (mode={mode}).")
+        self.config_parser.print_log_message('INFO', f"orchestrator: stdwf_validate_objects: Starting the closing object check (mode={mode}). It asks the catalogue of the target whether each migrated view, routine and trigger is THERE. That is not the same as doing what the object of the source did - a catalogue cannot say that - and it means different things for the three: see the message recorded with each object.")
         try:
             target_conn = self.load_connector('target')
             target_conn.connect()
@@ -2322,7 +2435,7 @@ class Orchestrator:
                     elif final_valid is False:
                         invalid += 1
                     # final_valid is None -> object was never created (no DDL); not counted.
-                self.config_parser.print_log_message('INFO', f"orchestrator: stdwf_validate_objects: {group_label} - valid: {valid}, invalid: {invalid}" + (f", re-created on retry: {retried}" if retried else ""))
+                self.config_parser.print_log_message('INFO', f"orchestrator: stdwf_validate_objects: {group_label} - in the target: {valid}, missing: {invalid}" + (f", re-created on retry: {retried}" if retried else ""))
 
             target_conn.disconnect()
             self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'objects validation', 'success': True, 'message': 'finished OK'})
@@ -2330,12 +2443,50 @@ class Orchestrator:
             self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'objects validation', 'success': False, 'message': f'ERROR: {e}'})
             self.handle_error(e, 'stdwf_validate_objects')
 
+    ## What the closing pass really establishes, per kind of object. It asks the catalogue of
+    ## the target whether the object is there - and being there is not the same as doing what
+    ## the object of the source did, which is what the word "valid" was read as saying. Every
+    ## row it writes now says which of the two it means. P2-6 of development/OPEN_ISSUES.md.
+    WHAT_PRESENCE_MEANS = {
+        'view': ('PostgreSQL resolves the query of a view when the view is created and keeps '
+                 'the objects it reads from being dropped underneath it, so a view which is '
+                 'there can be read. That it answers the same rows as the view of the source '
+                 'is NOT established by this and cannot be established by a catalogue at all.'),
+        'funcproc': ('PostgreSQL checks the SYNTAX of a PL/pgSQL body when the routine is '
+                     'created and nothing else: a body which reads a table or a column which '
+                     'is not there is created without complaint and fails at the first call. '
+                     'A routine which is there has therefore been parsed, and no more than '
+                     'that. The check also matches the name alone, so one overload of a name '
+                     'is enough for all of them.'),
+        'trigger': ('the trigger is there and attached to its table, so the wiring arrived. '
+                    'It does NOT say that the function it calls does what the trigger of the '
+                    'source did: that is the row of the routine, and a PL/pgSQL body is only '
+                    'parsed when it is created.'),
+    }
+
     def _validate_one_object(self, target_conn, mode, object_type, obj):
-        """Determine whether a single migrated object exists (is valid) in the target, optionally
-        re-attempting its creation first (mode='retry'), and record the result in the protocol
-        table. Returns (final_valid, was_retried) where final_valid is True (present/valid),
-        False (has DDL but not present) or None (nothing was ever created for it, e.g. an object
-        with no converted DDL - left unchecked so it is not counted as invalid)."""
+        """
+        Whether one migrated object is **in the target**, optionally re-creating it first.
+
+        Returns `(final_valid, was_retried)`, where final_valid is True (the object is there),
+        False (there is DDL for it and it is not there) or None (nothing was ever created for
+        it - an object with no converted DDL, which is left uncounted rather than called
+        invalid).
+
+        Two things about it are worth knowing.
+
+        **It establishes presence, not equivalence.** The message of every object says which of
+        the two it means; WHAT_PRESENCE_MEANS above is the wording, per kind of object, and it
+        differs a great deal between them - a view which is there has had its query resolved by
+        PostgreSQL, while a PL/pgSQL routine which is there has had its body parsed and nothing
+        more. P2-6.
+
+        **The message is composed at the end from what happened**, and is no longer carried
+        over from an earlier step: a retry which raised no exception used to leave
+        `message = 'valid after retry'` standing even when the existence check right after it
+        answered no, so the protocol row said an object was valid after a retry which had not
+        put it there.
+        """
         schema = obj['schema']
         name = obj['name']
         ddl = obj.get('ddl')
@@ -2359,13 +2510,14 @@ class Orchestrator:
                 return target_conn.target_trigger_exists(schema, obj.get('table'), name)
             return False
 
-        message = ''
         was_retried = False
+        retry_error = ''
+        existence_error = ''
         try:
             present = _exists()
         except Exception as e:
             present = False
-            message = f'existence check error: {e}'
+            existence_error = str(e)
 
         if not present and mode == 'retry' and has_ddl:
             was_retried = True
@@ -2378,25 +2530,34 @@ class Orchestrator:
                 target_conn.execute_query(f'SET search_path TO "{schema}"')
                 target_conn.execute_query(ddl)
                 target_conn.execute_query('RESET search_path')
-                message = 'valid after retry'
                 self.config_parser.print_log_message('INFO', f"orchestrator: stdwf_validate_objects: Re-created {object_type} {obj['label']} on retry (dependency now present).")
             except Exception as e:
-                message = f'retry failed: {e}'
+                retry_error = str(e)
                 self.config_parser.print_log_message('DEBUG', f"orchestrator: stdwf_validate_objects: Retry of {object_type} {obj['label']} failed: {e}")
+            existence_error = ''
             try:
                 present = _exists()
             except Exception as e:
                 present = False
-                message = f'existence check error after retry: {e}'
+                existence_error = str(e)
 
+        ## The message says what was established and what was not - composed here, from what
+        ## really happened, and never carried over from a step which was overtaken by the next.
         if present:
             final_valid = True
-            if not message:
-                message = 'valid'
+            message = 'in the target' + (' after a retry' if was_retried else '')
+            explanation = self.WHAT_PRESENCE_MEANS.get(object_type)
+            if explanation:
+                message += f' - presence and not equivalence: {explanation}'
         elif has_ddl:
             final_valid = False
-            if not message:
-                message = 'not found in target'
+            message = 'NOT in the target'
+            if retry_error:
+                message += f' - the retry of its DDL failed: {retry_error}'
+            elif was_retried:
+                message += ' - the retry of its DDL raised nothing and the object is still not there'
+            if existence_error:
+                message += f' - the check itself could not be run: {existence_error}'
         elif obj.get('manual'):
             ## converted only in part - reported as failed by the migration, and the stored code
             ## is there to be completed by hand, never to be executed

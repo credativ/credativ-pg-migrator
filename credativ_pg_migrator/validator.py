@@ -1,8 +1,142 @@
 import concurrent.futures
 import time
+from credativ_pg_migrator.constants import MigratorConstants
 from credativ_pg_migrator.migrator_tables import MigratorTables
 from credativ_pg_migrator.migrator_logging import MigratorLogger
 import traceback
+
+
+## The four checks a table can be measured with: the key which holds the verdict of each, the
+## key which holds its message, and the name it is called by. A check which did not run has
+## None where its verdict would be, and that is what tells "we could not tell" apart from "it
+## is correct".
+DATA_CHECKS = (
+    ('row_logic', 'row_msg', 'row counts'),
+    ('table_hash_logic', 'table_msg', 'table checksum'),
+    ('row_hash_logic', 'row_hash_msg', 'row sample'),
+    ('lob_size_logic', 'lob_size_msg', 'LOB sizes'),
+)
+
+
+## The structural checks: what the schema of the target holds next to what the schema of the
+## source holds. They are kept apart from the four data checks above on purpose - see
+## outcome_of() - because they can fail a table and they cannot pass one.
+STRUCTURAL_CHECKS = (
+    ('columns_logic', 'columns_msg', 'column counts'),
+    ('indexes_logic', 'indexes_msg', 'index counts'),
+    ('constraints_logic', 'constraints_msg', 'constraint counts'),
+)
+
+
+def count_is_available(count):
+    """
+    Whether a connector really answered with a number.
+
+    None is "this connector does not count that", and -1 is "it tried and the query failed" -
+    both of them mean the check cannot run, and neither of them may be compared as if it were
+    a count of zero.
+    """
+    return isinstance(count, int) and not isinstance(count, bool) and count >= 0
+
+
+def compare_counts(source_count, target_count, what, exact):
+    """
+    One structural check: `(verdict, message)`, with the verdict None when it could not run.
+
+    `exact` says which of the two comparisons this is, and the difference matters more than it
+    looks. **The number of columns must match**: a migrated table holds the columns of the
+    source, and one column fewer is data which did not arrive. **The number of indexes and of
+    constraints must not FALL SHORT**, and may be larger, because the two sides do not count
+    the same things and were never going to:
+
+      * PostgreSQL creates an index for every primary key and every unique constraint, and the
+        migrator adds one of its own to the parent side of a foreign key which has none;
+      * the SQLite connector counts a foreign key and a check as a constraint and does not
+        count the primary key or a unique constraint at all, so its source number is
+        systematically smaller than the target number for the same table;
+      * Oracle counts indexes which have no counterpart anywhere else.
+
+    Comparing those as equal reports a table which arrived complete as broken, which is how a
+    check earns being ignored. A shortfall, on the other hand, means something the source had
+    is not in the target - and that is the one thing these numbers can say honestly.
+    """
+    if not count_is_available(source_count) or not count_is_available(target_count):
+        return None, f"Skip: {what} not available on both sides (Src={source_count}, Tgt={target_count})"
+    if exact:
+        if source_count == target_count:
+            return True, f"Pass: {source_count} {what}"
+        return False, (f"Fail: Src={source_count}, Tgt={target_count} - the target does not "
+                       f"hold the same {what} as the source")
+    if target_count >= source_count:
+        return True, f"Pass: Src={source_count}, Tgt={target_count}"
+    return False, (f"Fail: Src={source_count}, Tgt={target_count} - {source_count - target_count} "
+                   f"of the {what} of the source are NOT in the target. Which of them is in the "
+                   f"protocol table of the objects, with the reason for each")
+
+
+def outcome_of(res):
+    """
+    What the validation of one table ended in, derived from the checks which really ran.
+
+    It used to be accumulated instead: `passed` started at **True** and the branches which
+    found a mismatch set it to False. A table where no branch ran at all - no primary key, so
+    no row sample and no LOB check; no checksum on that source; the checks switched off in the
+    configuration - therefore ended the run reported exactly like a table which passed every
+    one of them, and the line in the log said "passed all active validations", which was true
+    and told the reader the opposite of what had happened. P2-2 of
+    development/OPEN_ISSUES.md.
+
+    Three outcomes:
+
+      * FAILED - a check ran and said no, or the validation of the table crashed.
+      * PASSED - at least one check of the data ran and every check which ran said yes.
+      * NOT VALIDATED - nothing looked at the data. It is not a failure of the migration and it
+        is not evidence of one either, and it has to be visible as itself: a green report
+        which is green because nobody looked is the one thing a validator must not produce.
+
+    The structural checks are asymmetric here, and deliberately so: **they can fail a table and
+    they cannot pass one.** A table which arrived with half its indexes has not been validated
+    whatever its row count says, so a structural mismatch fails it (P2-3); but the number of
+    columns matching says nothing about whether the rows arrived, so it must not turn a table
+    nothing looked into a table which passed (P2-2). One rule cannot be relaxed to make room
+    for the other.
+    """
+    if res.get('error'):
+        return MigratorConstants.VALIDATION_FAILED
+    data = [res.get(verdict) for verdict, _, _ in DATA_CHECKS]
+    structural = [res.get(verdict) for verdict, _, _ in STRUCTURAL_CHECKS]
+    if any(verdict is False for verdict in data + structural):
+        return MigratorConstants.VALIDATION_FAILED
+    if any(verdict is True for verdict in data):
+        return MigratorConstants.VALIDATION_PASSED
+    return MigratorConstants.VALIDATION_NOT_VALIDATED
+
+
+def checks_which_ran(res):
+    """The names of the checks which produced a verdict, in the order they run."""
+    return [name for verdict, _, name in DATA_CHECKS + STRUCTURAL_CHECKS
+            if res.get(verdict) is not None]
+
+
+def why_nothing_ran(res, requested):
+    """
+    Why a table could not be measured, per check - what a NOT VALIDATED outcome has to say.
+
+    `requested` maps the name of a check to whether the configuration asked for it at all.
+    A check which was asked for and produced nothing says why (it has written its own 'Skip:'
+    message); one which was not asked for says so.
+    """
+    reasons = []
+    for verdict, message, name in DATA_CHECKS:
+        if res.get(verdict) is not None:
+            continue
+        if not requested.get(name, True):
+            reasons.append(f"{name}: switched off in the configuration")
+            continue
+        written = str(res.get(message) or '').strip()
+        reasons.append(f"{name}: {written}" if written else f"{name}: no result")
+    return reasons
+
 
 class Validator:
     def __init__(self, config_parser):
@@ -63,22 +197,51 @@ class Validator:
     
             results = []
             with concurrent.futures.ThreadPoolExecutor(max_workers=threads) as executor:
-                futures = []
+                ## which table each worker was given, so that one which ends in an exception
+                ## can still be named and still be written into the report. It was a list, so
+                ## the error below could only say "Error validating table" and the table was
+                ## gone from the report and from the count at the bottom of it. P2-4.
+                futures = {}
                 for t in tables:
-                    if self.config_parser.get_workflow() == 'mapping' or t.get('target_table_rows', 0) > 0 or t.get('source_table_rows', 0) > 0:
-                        futures.append(executor.submit(
-                            self.validate_table, 
-                            t, check_counts, check_table_sum, check_random, check_lob, sample_size
-                        ))
+                    ## Every table in scope is validated. It used to depend on the row counts
+                    ## the MIGRATION had recorded:
+                    ##
+                    ##   if workflow == 'mapping' or t.get('target_table_rows', 0) > 0
+                    ##                              or t.get('source_table_rows', 0) > 0:
+                    ##
+                    ## and the decoded protocol row has no 'source_table_rows' key at all - it
+                    ## has source_table_rows_all and source_table_rows_limited - so that half
+                    ## was always 0 and a standard migration validated a table only when the
+                    ## migration had already recorded rows in the target for it. A table whose
+                    ## data migration failed before the first row landed therefore had a
+                    ## target count of 0 and was never looked at: exactly the table most in
+                    ## need of it. An empty source and an empty target is a legitimate pass,
+                    ## an empty target against a source which has rows is a failure, and
+                    ## neither of them is "do not look". P2-5.
+                    future = executor.submit(
+                        self.validate_table, 
+                        t, check_counts, check_table_sum, check_random, check_lob, sample_size
+                    )
+                    futures[future] = t
                 
                 for future in concurrent.futures.as_completed(futures):
+                    table_info = futures[future]
                     try:
                         res = future.result()
                         if res:
                             results.append(res)
+                        else:
+                            ## nothing came back at all - the table still belongs in the report
+                            results.append(self.could_not_be_validated(
+                                table_info, 'the validation returned nothing',
+                                'the validation of this table ended without a result'))
                     except Exception as e:
-                        self.val_logger.logger.error(f"Error validating table: {e}")
+                        self.val_logger.logger.error(
+                            f"Error validating table {table_info.get('target_schema_name')}."
+                            f"{table_info.get('target_table_name')}: {e}")
                         self.val_logger.logger.error(traceback.format_exc())
+                        results.append(self.could_not_be_validated(
+                            table_info, e, 'the validation of this table ended in an error'))
     
             self.migrator_tables.print_validation_summary(val_logger=self.val_logger.logger)
 
@@ -89,14 +252,74 @@ class Validator:
         finally:
             self.val_logger.stop_logging()
 
+    def could_not_be_validated(self, table_info, error, what_happened):
+        """
+        The row a table gets when the validator could not measure it at all.
+
+        It used to get none. `validate_table()` answered a table whose connection failed with
+        `None`, and `run()` dropped a falsy result - so the table was **missing from the
+        validation protocol table**, missing from the report built out of it, and missing from
+        the count at the bottom of that report. What the reader saw was a report of the tables
+        which happened to work, all green, and a total which did not say how many tables the
+        validation had really been asked about. Together with the outcome which started at
+        True (P2-2), that is why a green validation report could not be used as evidence.
+        P2-4 of development/OPEN_ISSUES.md.
+
+        The outcome is FAILED and not NOT VALIDATED, and the difference is deliberate:
+        NOT VALIDATED means the checks do not apply to this table - no primary key, no
+        checksum on that source - which is an ordinary state of an ordinary migration. An
+        exception is not an ordinary state. The message says which of the two it is, so that
+        the red row cannot be read as "this table is broken" when what broke was the
+        validation of it.
+        """
+        source_schema = table_info.get('source_schema_name')
+        source_table = table_info.get('source_table_name')
+        target_schema = table_info.get('target_schema_name')
+        target_table = table_info.get('target_table_name')
+        message = (f"{what_happened}: {error}. This is a failure of the VALIDATION and not a "
+                   f"measurement of the table - nothing about it was compared, so the run "
+                   f"says nothing about whether it is correct.")
+        res = {
+            'target_table': f"{target_schema}.{target_table}",
+            'source_schema_name': source_schema,
+            'source_table_name': source_table,
+            'target_schema_name': target_schema,
+            'target_table_name': target_table,
+            'outcome': MigratorConstants.VALIDATION_FAILED,
+            'error': str(error),
+            'checks_run': [],
+            'validation_message': message,
+        }
+        self.val_logger.logger.error(f"FAILED: {res['target_table']} - {message}")
+        try:
+            self.migrator_tables.insert_validation_table_result(res)
+        except Exception as e:
+            ## the last place which could have recorded the table - if this fails too, the
+            ## report really is short of a row and the log has to say so in as many words
+            self.val_logger.logger.error(
+                f"Error persisting validation protocol for {res['target_table']}, which "
+                f"could not be validated: {e}. The table is MISSING from the validation "
+                f"report.")
+            self.val_logger.logger.error(traceback.format_exc())
+        return res
+
     def validate_table(self, table_info, check_counts, check_table_sum, check_random, check_lob, sample_size):
-        source_conn = self._get_connector('source')
-        target_conn = self._get_connector('target')
-        
+        source_conn = None
+        target_conn = None
         target_copy_conn = None
-        if self.config_parser.get_workflow() == 'mapping':
-            target_copy_conn = self._get_connector('target_copy')
-        
+        try:
+            source_conn = self._get_connector('source')
+            target_conn = self._get_connector('target')
+            if self.config_parser.get_workflow() == 'mapping':
+                target_copy_conn = self._get_connector('target_copy')
+        except Exception as e:
+            ## building a connector raised - it used to happen outside every try in this
+            ## method, so the exception travelled up into run(), which logged it without
+            ## naming the table and wrote nothing anywhere
+            self.val_logger.logger.error(traceback.format_exc())
+            return self.could_not_be_validated(
+                table_info, e, 'the connectors for the validation could not be built')
+
         try:
             source_conn.connect()
             target_conn.connect()
@@ -106,7 +329,8 @@ class Validator:
         except Exception as e:
             self.val_logger.logger.error(f"Failed to connect to databases for validating table {table_info.get('target_table_name')}: {e}")
             self.val_logger.logger.error(traceback.format_exc())
-            return None
+            return self.could_not_be_validated(
+                table_info, e, 'the databases could not be reached for this table')
         finally:
             if getattr(source_conn, 'connection', None):
                 source_conn.disconnect()
@@ -145,7 +369,23 @@ class Validator:
             'row_hash_msg': '',
             'lob_size_logic': None,
             'lob_size_msg': '',
-            'passed': True
+            ## The structural checks. They were filled into the four *_count keys above and
+            ## compared by nothing - a table which arrived with half its indexes was reported
+            ## as validated. P2-3.
+            'columns_logic': None,
+            'columns_msg': '',
+            'indexes_logic': None,
+            'indexes_msg': '',
+            'constraints_logic': None,
+            'constraints_msg': '',
+            ## Derived at the end from the seven verdicts above and never accumulated - see
+            ## outcome_of(), and note that the three structural ones can only fail a table.
+            ## 'error' holds the exception when the validation of this table crashed, which
+            ## is a failure and not an absence of one.
+            'outcome': None,
+            'error': '',
+            'checks_run': [],
+            'validation_message': '',
         }
         
         self.val_logger.logger.info(f"Validating {res['target_table']} ...")
@@ -167,12 +407,61 @@ class Validator:
             res['target_constraints_count'] = target_conn.get_constraints_count(target_schema, target_table) if hasattr(target_conn, 'get_constraints_count') else 0
         except Exception as e:
             self.val_logger.logger.error(f"Error fetching structural validation metadata for {target_schema}.{target_table}: {e}")
+
+        ## The four numbers above used to be recorded and compared by nothing at all, so a
+        ## table which arrived with half its indexes was reported as validated. They are
+        ## checks now - see compare_counts() for why the columns are compared exactly and the
+        ## indexes and constraints only for a shortfall.
+        res['columns_logic'], res['columns_msg'] = compare_counts(
+            res['source_columns_count'], res['target_columns_count'], 'columns', exact=True)
+
+        ## An object the configuration asked not to migrate is missing from the target on
+        ## purpose, and a check which fails a table for doing what it was told is a check
+        ## nobody will keep.
+        if self.config_parser.should_migrate_indexes(source_table):
+            res['indexes_logic'], res['indexes_msg'] = compare_counts(
+                res['source_indexes_count'], res['target_indexes_count'], 'indexes', exact=False)
+        else:
+            res['indexes_msg'] = 'Skip: indexes are not migrated for this table'
+
+        if self.config_parser.should_migrate_constraints(source_table):
+            res['constraints_logic'], res['constraints_msg'] = compare_counts(
+                res['source_constraints_count'], res['target_constraints_count'],
+                'constraints', exact=False)
+        else:
+            res['constraints_msg'] = 'Skip: constraints are not migrated for this table'
             
         pk_cols = self.migrator_tables.select_primary_key({'source_schema_name': source_schema, 'source_table_name': source_table})
         if pk_cols:
             pk_cols_list = [c.strip('" ') for c in pk_cols.split(',')]
         else:
             pk_cols_list = []
+
+        ## Which checks the configuration asked for, read before anything below can switch one
+        ## off - it is what the line of a table nothing could be measured on says.
+        requested = {
+            'row counts': check_counts,
+            'table checksum': check_table_sum,
+            'row sample': check_random,
+            'LOB sizes': check_lob,
+        }
+
+        ## The data of a table which was not migrated cannot be compared with the data of the
+        ## source: the target holds none of its rows on purpose. Comparing it anyway reports
+        ## every such table as a mismatch, which is what removing the row-count filter above
+        ## would otherwise have produced for a run with migrate_data off. The structure of the
+        ## table is still compared - it was created, and it should look like the source.
+        if not self.config_parser.should_migrate_data(source_table):
+            not_migrated = ('Skip: the data of this table is not migrated - migrate_data is '
+                            'off for it, so the target holds none of its rows on purpose')
+            res['row_msg'] = not_migrated
+            res['table_msg'] = not_migrated
+            res['row_hash_msg'] = not_migrated
+            res['lob_size_msg'] = not_migrated
+            check_counts = False
+            check_table_sum = False
+            check_random = False
+            check_lob = False
 
         try:
             target_copy_schema = None
@@ -216,17 +505,18 @@ class Validator:
                 res['source_row_count'] = s_count
                 res['target_row_count'] = t_count
 
-                if not action or action == 'replace':
+                if not count_is_available(s_count) or not count_is_available(t_count):
+                    ## a count nobody could read is not a count of zero
+                    res['row_msg'] = f"Skip: row counts not available on both sides (Src={s_count}, Tgt={t_count})"
+                elif not action or action == 'replace':
                     res['row_logic'] = (s_count == t_count)
                     if not res['row_logic']:
-                        res['passed'] = False
                         res['row_msg'] = f"Fail: Src={s_count}, Tgt={t_count}"
                     else:
                         res['row_msg'] = f"Pass: {s_count} rows"
                 elif action == 'skip':
                     res['row_logic'] = (t_copy_count == t_count)
                     if not res['row_logic']:
-                        res['passed'] = False
                         res['row_msg'] = f"Fail (skip): OrigTgt={t_copy_count}, Tgt={t_count}"
                     else:
                         res['row_msg'] = f"Pass (skip): {t_count} rows untouched"
@@ -235,7 +525,6 @@ class Validator:
                     max_rows = t_copy_count + s_count
                     res['row_logic'] = (min_rows <= t_count <= max_rows)
                     if not res['row_logic']:
-                        res['passed'] = False
                         res['row_msg'] = f"Fail (merge): OrigTgt={t_copy_count}, Src={s_count}, Tgt={t_count} bounds [{min_rows}, {max_rows}]"
                     else:
                         res['row_msg'] = f"Pass (merge bounds): {t_count} rows"
@@ -265,7 +554,6 @@ class Validator:
                     if s_sum is not None and t_sum is not None:
                         res['table_hash_logic'] = (s_sum == t_sum)
                         if not res['table_hash_logic']:
-                            res['passed'] = False
                             res['table_msg'] = f"Fail: Src={s_sum}, Tgt={t_sum}"
                             
                             self.val_logger.logger.warning(f"Validator: Table {source_table} hash mismatch. Inspecting columns...")
@@ -350,7 +638,6 @@ class Validator:
                         
                         res['row_hash_logic'] = (mismatches == 0)
                         if mismatches > 0:
-                            res['passed'] = False
                             res['row_hash_msg'] = f"Fail: {mismatches}/{len(pks)} sample rows mismatched"
                         else:
                             res['row_hash_msg'] = f"Pass: {len(pks)} samples matched"
@@ -390,7 +677,6 @@ class Validator:
                                     
                             res['lob_size_logic'] = (mismatches == 0)
                             if mismatches > 0:
-                                res['passed'] = False
                                 res['lob_size_msg'] = f"Fail: {mismatches}/{len(pks)} sample LOB sizes mismatched"
                             else:
                                 res['lob_size_msg'] = f"Pass: {len(pks)} samples matched"
@@ -564,33 +850,61 @@ class Validator:
         except Exception as e:
             self.val_logger.logger.error(f"Validation crash on {res['target_table']}: {e}")
             self.val_logger.logger.error(traceback.format_exc())
-            res['passed'] = False
+            ## A table whose validation crashed has not been validated and has not passed
+            ## either - it is a failure, and it is recorded as one rather than as an absence.
+            res['error'] = str(e)
             res['row_msg'] = f"Error: {e}"
 
         details = []
-        if res.get('row_logic') is not None:
-            details.append(f"Row Counts ({res.get('row_msg', '').strip()})")
-        if res.get('table_hash_logic') is not None:
-            details.append(f"Table Checksum ({res.get('table_msg', '').strip()})")
-        if res.get('row_hash_logic') is not None:
-            details.append(f"Row Level Hash ({res.get('row_hash_msg', '').strip()})")
-        if res.get('lob_size_logic') is not None:
-            details.append(f"LOB Size Check ({res.get('lob_size_msg', '').strip()})")
-            
-        if not details and res.get('row_msg', '').startswith('Error:'):
-            details.append(f"Fatal Execution Details ({res.get('row_msg', '').strip()})")
-            
-        fail_str = ", ".join(details)
-        
-        if res['passed']:
-            self.val_logger.logger.info(f"OK: {res['target_table']} passed all active validations against source {source_schema}.{source_table}. Details: {fail_str}")
+        for verdict, message, name in DATA_CHECKS + STRUCTURAL_CHECKS:
+            if res.get(verdict) is not None:
+                details.append(f"{name} ({str(res.get(message) or '').strip()})")
+
+        if res.get('error'):
+            details.append(f"validation crashed ({res['error']})")
+
+        res['outcome'] = outcome_of(res)
+        res['checks_run'] = checks_which_ran(res)
+
+        if res['outcome'] == MigratorConstants.VALIDATION_PASSED:
+            res['validation_message'] = ", ".join(details)
+            self.val_logger.logger.info(
+                f"PASSED: {res['target_table']} passed the {len(res['checks_run'])} check(s) "
+                f"which could be run against source {source_schema}.{source_table} "
+                f"({', '.join(res['checks_run'])}). Details: {res['validation_message']}")
+        elif res['outcome'] == MigratorConstants.VALIDATION_FAILED:
+            res['validation_message'] = ", ".join(details)
+            self.val_logger.logger.warning(
+                f"FAILED: {res['target_table']} failed validation against source "
+                f"{source_schema}.{source_table}. Details: {res['validation_message']}")
         else:
-            self.val_logger.logger.warning(f"FAIL: {res['target_table']} failed validation against source {source_schema}.{source_table}. Details: {fail_str}")
+            ## Nothing could be measured. This used to be reported as "passed all active
+            ## validations", which is the sentence P2-2 is about.
+            reasons = why_nothing_ran(res, requested)
+            structural = [name for verdict, _, name in STRUCTURAL_CHECKS
+                          if res.get(verdict) is not None]
+            if structural:
+                ## The structure was compared and matched. It is not nothing, and it is not
+                ## evidence that the rows arrived either - so the table is still not validated
+                ## and the line says which of the two happened.
+                reasons.append(f"the structure was compared ({', '.join(structural)}) and "
+                               f"matched, but nothing looked at the data")
+            res['validation_message'] = "; ".join(reasons)
+            self.val_logger.logger.warning(
+                f"NOT VALIDATED: {res['target_table']} - not one check of the DATA could be "
+                f"run against source {source_schema}.{source_table}, so this run says NOTHING "
+                f"about whether the rows are correct. It is not a table which passed. Why: "
+                f"{res['validation_message']}")
 
         try:
             self.migrator_tables.insert_validation_table_result(res)
         except Exception as e:
-            self.val_logger.logger.error(f"Error persisting validation protocol for {res['target_table']}: {e}")
+            ## the table was measured and the measurement could not be written down, so the
+            ## report is short of a row - said in as many words, because a report which is
+            ## missing a table looks exactly like a report of a migration with fewer tables
+            self.val_logger.logger.error(
+                f"Error persisting validation protocol for {res['target_table']}: {e}. The "
+                f"table is MISSING from the validation report.")
             self.val_logger.logger.error(traceback.format_exc())
 
         return res

@@ -18,12 +18,16 @@ import jaydebeapi
 from jaydebeapi import Error
 import pyodbc
 from pyodbc import Error
-from credativ_pg_migrator.database_connector import DatabaseConnector
+from credativ_pg_migrator.database_connector import DatabaseConnector, first_line
 from credativ_pg_migrator.migrator_logging import MigratorLogger
 from credativ_pg_migrator.connectors.tsql_parser import TsqlParser
+from credativ_pg_migrator.query_conversion import outer_joins as query_outer_joins
+from credativ_pg_migrator.query_conversion.outer_joins import outer_join_warnings
 from credativ_pg_migrator.jvm_helper import detach_thread_from_jvm
+from credativ_pg_migrator.text_decoding import TextDecoder
 import re
 import struct
+import threading
 import traceback
 import time
 import datetime
@@ -225,7 +229,35 @@ class CustomTSQL(TSQL):
 
         TRANSFORMS[Block] = _block_handler
 
+## Read once per connector and shared by the workers of the query conversion - see
+## _get_udt_map(). A lock created on the instance would itself have to be created under a
+## lock; there is one fetch per run behind this one, so a module level lock costs nothing.
+UDT_MAP_LOCK = threading.Lock()
+
+
 class MsSQLConnector(DatabaseConnector):
+
+    ## What this connector does not read out of SQL Server - see
+    ## DatabaseConnector.OBJECT_KINDS_NOT_READ. The user defined types ARE read, above.
+    OBJECT_KINDS_NOT_READ = {
+        'domains': ('SQL Server has rules (CREATE RULE) bound to a type or a column, which are '
+                    'the closest thing it has to a domain constraint - the Sybase ASE connector '
+                    'of this same migrator reads exactly those as domains. This connector does '
+                    'not.'),
+    }
+
+    ## The ODBC type codes whose values pyodbc hands over as bytes, with the name each of them
+    ## has in SQL Server. A message about a value which could not be decoded says which type it
+    ## came from - the converter is registered per type code and knows nothing else about where
+    ## the value stood.
+    ODBC_TYPE_NAMES = {
+        -155: 'datetimeoffset',
+        -154: 'time',
+        -152: 'xml',
+        -151: 'udt',
+        -150: 'sql_variant',
+    }
+
     def __init__(self, config_parser, source_or_target):
         if source_or_target not in ['source']:
             raise ValueError(f"MS SQL Server is only supported as a source database. Current value: {source_or_target}")
@@ -236,12 +268,47 @@ class MsSQLConnector(DatabaseConnector):
         self.on_error_action = self.config_parser.get_on_error_action()
         self.logger = MigratorLogger(self.config_parser.get_log_file()).logger
 
+    ## ------------------------------------------------------------------------------------
+    ## Bytes to text.
+    ##
+    ## The ODBC driver hands the wide and the extended types over as bytes and does not say
+    ## which encoding they are in - which of utf-8 and utf-16 arrives depends on how the
+    ## driver was built and configured, so both are tried and neither is a guess. What is a
+    ## guess is what happens when neither reads the value, and until 0.16.0 the answer was
+    ## errors='ignore' three times over: the byte was deleted from the value, the row reached
+    ## the target shorter than it left the source, and nothing said so. The decision is
+    ## migration.on_undecodable_bytes now and it is applied in text_decoding.py, which counts
+    ## every value it had to touch and reports the total when the connection is closed.
+
+    def text_decoder(self):
+        """The decoder of this connection, created on first use so that it is never missing."""
+        decoder = getattr(self, '_text_decoder', None)
+        if decoder is None:
+            decoder = TextDecoder(self.config_parser, 'ms_sql_connector')
+            self._text_decoder = decoder
+        return decoder
+
+    def decode_odbc_value(self, value, type_code):
+        """
+        One value of one of the byte-valued ODBC types, as text.
+
+        A value which carries a byte order mark is utf-16 whatever the driver was built for,
+        so that encoding is tried first for it; everything else follows the order the
+        connector has always used, utf-8 before utf-16.
+        """
+        if isinstance(value, (bytes, bytearray)) and bytes(value[:2]) in (b'\xff\xfe', b'\xfe\xff'):
+            encodings = ('utf-16', 'utf-8')
+        else:
+            encodings = None
+        place = f"SQL type {type_code} ({self.ODBC_TYPE_NAMES.get(type_code, 'unknown')})"
+        return self.text_decoder().decode(value, place=place, encodings=encodings)
+
     def connect(self):
         if self.config_parser.get_connectivity(self.source_or_target) == 'odbc':
             connection_string = self.config_parser.get_connect_string(self.source_or_target)
             self.connection = pyodbc.connect(connection_string, autocommit=True)
 
-            def handle_datetimeoffset(value):
+            def handle_datetimeoffset(value, type_code=-155):
                 if value is None:
                     return None
                 if isinstance(value, bytes) and len(value) == 20:
@@ -253,37 +320,22 @@ class MsSQLConnector(DatabaseConnector):
                     abs_tz_h = abs_tz_min // 60
                     abs_tz_m = abs_tz_min % 60
                     return f"{year:04d}-{month:02d}-{day:02d} {hour:02d}:{minute:02d}:{second:02d}.{sec_frac:06d}{tz_sign}{abs_tz_h:02d}:{abs_tz_m:02d}"
-                elif isinstance(value, bytes):
-                    try:
-                        return value.decode('utf-8')
-                    except Exception:
-                        return str(value)
-                return str(value)
+                ## Not the 20 byte structure the type has: it is read as text rather than as
+                ## str(value), which used to write the repr of the bytes - b'...' - into the
+                ## target as if it were the value.
+                return self.decode_odbc_value(value, type_code)
 
-            def handle_ss_udt(value):
+            def handle_ss_udt(value, type_code=-151):
                 if value is None:
                     return None
                 if isinstance(value, bytes):
                     return value
                 return str(value).encode('utf-8')
 
-            def handle_string_converter(value):
+            def handle_string_converter(value, type_code=None):
                 if value is None:
                     return None
-                if isinstance(value, bytes):
-                    if value.startswith(b'\xff\xfe') or value.startswith(b'\xfe\xff'):
-                        try:
-                            return value.decode('utf-16')
-                        except Exception:
-                            return value.decode('utf-16', errors='ignore')
-                    try:
-                        return value.decode('utf-8')
-                    except Exception:
-                        try:
-                            return value.decode('utf-16', errors='ignore')
-                        except Exception:
-                            return value.decode('latin1', errors='ignore')
-                return str(value)
+                return self.decode_odbc_value(value, type_code)
 
             for type_code, converter in [
                 (-155, handle_datetimeoffset),
@@ -293,7 +345,12 @@ class MsSQLConnector(DatabaseConnector):
                 (-154, handle_string_converter),
             ]:
                 try:
-                    self.connection.add_output_converter(type_code, converter)
+                    ## pyodbc calls a converter with the value alone, so the type code the
+                    ## converter is registered for is bound here - it is the only thing a
+                    ## message about an undecodable value can say about where it stood.
+                    self.connection.add_output_converter(
+                        type_code, lambda value, converter=converter, type_code=type_code:
+                            converter(value, type_code))
                 except Exception as e:
                     self.config_parser.print_log_message('DEBUG', f"ms_sql_connector: connect: Warning registering output converter for {type_code}: {e}")
         elif self.config_parser.get_connectivity(self.source_or_target) == 'jdbc':
@@ -316,6 +373,14 @@ class MsSQLConnector(DatabaseConnector):
             pass
 
     def disconnect(self):
+        try:
+            ## How many values did not fit any of the encodings expected for them, before the
+            ## connection which read them is gone. Nothing is written when there were none.
+            decoder = getattr(self, '_text_decoder', None)
+            if decoder is not None:
+                decoder.log_summary()
+        except Exception:
+            pass
         try:
             if self.connection:
                 self.connection.close()
@@ -1297,23 +1362,50 @@ class MsSQLConnector(DatabaseConnector):
                         node.set(arg, peel_parentheses_and_cast(child))
             return node
 
-        def transform_sybase_joins(expression):
-            # Check for EQ nodes with outer join comments (sqlglot default parsing of *=)
-            # OR check for 'outer_join' property if parsing handles it.
-            # sqlglot T-SQL might parse *= as normal EQ, or custom.
-            # Since we didn't inject the scanner pre-processor for *= yet (it's in Sybase v2 conversion),
-            # we rely on sqlglot.
-            # MSSQL views likely use standard ANSI JOINs, but legacy syntax exists.
-            # We assume ANSI joins for now, or sqlglot handles standard T-SQL.
+        def convert_legacy_outer_joins(expression):
+            """
+            The '*=' and '=*' outer joins of the old T-SQL, as the joins of PostgreSQL.
+
+            MS SQL Server read these until 2005 and the application files of a database old
+            enough to be migrated are full of them. This connector used to leave them alone -
+            the comment which stood here said "we assume ANSI joins for now" - so a statement
+            no parser can read was reported as unreadable, while sybase_ase, which is the same
+            family and writes the same operator, converted it. The work is shared with Sybase
+            ASE and with Oracle's '(+)' and stands in query_conversion/outer_joins.py; only
+            the marking is done in prepare_query_for_parsing() above.
+            """
+            converted_joins = set()
+            expression, unconverted = query_outer_joins.convert_marked_outer_joins(
+                expression, converted_joins)
+            if unconverted:
+                self.config_parser.print_log_message(
+                    'WARNING', f"ms_sql_connector: convert_statement_code: {unconverted} outer "
+                               f"join(s) written '*=' or '=*' could not be attributed to a table "
+                               f"of the FROM clause and were not rewritten.")
+            ## A restriction on the inner table belongs to the join in this dialect and to the
+            ## result of the join in PostgreSQL, where it throws away the rows the outer join
+            ## added - the LEFT JOIN would be an inner join again. It moves into the ON clause,
+            ## and what moved is reported, because it decides which rows the statement answers.
+            expression, moved = query_outer_joins.move_inner_table_predicates(
+                expression, converted_joins)
+            if moved:
+                report = settings.setdefault('conversion_report', {})
+                report['moved_predicates'] = report.get('moved_predicates', []) + moved
+                self.config_parser.print_log_message(
+                    'WARNING', f"ms_sql_connector: convert_statement_code: {', '.join(moved)} "
+                               f"restrict the inner table of an outer join and were moved into "
+                               f"its ON clause - in the WHERE clause of PostgreSQL they would "
+                               f"undo the outer join.")
             return expression
 
-        view_code = settings['view_code']
+        view_code = self.prepare_query_for_parsing(settings['view_code'])
         CustomTSQL.Parser.config_parser = self.config_parser
         try:
             expressions = sqlglot.parse(view_code, read=CustomTSQL)
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"ms_sql_connector: transform_sybase_joins: Failed to parse view code: {e}")
-            raise ValueError(f"-- ERROR parsing view: {e}\n/*\n{view_code}\n*/") from e
+            raise ValueError(f"-- ERROR parsing view: {e}\n/*\n"
+                             f"{query_outer_joins.unmark_tsql_outer_joins(view_code)}\n*/") from e
 
         transformed_sqls = []
         for expression in expressions:
@@ -1333,19 +1425,130 @@ class MsSQLConnector(DatabaseConnector):
                 ## which would otherwise cast the parts of a concatenation to a number
                 expression = expression.transform(self.convert_string_concatenation)
                 expression = expression.transform(cast_arithmetic_operands)
-                # expression = transform_sybase_joins(expression) # Not needed if standard SQL
+                expression = convert_legacy_outer_joins(expression)
 
                 ## the variables of the source keep their own spelling, the PostgreSQL generator
                 ## would write '@v' as '$v' and the conversion of a routine renames '@v' later
                 expression = expression.transform(self.keep_source_variables)
 
                 pg_sql = expression.sql(dialect='postgres')
+                ## the 'TRUE' the outer join rewrite leaves where the marked condition stood -
+                ## "WHERE TRUE AND x" is "WHERE x", and the shorter one is what a developer reads
+                pg_sql = query_outer_joins.tidy_boolean_placeholders(pg_sql)
                 transformed_sqls.append(pg_sql)
             except Exception as e:
-                self.config_parser.print_log_message('ERROR', f"ms_sql_connector: transform_sybase_joins: Failed to transform expression: {e}")
+                self.config_parser.print_log_message('ERROR', f"ms_sql_connector: convert_statement_code: Failed to transform expression: {e}")
                 transformed_sqls.append(f"-- ERROR transforming: {e}")
 
-        return "\n".join(transformed_sqls)
+        converted_code = "\n".join(transformed_sqls)
+        ## An outer join whose condition could not be attributed leaves its marker behind, and
+        ## what stands around it is the comma join it started from - an INNER join. The view
+        ## would be created and would answer fewer rows. Refused here, for the view path and
+        ## the query path alike.
+        marker_message = query_outer_joins.unconverted_marker_message(converted_code)
+        if marker_message:
+            error = ValueError(marker_message)
+            ## it parsed and it converted - it is the outer join alone which could not be
+            ## done, and a caller must not report it as a statement it could not read
+            error.outer_join_failure = True
+            raise error
+        return converted_code
+
+    def prepare_query_for_parsing(self, query_code):
+        """
+        The statement rewritten into something a T-SQL parser can read, without converting
+        anything.
+
+          '*=' and '=*' - the outer join MS SQL Server read until 2005. No parser of any
+          dialect knows them, so they become an equality carrying a marker which says which
+          side was outer, and convert_legacy_outer_joins() in convert_statement_code() turns
+          the marker into a LEFT / RIGHT JOIN. sybase_ase does the same with the same shared
+          code; this connector had nothing, so the identical statement converted from one
+          source of the family and was reported as unreadable from the other.
+
+        It is used by convert_statement_code() - so the view path and the query path are given
+        one preparation - and by the query conversion, which has to classify a statement
+        before it converts it: a statement which cannot be parsed would be reported as one the
+        migrator does not understand, and that answer must not be given to a statement its own
+        connector converts.
+        """
+        if not query_code:
+            return query_code
+        return query_outer_joins.mark_tsql_outer_joins(
+            query_code, self.sql_without_literals_and_comments)
+
+    ## The source test of §8.1. SET NOEXEC ON makes the server compile every statement behind
+    ## it - the names are resolved and the plan is made - and run none of them. It is a
+    ## setting of the SESSION, so it is taken back in the cleanup whatever the statement did;
+    ## a connection which cannot be put back is closed instead of being used again, because
+    ## every statement of the migrator behind it would silently answer nothing.
+    SOURCE_TEST_PARAMETER_STYLE = None
+
+    def source_test_native_mechanism(self):
+        return 'SET NOEXEC ON'
+
+    def source_test_probe(self, sql, parameter_count=0):
+        body = (sql or '').rstrip().rstrip(';')
+        if not body:
+            return [], []
+        if parameter_count:
+            ## a bind marker has no place in a batch which is submitted as text, and putting
+            ## a literal in its place would compile another statement than the application
+            ## runs. Not tested, and the block of the statement says so.
+            return [], []
+        return ['SET NOEXEC ON', body], ['SET NOEXEC OFF']
+
+    def query_conversion_supported(self):
+        return True
+
+    def convert_query_code(self, settings: dict):
+        """
+        One statement of an application, converted for PostgreSQL - the same conversion the
+        query of a view is given, without the CREATE VIEW around it. See the contract in
+        DatabaseConnector.convert_query_code().
+        """
+        statement_id = settings.get('statement_id', '')
+        ## the converter writes what it had to decide into this dictionary - it is made per
+        ## call, so nothing is carried from one statement to the next or between threads
+        statement_settings = {
+            'view_code': settings['query_code'],
+            'source_schema_name': settings['source_schema_name'],
+            'target_schema_name': settings['target_schema_name'],
+            'target_db_type': settings.get('target_db_type', 'postgresql'),
+            'conversion_report': {},
+        }
+        try:
+            converted = self.convert_statement_code(statement_settings)
+        except ValueError as e:
+            if getattr(e, 'outer_join_failure', False):
+                return {'code': '', 'converted': False, 'warnings': [], 'error': first_line(e)}
+            return {'code': '', 'converted': False, 'warnings': [],
+                    'error': f"the statement could not be parsed as T-SQL: {first_line(e)}"}
+        except Exception as e:
+            return {'code': '', 'converted': False, 'warnings': [],
+                    'error': f"the conversion ended with an error: {first_line(e)}"}
+
+        warnings = outer_join_warnings(statement_settings.get('conversion_report') or {})
+
+        ## convert_statement_code() writes the transformation it could not do into the text it
+        ## returns. Such a result is not a conversion and is not offered as one.
+        failed = [line for line in (converted or '').splitlines() if line.strip().startswith('-- ERROR')]
+        if failed:
+            return {'code': '', 'converted': False, 'warnings': warnings,
+                    'error': f"the statement could not be transformed: {failed[0].strip()}"}
+        if not (converted or '').strip():
+            return {'code': '', 'converted': False, 'warnings': warnings,
+                    'error': 'the conversion produced no statement at all'}
+
+        ## an outer join whose condition could not be attributed keeps its marker; such a
+        ## statement is reported, never offered as converted with a comment in the middle of it
+        if '/* left_outer */' in converted or '/* right_outer */' in converted:
+            return {'code': '', 'converted': False, 'warnings': warnings,
+                    'error': "the outer join written '*=' or '=*' could not be rewritten as a "
+                             "LEFT JOIN / RIGHT JOIN - the statement needs to be rewritten by hand"}
+
+        self.config_parser.print_log_message('DEBUG', f"ms_sql_connector: convert_query_code: {statement_id}: {converted}")
+        return {'code': converted, 'converted': True, 'warnings': warnings, 'error': None}
 
     def convert_view_code(self, settings: dict):
         """
@@ -1520,6 +1723,9 @@ class MsSQLConnector(DatabaseConnector):
 
                     cursor.execute(query)
                     total_inserted_rows = 0
+                    ## The values are decoded while they are fetched - an undecodable one is
+                    ## reported from here and not from the query which asked for them.
+                    part_name = 'reading data'
                     while True:
                         records = cursor.fetchmany(batch_size)
                         if not records:
@@ -1750,7 +1956,11 @@ class MsSQLConnector(DatabaseConnector):
         trigger_code = trigger_code.strip()
 
         table_match = re.search(r'ON\s+(?:\[?(\w+)\]?\.)?\[?(\w+)\]?', trigger_code, re.IGNORECASE)
-        table_name = table_match.group(2) if table_match else "UNKNOWN_TABLE"
+        ## the table the trigger is on, named out of the text of the source - so the case
+        ## handling of the migration has to be applied to it, the same way the planner applies
+        ## it to the names it hands over
+        table_name = self.config_parser.convert_names_case(
+            table_match.group(2) if table_match else "UNKNOWN_TABLE")
 
         events = []
         if re.search(r'\bINSERT\b', trigger_code, re.IGNORECASE): events.append('INSERT')
@@ -1815,7 +2025,9 @@ class MsSQLConnector(DatabaseConnector):
 
         pg_body = "\n".join(final_stmts_clean)
 
-        func_name = f"tf_{trigger_name}"
+        ## the whole generated name follows the case handling, not only the part which came
+        ## from the trigger - "tf_TR_AUDITSALES" is consistent but reads like a defect
+        func_name = self.config_parser.convert_names_case(f"tf_{trigger_name}")
         func_schema = target_schema_name
         decl_section = "DECLARE\n" + "\n".join(declarations) if declarations else ""
 
@@ -2102,12 +2314,29 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
             return {}
 
     def _get_udt_map(self):
-        """ Helper to get a map of UDT name -> definition for conversion logic """
-        udts_full = self.fetch_user_defined_types('dbo')
-        udt_map = {}
-        for k, v in udts_full.items():
-            udt_map[v['type_name']] = v
-        return udt_map
+        """
+        A map of UDT name -> definition for the conversion, read from the source once.
+
+        It used to be read on every call, and convert_statement_code() calls it for every
+        statement it converts. The query conversion converts a whole file of them, with a
+        pool of workers over one connector - so this was a round trip to the source database
+        per statement, and fetch_user_defined_types() connects and disconnects around its
+        query, which one worker did while another was using the same connection. The answer
+        does not change during a run: it is read once, under a lock, and kept.
+        """
+        cached = getattr(self, '_udt_map_cache', None)
+        if cached is not None:
+            return cached
+        with UDT_MAP_LOCK:
+            cached = getattr(self, '_udt_map_cache', None)
+            if cached is not None:
+                return cached
+            udts_full = self.fetch_user_defined_types('dbo')
+            udt_map = {}
+            for k, v in udts_full.items():
+                udt_map[v['type_name']] = v
+            self._udt_map_cache = udt_map
+            return udt_map
 
     def get_sequence_current_value(self, sequence_name: str):
         pass
@@ -2703,11 +2932,101 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
             arguments.append(current.strip())
         return arguments
 
+    ## The date and time styles of CONVERT(), as the format PostgreSQL writes with to_char()
+    ## and reads with to_date() / to_timestamp(). The style is what the value LOOKS like, so
+    ## dropping it does not drop a decoration: CONVERT(varchar(10), getdate(), 103) is
+    ## 24/08/2026 and the CAST which used to stand in its place is 2026-08-24. Every new row
+    ## got the other one.
+    CONVERT_STYLE_FORMATS = {
+        1: 'MM/DD/YY',                  101: 'MM/DD/YYYY',
+        2: 'YY.MM.DD',                  102: 'YYYY.MM.DD',
+        3: 'DD/MM/YY',                  103: 'DD/MM/YYYY',
+        4: 'DD.MM.YY',                  104: 'DD.MM.YYYY',
+        5: 'DD-MM-YY',                  105: 'DD-MM-YYYY',
+        6: 'DD Mon YY',                 106: 'DD Mon YYYY',
+        7: 'Mon DD, YY',                107: 'Mon DD, YYYY',
+        8: 'HH24:MI:SS',                108: 'HH24:MI:SS',
+        10: 'MM-DD-YY',                 110: 'MM-DD-YYYY',
+        11: 'YY/MM/DD',                 111: 'YYYY/MM/DD',
+        12: 'YYMMDD',                   112: 'YYYYMMDD',
+        13: 'DD Mon YYYY HH24:MI:SS:MS', 113: 'DD Mon YYYY HH24:MI:SS:MS',
+        14: 'HH24:MI:SS:MS',            114: 'HH24:MI:SS:MS',
+        20: 'YYYY-MM-DD HH24:MI:SS',    120: 'YYYY-MM-DD HH24:MI:SS',
+        21: 'YYYY-MM-DD HH24:MI:SS.MS', 121: 'YYYY-MM-DD HH24:MI:SS.MS',
+        23: 'YYYY-MM-DD',
+        24: 'HH24:MI:SS',
+        25: 'YYYY-MM-DD HH24:MI:SS.MS',
+        126: 'YYYY-MM-DD"T"HH24:MI:SS.MS',
+        127: 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"',
+    }
+
+    ## The styles which are NOT in the table above, and why. Transact-SQL pads the hour of
+    ## these with a space - `Aug 24 2026  9:30AM` - and PostgreSQL either pads it with a zero
+    ## (HH12) or removes the padding altogether (FMHH12), so there is no one format which
+    ## writes the same string. They are reported with what they mean instead of being
+    ## converted into something which is nearly right.
+    CONVERT_STYLES_WITHOUT_A_FORMAT = {
+        0: 'mon dd yyyy hh:miAM, the hour padded with a space',
+        100: 'mon dd yyyy hh:miAM, the hour padded with a space',
+        9: 'mon dd yyyy hh:mi:ss:mmmAM, the hour padded with a space',
+        109: 'mon dd yyyy hh:mi:ss:mmmAM, the hour padded with a space',
+        22: 'mm/dd/yy hh:mi:ss AM, the hour padded with a space',
+        130: 'day mon yyyy hh:mi:ss:mmmAM in the Hijri calendar',
+        131: 'dd/mm/yyyy hh:mi:ss:mmmAM in the Hijri calendar',
+    }
+
+    def _convert_style_argument(self, expression, target_type, style_argument):
+        """
+        `CONVERT(type, expression, style)` as PostgreSQL writes or reads that style.
+
+        The style decides what the value looks like, so it decides what is stored in every
+        row which takes the default. It used to be dropped with a warning and the call became
+        a plain CAST, which writes the ISO notation whatever the source asked for.
+
+        Answers None when the style cannot be carried over - an unknown one, one which no
+        single to_char() format can write, or a target type where the number does not mean a
+        date format at all (the styles of BINARY and MONEY are a different table) - and says
+        so. The caller then falls back to the CAST, which is what happened before.
+        """
+        style_text = self.strip_enclosing_parentheses(str(style_argument).strip()).strip()
+        try:
+            style = int(style_text)
+        except (TypeError, ValueError):
+            self.config_parser.print_log_message('WARNING', f"ms_sql_connector: convert_default_value: CONVERT style '{style_argument}' is not a number - it is dropped and the value is CAST instead, which writes the ISO notation.")
+            return None
+
+        upper_type = str(target_type).upper()
+        is_text = 'CHAR' in upper_type or 'TEXT' in upper_type
+        is_date = upper_type.startswith('DATE') and 'TIME' not in upper_type
+        is_timestamp = 'TIMESTAMP' in upper_type
+        style_format = self.CONVERT_STYLE_FORMATS.get(style)
+
+        if style_format and (is_text or is_date or is_timestamp):
+            if is_text:
+                ## the CAST is kept around it: Transact-SQL truncates the styled value to the
+                ## length of the target type, and so does a cast to varchar(n)
+                return f"CAST(to_char({expression}, '{style_format}') AS {target_type})"
+            if is_date:
+                return f"to_date({expression}, '{style_format}')"
+            return f"to_timestamp({expression}, '{style_format}')::{target_type}"
+
+        if style in self.CONVERT_STYLES_WITHOUT_A_FORMAT:
+            self.config_parser.print_log_message('WARNING', f"ms_sql_connector: convert_default_value: CONVERT style {style} writes {self.CONVERT_STYLES_WITHOUT_A_FORMAT[style]}, which no single PostgreSQL to_char() format writes - the value is CAST instead, so it comes out in the ISO notation and NOT as the source wrote it. Write the default by hand if the notation matters.")
+            return None
+
+        if style_format:
+            self.config_parser.print_log_message('WARNING', f"ms_sql_connector: convert_default_value: CONVERT style {style} is a date format, but the target type {target_type} is not a text, date or timestamp type - the style is dropped.")
+            return None
+
+        self.config_parser.print_log_message('WARNING', f"ms_sql_connector: convert_default_value: CONVERT style {style} is not one this migrator knows - it is dropped and the value is CAST instead, which may not write what the source wrote. Check what style {style} produces on the source.")
+        return None
+
     def _convert_convert_calls(self, text: str, settings) -> str:
         """
         Rewrites T-SQL CONVERT(data_type, expression [, style]) into PostgreSQL
-        CAST(expression AS data_type). The optional style argument has no PostgreSQL
-        counterpart and is dropped with a warning.
+        CAST(expression AS data_type), or into the to_char() / to_date() / to_timestamp()
+        which writes and reads what the style argument asked for - see
+        _convert_style_argument().
         """
         target_db_type = settings.get('target_db_type', self.config_parser.get_target_db_type())
         types_mapping = self.get_types_mapping({'target_db_type': target_db_type})
@@ -2739,8 +3058,6 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
             arguments = self._split_top_level_arguments(text[arguments_start:position - 1])
             if len(arguments) < 2:
                 return text
-            if len(arguments) > 2:
-                self.config_parser.print_log_message('WARNING', f"ms_sql_connector: convert_default_value: CONVERT style argument '{arguments[2]}' has no PostgreSQL equivalent and is dropped.")
             data_type = self.strip_enclosing_parentheses(arguments[0]).strip()
             type_length = ''
             length_match = re.search(r'(\(\s*[^()]*\s*\))\s*$', data_type)
@@ -2751,7 +3068,12 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
             data_type = types_mapping.get(data_type, data_type)
             if type_length and '(' not in data_type:
                 data_type += type_length
-            replacement = f"CAST({arguments[1]} AS {data_type})"
+
+            replacement = None
+            if len(arguments) > 2:
+                replacement = self._convert_style_argument(arguments[1], data_type, arguments[2])
+            if replacement is None:
+                replacement = f"CAST({arguments[1]} AS {data_type})"
             text = text[:start] + replacement + text[position:]
 
     def convert_default_value(self, settings) -> dict:

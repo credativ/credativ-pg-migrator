@@ -49,11 +49,133 @@ from decimal import Decimal
 import sqlglot
 from tabulate import tabulate
 
-from credativ_pg_migrator.database_connector import DatabaseConnector
+from credativ_pg_migrator.database_connector import DatabaseConnector, first_line
 from credativ_pg_migrator.migrator_logging import MigratorLogger
+from credativ_pg_migrator.text_decoding import TextDecoder
+
+
+## --------------------------------------------------------------------------------------
+## The conversion of a bare statement - the query of a view and the statement an application
+## holds as text are given the same one. §7 of
+## development/archive/APPLICATION_QUERIES_CONVERSION_STRATEGY.md, P3-5 of
+## development/OPEN_ISSUES.md.
+## --------------------------------------------------------------------------------------
+
+## What SQLite writes and PostgreSQL has nothing for, or answers differently enough that a
+## rename would be a lie. Matched against the statement of the SOURCE and not against the
+## converted text: get_sql_functions_mapping() renames some of these on the way to a view -
+## changes() becomes the literal 0 and total() becomes sum() - so by the time the text is
+## PostgreSQL there is nothing left to find. A view has been migrated that way since the
+## connector was written; a statement of an application is not offered a conversion which
+## answers other values.
+SQLITE_WITHOUT_COUNTERPART = (
+    (r'changes|total_changes|last_insert_rowid',
+     "changes(), total_changes() and last_insert_rowid() answer what the PREVIOUS statement of "
+     "the same connection did. Nothing in a converted statement can carry that over - "
+     "PostgreSQL answers it with the RETURNING clause of the statement which wrote"),
+    (r'sqlite_version|sqlite_source_id|sqlite_offset'
+     r'|sqlite_compileoption_get|sqlite_compileoption_used',
+     "the functions which describe the SQLite library itself have no counterpart - a statement "
+     "which reads them asks about the database engine and not about the data"),
+    (r'typeof',
+     "typeof() answers the storage class one VALUE happens to have, which is a thing SQLite has "
+     "and PostgreSQL does not: a column of PostgreSQL has one type and every value in it has "
+     "that type. The statement has to be rewritten around what it was really asking"),
+    (r'total',
+     "total() answers 0.0 over no rows where sum() answers NULL, so the two cannot be exchanged "
+     "- write coalesce(sum(x), 0) where the 0 is what is meant"),
+    (r'random|randomblob',
+     "random() of SQLite answers a signed 64 bit integer and random() of PostgreSQL answers a "
+     "number between 0 and 1 - the same name and another value. Write "
+     "(random() * 9223372036854775807)::bigint where the integer is what is meant"),
+    (r'hex|unhex|quote',
+     "hex() of SQLite writes '2A' and encode(x, 'hex') of PostgreSQL writes '2a', and which of "
+     "the two the application compares against cannot be guessed. quote() writes the literal "
+     "syntax of SQLite, which is not the literal syntax of PostgreSQL"),
+    (r'printf|format',
+     "printf() of SQLite takes the format codes of C. PostgreSQL has a format() of its own, "
+     "which takes %s, %I and %L - so the call is not refused by the target and answers another "
+     "string, which is why it is stopped here"),
+    (r'glob',
+     "GLOB matches with the wildcards of a shell ('*', '?', '[abc]') and is always case "
+     "sensitive. LIKE of PostgreSQL uses '%' and '_', so the pattern itself has to be rewritten "
+     "and not only the operator"),
+    (r'likely|unlikely|likelihood',
+     "the optimiser hints of SQLite answer their argument and tell the planner what to expect. "
+     "PostgreSQL has no such hint, so the call has to be taken out - which changes the plan the "
+     "statement is given"),
+    (r'strftime|julianday|unixepoch|timediff',
+     "the date functions of SQLite take the modifiers of SQLite ('start of month', '+1 day', "
+     "'weekday 0', 'localtime') and count in Julian days. No expression of PostgreSQL answers "
+     "the same value for every one of them"),
+    (r'highlight|snippet|bm25|matchinfo|offsets',
+     "the full text search of SQLite (FTS3/4/5) has no counterpart - PostgreSQL searches text "
+     "with tsvector, tsquery and ts_rank, which need another index and another query"),
+    (r'json_each|json_tree|json_group_array|json_group_object|json_quote|json_valid|json_type'
+     r'|json_patch|json_remove|json_set|json_insert|json_replace|json_array_length',
+     "the JSON functions of SQLite answer text where the ones of PostgreSQL answer json or "
+     "jsonb, and json_each() of the two is a different table altogether. The statement has to "
+     "be rewritten around the operators of PostgreSQL"),
+    (r'load_extension',
+     "the statement calls into a loadable extension of SQLite, which is not part of the "
+     "database file and was not migrated with it"),
+)
+
+SQLITE_WITHOUT_COUNTERPART = tuple(
+    (re.compile(rf'(?i)(?<![\w.])(?:{names})\s*\('), reason)
+    for names, reason in SQLITE_WITHOUT_COUNTERPART)
+
+## The same, for what is not a function call: a pseudo column, an operator, or a table of the
+## SQLite catalogue. ROWID is written 't.rowid' as often as it is written bare, so the
+## lookbehind of these lets a qualifier stand in front of the name.
+SQLITE_CONSTRUCTS_WITHOUT_COUNTERPART = (
+    (re.compile(r'(?i)(?<![\w])(?:_rowid_|rowid)(?![\w(])'),
+     "ROWID - and its aliases _ROWID_ and OID - is the physical row number SQLite gives a row, "
+     "and PostgreSQL has nothing which keeps that value: the migration wrote the rows in an "
+     "order of its own and ctid changes with every UPDATE. A statement which selects or "
+     "compares a rowid has to be rewritten around the primary key"),
+    (re.compile(r'(?i)(?<![\w.])sqlite_(?:master|schema|sequence|stat[0-9]|temp_master)(?![\w])'),
+     "the statement reads the catalogue of SQLite. The catalogue of PostgreSQL holds other "
+     "tables with other columns, and nothing of it was migrated"),
+    (re.compile(r'(?i)(?<![\w.])pragma_[a-z_]+\s*\('),
+     "a PRAGMA table valued function describes the SQLite database file itself and has no "
+     "counterpart at all"),
+    (re.compile(r'(?i)(?<![\w.])GLOB(?![\w(])'),
+     "the GLOB operator matches with the wildcards of a shell and is always case sensitive - "
+     "LIKE of PostgreSQL uses other wildcards, so the pattern has to be rewritten with it"),
+    (re.compile(r'(?i)(?<![\w.])MATCH(?![\w(])'),
+     "the MATCH operator asks a full text index of SQLite. PostgreSQL writes that as "
+     "to_tsvector(...) @@ to_tsquery(...) over an index of its own"),
+    (re.compile(r'(?i)(?<![\w.])COLLATE\s+(?:NOCASE|RTRIM|BINARY)(?![\w])'),
+     "the collations of SQLite have no counterpart: NOCASE folds the ASCII letters and nothing "
+     "else, RTRIM ignores trailing spaces. Write lower(x) = lower(y) for NOCASE and "
+     "rtrim(x) = rtrim(y) for RTRIM"),
+    (re.compile(r'(?i)(?<![\w.])REGEXP(?![\w(])'),
+     "the REGEXP operator of SQLite calls a function the application registers itself, so what "
+     "it matches is not part of the database at all. PostgreSQL writes a regular expression "
+     "with '~', which is POSIX and not necessarily what the application registered"),
+)
+
+## What is converted, and still means something else afterwards - the warnings of §9.
+SQLITE_LIKE_OPERATOR = re.compile(r'(?i)(?<![\w.])(?:NOT\s+)?LIKE(?![\w(])')
+SQLITE_ORDER_BY = re.compile(r'(?i)(?<![\w.])ORDER\s+BY(?![\w])')
+SQLITE_NULLS_ORDER = re.compile(r'(?i)(?<![\w.])NULLS\s+(?:FIRST|LAST)(?![\w])')
+SQLITE_GROUP_CONCAT = re.compile(r'(?i)(?<![\w.])GROUP_CONCAT\s*\(')
+SQLITE_CAST = re.compile(r'(?i)(?<![\w.])CAST\s*\(')
+SQLITE_JSON_EXTRACT = re.compile(r'(?i)(?<![\w.])JSON_EXTRACT\s*\(')
+SQLITE_UTC_KEYWORD = re.compile(r'(?i)(?<![\w.])CURRENT_(?:TIMESTAMP|TIME|DATE)(?![\w])')
+## read on the text as it stands: 'now' lives inside a string literal, which the masked text
+## blanks out
+SQLITE_NOW_LITERAL = re.compile(r"(?i)'\s*now\s*'")
 
 
 class SQLiteConnector(DatabaseConnector):
+
+    ## SQLite has neither kind of object - see DatabaseConnector.OBJECT_KINDS_ABSENT.
+    OBJECT_KINDS_ABSENT = {
+        'user_defined_types': 'SQLite has no CREATE TYPE - a column carries a type affinity and nothing is declared apart from the table.',
+        'domains': 'SQLite has no CREATE DOMAIN. A CHECK constraint on the column is the nearest thing it has, and that is migrated with the table it stands on.',
+    }
 
     # Identifier as it can appear in SQLite DDL - double quoted, backtick quoted,
     # bracket quoted (MS Access style, accepted by SQLite) or a bare name.
@@ -90,6 +212,38 @@ class SQLiteConnector(DatabaseConnector):
         self._ddl_database_path = None
         if self.connectivity == self.config_parser.const_connectivity_ddl():
             self._prepare_ddl_files()
+
+    ## ---------------------------------------------------------------- bytes to text
+    ##
+    ## SQLite does not enforce the encoding of a TEXT value and it does not enforce the type
+    ## of a column either, so a value which is declared TEXT can arrive as bytes which are
+    ## not valid UTF-8 - a legacy database in a single byte encoding is exactly that. Four
+    ## places decoded those with errors='replace', which writes U+FFFD into the target as if
+    ## it were the data: it cannot be told apart from a U+FFFD which was really there and
+    ## cannot be turned back into the byte it stood for. What happens instead is
+    ## migration.on_undecodable_bytes, applied in text_decoding.py.
+
+    def text_decoder(self):
+        """The decoder of the values of this connection. UTF-8 is the only encoding SQLite
+        hands text over in, so there is nothing else to try before the setting applies."""
+        decoder = getattr(self, '_text_decoder', None)
+        if decoder is None:
+            decoder = TextDecoder(self.config_parser, 'sqlite_connector',
+                                  encodings=('utf-8',))
+            self._text_decoder = decoder
+        return decoder
+
+    def script_decoder(self):
+        """The decoder of the DDL scripts, which are files and not values of a connection."""
+        decoder = getattr(self, '_script_decoder', None)
+        if decoder is None:
+            ## utf-8-sig is utf-8 and also removes a byte order mark, which plain utf-8
+            ## leaves in the text as \ufeff - SQLite then refuses the first statement of the
+            ## file as an unrecognised token.
+            decoder = TextDecoder(self.config_parser, 'sqlite_connector',
+                                  encodings=('utf-8-sig',), last_resort='latin-1')
+            self._script_decoder = decoder
+        return decoder
 
     ## ---------------------------------------------------------------- connection
 
@@ -169,17 +323,17 @@ class SQLiteConnector(DatabaseConnector):
             return self._ddl_database_path
         return self.config_parser.get_connect_string(self.source_or_target)
 
-    @staticmethod
-    def _read_script(filepath):
-        """ Read a SQL script; a legacy dump is not necessarily valid UTF-8. """
+    def _read_script(self, filepath):
+        """
+        Read a SQL script; a legacy dump is not necessarily valid UTF-8.
+
+        A script which is not UTF-8 is read as latin-1, which keeps every byte, and that is
+        reported: what is in the file are the names of the objects the migration is about to
+        create, so a script read in the wrong encoding creates them misspelled.
+        """
         with open(filepath, 'rb') as script_file:
             raw = script_file.read()
-        for encoding in ('utf-8', 'utf-8-sig', 'latin-1'):
-            try:
-                return raw.decode(encoding)
-            except UnicodeDecodeError:
-                continue
-        return raw.decode('utf-8', errors='replace')
+        return self.script_decoder().decode(raw, place=os.path.basename(filepath))
 
     def _execute_script(self, connection, script, filepath):
         """
@@ -259,6 +413,8 @@ class SQLiteConnector(DatabaseConnector):
                     self.config_parser.print_log_message('WARNING', f"sqlite_connector: _build_ddl_database: {filepath} is empty - skipped.")
                     continue
                 failed_statements += self._execute_script(build_connection, script, filepath)
+            ## which of the scripts were not in the encoding they were expected in
+            self.script_decoder().log_summary()
             build_connection.commit()
             objects = build_connection.execute(
                 "SELECT type, count(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' GROUP BY type ORDER BY type").fetchall()
@@ -300,18 +456,14 @@ class SQLiteConnector(DatabaseConnector):
         self.config_parser.set_source_schema('main')
         self.config_parser.print_log_message('INFO', "sqlite_connector: parse_ddl_files: DDL scripts loaded - source schema set to 'main'.")
 
-    @staticmethod
-    def _decode_text(value):
+    def _decode_text(self, value):
         """
-        Text factory for sqlite3. SQLite does not enforce the encoding of TEXT values,
-        so a legacy database can easily contain bytes which are not valid UTF-8. The
-        default factory raises on those - decoding with a replacement keeps the
-        migration running instead of failing on a single bad row.
+        Text factory for sqlite3. SQLite does not enforce the encoding of TEXT values, so a
+        legacy database can easily contain bytes which are not valid UTF-8. The default
+        factory raises on those, which ends the migration on a single bad row; what happens
+        instead is migration.on_undecodable_bytes, and its default keeps every byte.
         """
-        try:
-            return value.decode('utf-8')
-        except UnicodeDecodeError:
-            return value.decode('utf-8', errors='replace')
+        return self.text_decoder().decode(value, place='TEXT value')
 
     def connect(self):
         if self.connectivity == self.config_parser.const_connectivity_ddl():
@@ -346,6 +498,14 @@ class SQLiteConnector(DatabaseConnector):
         self.connection.text_factory = self._decode_text
 
     def disconnect(self):
+        try:
+            ## How many values did not fit UTF-8, before the connection which read them is
+            ## gone. Nothing is written when there were none.
+            decoder = getattr(self, '_text_decoder', None)
+            if decoder is not None:
+                decoder.log_summary()
+        except Exception:
+            pass
         try:
             if self.connection:
                 self.connection.close()
@@ -1986,7 +2146,22 @@ class SQLiteConnector(DatabaseConnector):
         source_schema_name = settings.get('source_schema_name')
         view_type = settings.get('view_type', 'VIEW')
 
-        converted_code = self._transpile(view_code, f'view {target_view_name}')
+        ## the shared converter, so that the query of a view and the statement of an
+        ## application cannot be converted differently (§15 phase 2 of the strategy). A view
+        ## whose query sqlglot cannot read keeps the text of the source, exactly as before -
+        ## the migration reports the view as failed and its code stays readable in the protocol.
+        try:
+            converted_code = self.convert_statement_code({
+                'view_code': view_code,
+                'source_schema_name': source_schema_name,
+                'target_schema_name': target_schema_name,
+                'target_db_type': settings.get('target_db_type', 'postgresql'),
+            })
+        except ValueError as e:
+            self.config_parser.print_log_message(
+                'WARNING', f"sqlite_connector: convert_view_code: view {target_view_name}: {e} - "
+                           f"the query of the source is carried over as it stands.")
+            converted_code = getattr(e, 'partial_code', view_code)
 
         try:
             self.connect()
@@ -2000,6 +2175,170 @@ class SQLiteConnector(DatabaseConnector):
         if not ddl.rstrip().endswith(';'):
             ddl += ';'
         return ddl
+
+    ## The source test of §8.1. EXPLAIN of SQLite compiles the statement - it resolves every
+    ## table and every column and answers the byte code of the virtual machine - and runs
+    ## none of it. Verified against a real SQLite database in tests/test_query_source_test.py.
+    SOURCE_TEST_PARAMETER_STYLE = 'qmark'
+
+    def source_test_native_mechanism(self):
+        return 'EXPLAIN'
+
+    def source_test_probe(self, sql, parameter_count=0):
+        ## sqlite3 refuses to run a statement holding a marker without a value for it, even
+        ## under EXPLAIN, so every marker is given NULL. The byte code is answered whatever
+        ## the values are - nothing of the statement is executed.
+        body = (sql or '').rstrip().rstrip(';')
+        if not body:
+            return [], []
+        return [(f"EXPLAIN {body}", [None] * parameter_count)], []
+
+    ## ---------------------------------------------------------------- application queries
+
+    def query_conversion_supported(self):
+        return True
+
+    def convert_statement_code(self, settings: dict):
+        """
+        One statement of SQLite, converted for the target - the query of a view and the
+        statement of an application are given the same conversion.
+
+        Raises ValueError when the statement could not be read as SQLite. `partial_code`
+        carries what the conversion can do without a parser, which is what the migration
+        writes into its protocol for a view it could not convert.
+        """
+        code = settings['view_code']
+        target_db_type = settings.get('target_db_type') or 'postgresql'
+        if target_db_type != 'postgresql':
+            raise ValueError(f"the target database type {target_db_type} is not supported - "
+                             f"SQLite is migrated to PostgreSQL")
+        if not code or not str(code).strip():
+            raise ValueError('the statement is empty')
+
+        try:
+            transpiled = sqlglot.transpile(str(code), read='sqlite', write='postgres')
+        except Exception as e:
+            error = ValueError(f"the statement could not be read as SQLite: {first_line(e)}")
+            error.partial_code = self._finalize_sql(str(code))
+            raise error
+        if not transpiled or not (transpiled[0] or '').strip():
+            error = ValueError('the parser read no statement at all')
+            error.partial_code = self._finalize_sql(str(code))
+            raise error
+
+        return self._finalize_sql(transpiled[0])
+
+    def sqlite_conversion_blockers(self, source_code):
+        """
+        The reasons the statement may not be offered as a conversion. Read on the statement of
+        the SOURCE: the function mapping of the connector renames several of these into
+        something PostgreSQL accepts and answers differently with, and after that there is
+        nothing left in the text to recognise.
+        """
+        statement = self.sql_without_literals_and_comments(source_code or '')
+        reasons = [reason for pattern, reason in SQLITE_WITHOUT_COUNTERPART
+                   if pattern.search(statement)]
+        reasons.extend(reason for pattern, reason in SQLITE_CONSTRUCTS_WITHOUT_COUNTERPART
+                       if pattern.search(statement))
+        return reasons
+
+    def sqlite_conversion_warnings(self, source_code, converted_code=''):
+        """
+        What the conversion writes correctly and what still answers something else on the
+        target. None of these is visible to any level of the target test: the converted
+        statement is valid PostgreSQL and runs.
+
+        The NULL ordering is read on the CONVERTED statement, because sqlglot writes the
+        NULLS clause itself where it can - warning about something the conversion has already
+        done is how a warning earns being ignored.
+        """
+        warnings = []
+        raw = source_code or ''
+        statement = self.sql_without_literals_and_comments(raw)
+
+        if SQLITE_LIKE_OPERATOR.search(statement):
+            warnings.append(
+                "LIKE of SQLite ignores the case of the ASCII letters - 'abc' LIKE 'ABC' is "
+                "true there and false on PostgreSQL. Write ILIKE, or lower() on both sides, "
+                "wherever the comparison was meant to be case insensitive")
+        if converted_code and SQLITE_ORDER_BY.search(
+                self.sql_without_literals_and_comments(converted_code)) \
+                and not SQLITE_NULLS_ORDER.search(
+                    self.sql_without_literals_and_comments(converted_code)):
+            warnings.append(
+                "ORDER BY without NULLS FIRST / NULLS LAST: SQLite sorts NULL first ascending "
+                "and PostgreSQL sorts it last, so the two answer the rows in another order "
+                "wherever the column is nullable. Write NULLS FIRST to keep the order of the "
+                "source")
+        if SQLITE_JSON_EXTRACT.search(statement):
+            warnings.append(
+                "json_extract() of SQLite answers TEXT for a scalar and the "
+                "json_extract_path() it becomes answers a json value, which is written with "
+                "its quotes when it is compared with a string. Write the '->>' operator, "
+                "which answers text, wherever the value is compared")
+        if SQLITE_GROUP_CONCAT.search(statement):
+            warnings.append(
+                "GROUP_CONCAT becomes string_agg. Neither of them promises an order unless one "
+                "is written out - SQLite has no ORDER BY inside the call at all - so the two "
+                "can answer the same values joined in another order")
+        if SQLITE_CAST.search(statement):
+            warnings.append(
+                "a CAST of SQLite never fails: CAST('12abc' AS INTEGER) answers 12 and "
+                "CAST('abc' AS INTEGER) answers 0. PostgreSQL refuses both with an error, so a "
+                "statement which casts a column holding anything but numbers stops working on "
+                "data the source accepted")
+        if SQLITE_UTC_KEYWORD.search(statement) or SQLITE_NOW_LITERAL.search(raw):
+            warnings.append(
+                "CURRENT_TIMESTAMP and the modifier 'now' answer UTC in SQLite. The "
+                "current_timestamp of PostgreSQL answers the time in the TimeZone of the "
+                "session, so the two differ by the offset of that zone unless the session runs "
+                "in UTC")
+        return warnings
+
+    def convert_query_code(self, settings: dict):
+        """
+        One statement of an application, converted for PostgreSQL - the same conversion the
+        query of a view is given. See the contract in DatabaseConnector.convert_query_code().
+
+        The names of the tables are left as the statement wrote them. SQLite has no schema, so
+        the view path prefixes them with the schema of the target itself (_qualify_object_names,
+        by text) - here that is the work of the name map of §7.3, which does it through the
+        parsed statement and reports what the migration does not know.
+        """
+        statement_id = settings.get('statement_id', '')
+        source_code = settings['query_code']
+        blockers = self.sqlite_conversion_blockers(source_code)
+        if blockers:
+            return {'code': '', 'converted': False,
+                    'warnings': self.sqlite_conversion_warnings(source_code),
+                    'error': '; '.join(blockers)}
+
+        try:
+            converted = self.convert_statement_code({
+                'view_code': source_code,
+                'source_schema_name': settings.get('source_schema_name'),
+                'target_schema_name': settings.get('target_schema_name'),
+                'target_db_type': settings.get('target_db_type', 'postgresql'),
+            })
+        except ValueError as e:
+            return {'code': '', 'converted': False,
+                    'warnings': self.sqlite_conversion_warnings(source_code),
+                    'error': first_line(e)}
+        except Exception as e:
+            return {'code': '', 'converted': False,
+                    'warnings': self.sqlite_conversion_warnings(source_code),
+                    'error': f"the conversion ended with an error: {first_line(e)}"}
+
+        if not (converted or '').strip():
+            return {'code': '', 'converted': False,
+                    'warnings': self.sqlite_conversion_warnings(source_code),
+                    'error': 'the conversion produced no statement at all'}
+
+        self.config_parser.print_log_message(
+            'DEBUG', f"sqlite_connector: convert_query_code: {statement_id}: {converted}")
+        return {'code': converted, 'converted': True,
+                'warnings': self.sqlite_conversion_warnings(source_code, converted),
+                'error': None}
 
     ## ---------------------------------------------------------------- default values
 
@@ -2126,14 +2465,13 @@ class SQLiteConnector(DatabaseConnector):
             self.config_parser.print_log_message('WARNING', f"sqlite_connector: get_table_next_identity: Error fetching next identity for {table_schema}.{table_name}: {e}")
             return None
 
-    @staticmethod
-    def _coerce_boolean(value):
+    def _coerce_boolean(self, value):
         if value is None or isinstance(value, bool):
             return value
         if isinstance(value, (int, float, Decimal)):
             return value != 0
         if isinstance(value, (bytes, bytearray, memoryview)):
-            value = bytes(value).decode('utf-8', errors='replace')
+            value = self.text_decoder().decode(bytes(value), place='BOOLEAN value')
         if isinstance(value, str):
             normalized = value.strip().lower()
             if normalized in ('1', 't', 'true', 'y', 'yes', 'on'):
@@ -2143,8 +2481,7 @@ class SQLiteConnector(DatabaseConnector):
             return True
         return bool(value)
 
-    @staticmethod
-    def _coerce_datetime(value):
+    def _coerce_datetime(self, value):
         """
         SQLite stores date and time values as ISO text, as a Unix timestamp (INTEGER) or
         as a Julian day number (REAL). Text is handed over unchanged - PostgreSQL parses
@@ -2153,7 +2490,7 @@ class SQLiteConnector(DatabaseConnector):
         if value is None or isinstance(value, (str, datetime.date, datetime.datetime, datetime.time)):
             return value
         if isinstance(value, (bytes, bytearray, memoryview)):
-            return bytes(value).decode('utf-8', errors='replace')
+            return self.text_decoder().decode(bytes(value), place='date or time value')
         if isinstance(value, int):
             try:
                 return datetime.datetime.fromtimestamp(value, datetime.timezone.utc).replace(tzinfo=None)

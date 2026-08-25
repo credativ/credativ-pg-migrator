@@ -74,6 +74,11 @@ migration:
   migrate_views: true
   set_sequences: true
   on_error: continue
+  # SQLite does not enforce the encoding of a TEXT value, so a legacy database can
+  # hold bytes which are not valid UTF-8. "substitute" keeps such a value with
+  # latin1, which loses no byte, and reports every occurrence; "fail" refuses it so
+  # the table is recorded as failed and nothing is guessed.
+  on_undecodable_bytes: substitute
   parallel_workers: 8         # >>> ADJUST
   batch_size: 25000
   names_case_handling: lower  # >>> ADJUST

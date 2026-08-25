@@ -48,8 +48,8 @@ COMMON_COLUMN_COMMENTS = {
     'target_schema_name': 'Schema of the target PostgreSQL database the object is created in.',
     'target_table_name': 'Name of the table in the target PostgreSQL database - the name the table of the source was mapped to.',
     'target_alias_name': 'The second name the table is also known under in the target, created as a view over it, when the source knows the table under more than one name. Empty when there is none.',
-    'final_valid': 'Result of the check run at the end of the migration, which asks the target catalog whether the object really exists and can be used: true = valid, false = the object was created but the target reports it as broken (see final_valid_message), empty = it was not checked.',
-    'final_valid_message': 'What the closing validity check found. Empty for an object the target accepts.',
+    'final_valid': "Result of the check run at the end of the migration, which asks the catalogue of the target whether the object is THERE: true = it is, false = there is DDL for it and it is not there (see final_valid_message), empty = nothing was ever created for it, so there was nothing to look for. Being there is NOT the same as doing what the object of the source did, and no catalogue can say that: a view which is there has had its query resolved by PostgreSQL, and a PL/pgSQL routine which is there has had the syntax of its body parsed and nothing more - a body which reads a table that is not there is created without complaint and fails at the first call.",
+    'final_valid_message': 'What the closing check established for this object, and what it did not - it says which of the two it means, per kind of object.',
     'validated_at': 'When the validation wrote this result.',
     'passed': 'Whether the source and the target agree on everything this row compares.',
 }
@@ -177,6 +177,7 @@ def build_comments_catalog(config_parser):
         'columns': {
             'default_value_schema': 'Schema the default object belongs to in the source database.',
             'default_value_name': 'Name of the default object in the source database. It is the name the columns of the source refer to.',
+            'target_default_value_name': 'The name the object really has in the target - the spelling names_case_handling produced. The column next to it holds the spelling of the source, which is kept unchanged: two objects of the source which differ only in the case of their letters are two different objects, and the record of what was read has to say so.',
             'default_value_sql': 'The declaration of the default object as the source database states it.',
             'extracted_default_value': 'The value itself, taken out of the declaration and written into the DEFAULT clause of every column which was bound to the object.',
             'default_value_data_type': 'The type of the extracted value, which decides how it is written into the column.',
@@ -418,7 +419,8 @@ def build_comments_catalog(config_parser):
         ),
         'columns': {
             'index_owner': 'Owner of the index in the source database.',
-            'index_name': 'Name of the index. PostgreSQL requires index names to be unique within a schema while several sources require them to be unique only within a table, so the name in the target can carry the name of the table.',
+            'index_name': 'Name of the index in the source database. PostgreSQL requires index names to be unique within a schema while several sources require them to be unique only within a table, so the name in the target can carry the name of the table.',
+            'target_index_name': 'The name the object really has in the target - the spelling names_case_handling produced. The column next to it holds the spelling of the source, which is kept unchanged: two objects of the source which differ only in the case of their letters are two different objects, and the record of what was read has to say so.',
             'index_type': 'The kind of index - unique, clustered, bitmap and so on, as the source calls it.',
             'index_sql': 'The CREATE INDEX statement which was sent to the target.',
             'index_columns': 'The columns the index is built on, in their order.',
@@ -434,12 +436,14 @@ def build_comments_catalog(config_parser):
             'failed here usually points at data the source itself no longer satisfies.'
         ),
         'columns': {
-            'constraint_name': 'Name of the constraint.',
+            'constraint_name': 'Name of the constraint in the source database.',
+            'target_constraint_name': 'The name the object really has in the target - the spelling names_case_handling produced. The column next to it holds the spelling of the source, which is kept unchanged: two objects of the source which differ only in the case of their letters are two different objects, and the record of what was read has to say so.',
             'constraint_type': 'The kind of constraint - PRIMARY KEY, UNIQUE, FOREIGN KEY or CHECK.',
             'constraint_owner': 'Owner of the constraint in the source database.',
             'constraint_columns': 'The columns of the table the constraint is placed on.',
             'referenced_table_schema': 'Schema of the table a foreign key points at.',
-            'referenced_table_name': 'The table a foreign key points at.',
+            'referenced_table_name': 'The table a foreign key points at, named as the source names it.',
+            'target_referenced_table_name': 'The name the object really has in the target - the spelling names_case_handling produced. The column next to it holds the spelling of the source, which is kept unchanged: two objects of the source which differ only in the case of their letters are two different objects, and the record of what was read has to say so.',
             'referenced_columns': 'The columns of that table the foreign key points at.',
             'constraint_sql': 'The statement which was sent to the target.',
             'delete_rule': 'What a foreign key does when the referenced row is deleted - NO ACTION, CASCADE, SET NULL and so on.',
@@ -530,7 +534,8 @@ def build_comments_catalog(config_parser):
         ),
         'columns': {
             'trigger_id': 'The identifier the source database gave the trigger, for the engines which have one.',
-            'trigger_name': 'Name of the trigger.',
+            'trigger_name': 'Name of the trigger in the source database.',
+            'target_trigger_name': 'The name the object really has in the target - the spelling names_case_handling produced. The column next to it holds the spelling of the source, which is kept unchanged: two objects of the source which differ only in the case of their letters are two different objects, and the record of what was read has to say so.',
             'trigger_event': 'What fires the trigger - INSERT, UPDATE, DELETE, and whether it runs before or after the statement.',
             'trigger_new': 'The name the source gives the new image of the row. In the target it is read as NEW.',
             'trigger_old': 'The name the source gives the old image of the row. In the target it is read as OLD.',
@@ -540,6 +545,36 @@ def build_comments_catalog(config_parser):
             'trigger_comment': 'Description of the trigger read from the source catalog.',
             'requires_manual_adjustment': 'true = the trigger was created, but it does not do everything the source did and has to be looked at. What is missing stands in manual_adjustment_details.',
             'manual_adjustment_details': 'What the conversion could not express and what has to be added by hand.',
+        },
+    }
+
+    catalog[config_parser.get_protocol_name_queries()] = {
+        'comment': (
+            'The statements of an application which the query conversion read, and what became of each of them. '
+            'The step runs over a finished migration and writes nothing to either database - this table is the '
+            'record of what it found. status says it in one word: CONVERTED (changed and accepted by the target), '
+            'UNCHANGED (already valid PostgreSQL), CONVERTED_FAILING (converted, and the target refused it), '
+            'NOT CONVERTED (the converter could not do it) and SKIPPED (a gate refused it, because it is not a read).'
+        ),
+        'columns': {
+            'input_file': 'The file the statement was read from.',
+            'statement_ordinal': 'Its place in that file, counted from 1.',
+            'line_from': 'The line the statement begins at, so it can be found in the file it came from.',
+            'line_to': 'The line it ends at.',
+            'statement_name': "The name written above the statement as '-- name: ...', when it carries one.",
+            'statement_hash': 'The hash of the statement with its whitespace normalised. The same statement written twice is converted and tested once, and a later run can tell what changed.',
+            'status': 'What became of the statement - one of CONVERTED, UNCHANGED, CONVERTED_FAILING, NOT CONVERTED, SKIPPED.',
+            'reason': 'Why, for everything which is not simply converted: which gate refused the statement, or what the converter or the target said.',
+            'source_sql': 'The statement as it stands in the file of the application.',
+            'target_sql': 'The statement as it was written into the output file, with the bind parameter markers of the application back in it.',
+            'source_test_result': 'The outcome of compiling the statement against the SOURCE database before it was converted - OK, FAILED, ERROR or "not run". FAILED says the statement was already broken, or reads an object the application creates at run time, which is not a failure of the conversion. Compile only: PREPARE, EXPLAIN, SET NOEXEC ON or the prepareStatement of a JDBC driver, never an execution. Switched with query_conversion.source_test.',
+            'source_test_message': 'What the source answered, or why it was not asked.',
+            'target_test_result': "OK, FAILED, INCONCLUSIVE or 'not run'. INCONCLUSIVE means PostgreSQL could not infer the type of a bind parameter, which says nothing about the rest of the statement.",
+            'target_test_message': 'What the target answered - the error of a statement it refused, or which test was run.',
+            'target_test_duration_ms': 'How long the target needed for it. It is here and not in the output file, so that the file stays the same for the same input.',
+            'warnings': 'What has to be read before the statement is used, one per line. A warning marked BLOCKING says the converted statement must not be used as it stands.',
+            'identical_to': 'The ordinal of the statement this one repeats, when the same statement stands in the file more than once. Such a statement is converted and tested once.',
+            'success': 'true for a statement which was converted or was already valid and passed the test of the target; false for everything else.',
         },
     }
 
@@ -918,11 +953,18 @@ def build_comments_catalog(config_parser):
             'source_columns_count': 'How many columns the source table has.',
             'target_columns_count': 'How many columns the target table has.',
             'source_indexes_count': 'How many indexes the source table has.',
-            'target_indexes_count': 'How many indexes the target table has. A difference is normal for a source whose primary key already brings an index of its own.',
-            'source_constraints_count': 'How many constraints the source table has.',
+            'target_indexes_count': 'How many indexes the target table has. More than the source is normal - PostgreSQL creates an index for every primary key and every unique constraint, and the migration adds one to the parent side of a foreign key which has none - so the two are compared for a SHORTFALL and not for equality: fewer means an index of the source is not here.',
+            'source_constraints_count': 'How many constraints the source table has. The engines do not count the same things (the SQLite connector counts neither the primary key nor a unique constraint), which is the other reason the comparison is a shortfall and not an equality.',
             'target_constraints_count': 'How many constraints the target table has.',
-            'row_count_passed': 'Whether the two row counts agree.',
+            'columns_count_passed': 'Whether the target table has the columns of the source. This one IS compared exactly: a column fewer is data which did not arrive.',
+            'indexes_count_passed': 'Whether the indexes of the source are all in the target. Until 0.16.0 the four counts beside it were recorded and compared by nothing, so a table which arrived with half its indexes was reported as validated.',
+            'constraints_count_passed': 'Whether the constraints of the source are all in the target.',
+            'row_count_passed': 'Whether the two row counts agree. PASS, X for a mismatch, SKIP where the check ran and could not decide, and - where it was never asked for.',
             'table_hash_passed': 'Whether the two hashes agree, or why the comparison could not be made.',
+            'row_hash_passed': 'Whether the sample of rows compared row by row agrees. It could fail a table in the log and was written into no column at all until 0.16.0, so a table which failed it was shown as passed in the summary.',
+            'lob_size_passed': 'Whether the sizes of the large objects of the sampled rows agree. Recorded since 0.16.0, for the same reason as the column before it.',
+            'validation_outcome': "What the validation of this table ended in: PASSED, FAILED, or NOT VALIDATED. The third one is not a failure and not a pass - it means not one check could be run against the table (no primary key, no checksum on that source, the checks switched off), so the run says nothing about whether the table is correct. Before 0.16.0 such a table was reported exactly like one which passed every check.",
+            'validation_message': 'What was checked and what each check said - and, for a table which could not be measured, why each check could not run.',
             'validated_at': 'When this comparison was made.',
         },
     }

@@ -5,6 +5,22 @@ from credativ_pg_migrator.anonymization.registry import anonymization_registry
 # In-memory integer mapping cache for consistent_integer_mask
 _int_cache = {}
 
+def flag(params, name, default=False):
+    """
+    A parameter of a method read as a true/false value.
+
+    Every parameter here comes out of YAML, and a form-driven editor writes each of them as
+    text: pass_original: "false" is then the string 'false', which is truthy, and the method
+    would do the opposite of what the configuration says. Written as text, the words YAML
+    itself would have read as true are true and everything else is false - a flag that
+    cannot be read must not switch the thing on. A value which is not text keeps Python's
+    own meaning, so a real boolean, a 0/1 and an empty value all work as they did.
+    """
+    value = params.get(name, default)
+    if isinstance(value, str):
+        return value.strip().lower() in ('true', 'yes', 'on', '1')
+    return bool(value)
+
 def get_faker(locale='de_DE'):
     try:
         from faker import Faker
@@ -106,10 +122,13 @@ def deterministic_hash_mask(value, params):
     if value is None:
         return None
     salt = params.get('salt', '')
-    out_type = params.get('out_type', 'string')
-    
+    ## 'integer' is what docs/configs/anonymization_workflow.yaml names, 'int' what
+    ## docs/workflow/anonymization.md does - both have to work, or the digest comes back
+    ## where a number was asked for.
+    out_type = str(params.get('out_type', 'string')).strip().lower()
+
     hashed = hashlib.sha256(f"{value}{salt}".encode()).hexdigest()
-    if out_type == 'int':
+    if out_type in ('int', 'integer'):
         return int(hashed[:8], 16)
     return hashed
 
@@ -146,8 +165,8 @@ def partial_mask(value, params):
 def postgres_anon_native(value, params):
     func_name = params.get('func_name', 'anon.fake_city')
     args = params.get('args', '')
-    pass_original = params.get('pass_original', False)
-    
+    pass_original = flag(params, 'pass_original')
+
     if pass_original:
         if args:
             return f"__RAW_SQL__:{func_name}(%s, {args})"

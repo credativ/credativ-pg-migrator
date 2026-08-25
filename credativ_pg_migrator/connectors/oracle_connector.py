@@ -15,6 +15,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 from credativ_pg_migrator.database_connector import DatabaseConnector
+from credativ_pg_migrator.connectors.oracle_query_conversion import OracleQueryConversion
 from credativ_pg_migrator.migrator_logging import MigratorLogger
 import oracledb  ## pip install python-oracledb
 import traceback
@@ -24,7 +25,15 @@ import datetime
 import re
 import sqlglot
 
-class OracleConnector(DatabaseConnector):
+class OracleConnector(OracleQueryConversion, DatabaseConnector):
+
+    ## Measured for P3-2: the body of a converted routine carries the names the routine of the
+    ## source wrote - only the schema in front of them is re-pointed at the target. They are
+    ## undelimited, so PostgreSQL folds them to lower case.
+    ROUTINE_BODY_NAMES_NOT_CONVERTED = (
+        'the tables and the columns inside the body are named as the routine of the source '
+        'named them - only the schema in front of them is re-pointed. They are written '
+        'without quotes, so PostgreSQL folds them to lower case')
     def __init__(self, config_parser, source_or_target):
         if source_or_target != 'source':
             raise ValueError("Oracle is only supported as a source database")
@@ -91,41 +100,6 @@ class OracleConnector(DatabaseConnector):
             finally:
                 # Always clear the handle so connect() reopens on next use
                 self.connection = None
-
-    def get_sql_functions_mapping(self, settings):
-        """ Returns a dictionary of SQL functions mapping for the target database.
-
-        This mapping is applied (via the base apply_sql_functions_mapping, a
-        case-insensitive regex substitution) when converting views, functions and
-        procedures. It therefore only lists Oracle functions that need an explicit
-        rename to a PostgreSQL function with the *same argument order and semantics*
-        - anything requiring argument reordering or restructuring (DECODE, NVL2,
-        INSTR with 3+ args, MONTHS_BETWEEN, ...) is intentionally left out and is
-        either handled by sqlglot during view conversion or flagged for manual review.
-
-        Note: several common Oracle constructs (NVL, SYSDATE, SYSTIMESTAMP, DUAL,
-        NEXTVAL/CURRVAL) are already handled by sqlglot (views) and by
-        _apply_plsql_substitutions (functions/procedures); they are repeated here as
-        harmless no-op-if-already-converted fallbacks for the raw/fallback code path.
-        """
-        target_db_type = settings['target_db_type']
-        if target_db_type == 'postgresql':
-            return {
-                # Oracle GROUPING_ID(a, b, ...) == PostgreSQL GROUPING(a, b, ...):
-                # both return the bitmask of the GROUP BY expressions not present in
-                # the current grouping set. sqlglot does not translate GROUPING_ID.
-                'grouping_id(': 'grouping(',
-                # Null handling / misc functions with identical PostgreSQL equivalents
-                'nvl(': 'coalesce(',
-                'lengthb(': 'octet_length(',
-                'sys_guid()': 'gen_random_uuid()',
-                # Date/time pseudo-columns (no parentheses in Oracle)
-                'systimestamp': 'current_timestamp',
-                'sysdate': 'current_timestamp',
-            }
-        else:
-            self.config_parser.print_log_message('ERROR', f"oracle_connector: get_sql_functions_mapping: Unsupported target database type: {target_db_type}")
-            return {}
 
     def migrate_sequences(self, target_connector, settings):
         """
@@ -1027,11 +1001,20 @@ class OracleConnector(DatabaseConnector):
         return ""
 
     def get_indexes_count(self, schema_name: str, table_name: str) -> int:
+        """
+        How many indexes the table has, as the validator compares them.
+
+        The internal index of a LOB column is not one of them. Oracle keeps one per LOB
+        column in all_indexes, PostgreSQL keeps the value out of line without an index of any
+        kind, and counting it made every table with a CLOB or a BLOB look as though an index
+        had been lost - which is how a check earns being ignored.
+        """
         query = """
             SELECT count(*)
             FROM all_indexes
             WHERE table_owner = :owner
             AND table_name = :table_name
+            AND index_type <> 'LOB'
         """
         try:
             self.connect()
@@ -1430,7 +1413,7 @@ class OracleConnector(DatabaseConnector):
 
         target_trigger_name = self.config_parser.convert_names_case(trigger_name)
         target_table = self.config_parser.convert_names_case(target_table_name)
-        func_name = f"{target_trigger_name}_tgfn"
+        func_name = self.config_parser.convert_names_case(f"{target_trigger_name}_tgfn")
 
         func_ddl = (f'CREATE OR REPLACE FUNCTION "{target_schema_name}"."{func_name}"() RETURNS TRIGGER AS $$\n'
                     f'{body}\n$$ LANGUAGE plpgsql;')
@@ -2187,199 +2170,6 @@ class OracleConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', e)
             raise
 
-    def _warn_unconvertible_oracle_sql(self, sql, view_label):
-        """Log warnings for Oracle constructs that cannot be reliably auto-converted, so they
-        get manual review instead of silently producing wrong PostgreSQL.
-        (Oracle (+) outer joins are handled by _convert_marked_outer_joins and warned about
-        separately only when a specific condition could not be converted.)"""
-        if not sql:
-            return
-        upper = sql.upper()
-        issues = []
-        if 'CONNECT BY' in upper or 'START WITH' in upper:
-            issues.append("Oracle CONNECT BY / START WITH hierarchical query - needs a PostgreSQL recursive CTE")
-        if re.search(r'\bROWNUM\b', upper):
-            issues.append("Oracle ROWNUM - use LIMIT or a window function in PostgreSQL")
-        if 'LISTAGG' in upper:
-            issues.append("Oracle LISTAGG - use STRING_AGG in PostgreSQL")
-        for issue in issues:
-            self.config_parser.print_log_message('WARNING', f"oracle_connector: convert_view_code: view {view_label} contains {issue}. Manual review of the generated view is recommended.")
-
-    def _preprocess_oracle_outer_joins(self, sql):
-        """Turn Oracle (+) outer-join operators into inline comment markers on the '=' so the
-        parser attaches them to the EQ node (reuses the Sybase ASE *=/=* marker technique).
-        'col = col(+)' -> right side is null-supplying -> LEFT outer.
-        'col(+) = col' -> left side is null-supplying  -> RIGHT outer."""
-        if not sql or '(+)' not in sql:
-            return sql
-        sql = re.sub(r'([\w."]+)\s*=\s*([\w."]+)\s*\(\s*\+\s*\)', r'\1 = /* left_outer */ \2', sql)
-        sql = re.sub(r'([\w."]+)\s*\(\s*\+\s*\)\s*=\s*([\w."]+)', r'\1 = /* right_outer */ \2', sql)
-        return sql
-
-    def _convert_marked_outer_joins(self, expression):
-        """Rewrite comment-marked equality predicates in the WHERE clause into ANSI LEFT/RIGHT
-        JOINs. In sqlglot's model the extra comma-separated tables are implicit joins on the
-        SELECT, so the null-supplying table's implicit join becomes a LEFT JOIN; if that table is
-        the FROM anchor, the preserved table's join becomes a RIGHT JOIN instead. Returns
-        (expression, unconverted_count)."""
-        unconverted = 0
-        for select_node in expression.find_all(sqlglot.exp.Select):
-            where = select_node.args.get('where')
-            joins = select_node.args.get('joins') or []
-            if not where or not joins:
-                continue
-            join_by_alias = {}
-            for j in joins:
-                t = j.this
-                if t is not None and t.alias_or_name:
-                    join_by_alias[t.alias_or_name] = j
-            for eq in list(where.find_all(sqlglot.exp.EQ)):
-                if not eq.comments:
-                    continue
-                if any('left_outer' in c for c in eq.comments):
-                    null_col, preserved_col = eq.right, eq.left
-                elif any('right_outer' in c for c in eq.comments):
-                    null_col, preserved_col = eq.left, eq.right
-                else:
-                    continue
-                if not isinstance(null_col, sqlglot.exp.Column) or not null_col.table:
-                    unconverted += 1
-                    continue
-                join_kind = 'LEFT'
-                target_join = join_by_alias.get(null_col.table)
-                if target_join is None and isinstance(preserved_col, sqlglot.exp.Column) and preserved_col.table:
-                    # null-supplying table is the FROM anchor - RIGHT JOIN the preserved table
-                    target_join = join_by_alias.get(preserved_col.table)
-                    join_kind = 'RIGHT'
-                if target_join is None:
-                    unconverted += 1
-                    continue
-                cond = eq.copy()
-                cond.comments = None
-                existing_on = target_join.args.get('on')
-                if existing_on is not None:
-                    cond = sqlglot.exp.And(this=existing_on, expression=cond)
-                target_join.set('kind', target_join.args.get('kind') or join_kind)
-                target_join.set('on', cond)
-                eq.replace(sqlglot.exp.Boolean(this=True))
-        return expression, unconverted
-
-    def _strip_listagg_on_overflow(self, sql):
-        """Remove Oracle LISTAGG's ON OVERFLOW clause, which has no PostgreSQL equivalent
-        (and which sqlglot cannot even parse). Forms: ON OVERFLOW ERROR |
-        ON OVERFLOW TRUNCATE ['indicator'] [WITH COUNT | WITHOUT COUNT]. Stripping it lets
-        the aggregate parse/convert to STRING_AGG; the overflow behaviour itself is dropped."""
-        if not sql:
-            return sql
-        return re.sub(
-            r"(?i)\s+ON\s+OVERFLOW\s+(?:ERROR|TRUNCATE(?:\s+'[^']*')?(?:\s+WITH(?:OUT)?\s+COUNT)?)",
-            '',
-            sql,
-        )
-
-    def _strip_translate_using(self, sql):
-        """Rewrite Oracle's charset-conversion form TRANSLATE(expr USING CHAR_CS|NCHAR_CS)
-        to just (expr). This is the two-argument USING variant that converts a value to the
-        database / national character set - distinct from the three-argument
-        TRANSLATE(str, from, to). PostgreSQL has no equivalent (and sqlglot cannot parse the
-        USING form), and with a single database encoding the conversion is a no-op, so the
-        inner expression is kept as-is."""
-        if not sql:
-            return sql
-        return re.sub(
-            r'(?is)\bTRANSLATE\s*\(\s*(.+?)\s+USING\s+N?CHAR_CS\s*\)',
-            r'(\1)',
-            sql,
-        )
-
-    def _postfix_oracle_to_pg_sql(self, sql):
-        """Targeted fixes for Oracle constructs sqlglot leaves as-is or mis-handles."""
-        if not sql:
-            return sql
-        # Defensive: normally stripped before sqlglot, but the raw-fallback path reaches here
-        # with TRANSLATE(... USING [N]CHAR_CS) still present.
-        sql = self._strip_translate_using(sql)
-        # sqlglot renders SYSTIMESTAMP as SYSTIMESTAMP() which does not exist in PostgreSQL
-        sql = re.sub(r'(?i)\bSYSTIMESTAMP\s*\(\s*\)', 'CURRENT_TIMESTAMP', sql)
-        sql = re.sub(r'(?i)\bSYSTIMESTAMP\b', 'CURRENT_TIMESTAMP', sql)
-        # sequence.NEXTVAL / sequence.CURRVAL -> nextval('sequence') / currval('sequence')
-        sql = re.sub(r'(?i)\b([A-Za-z_][\w$#]*)\s*\.\s*NEXTVAL\b', r"nextval('\1')", sql)
-        sql = re.sub(r'(?i)\b([A-Za-z_][\w$#]*)\s*\.\s*CURRVAL\b', r"currval('\1')", sql)
-        # Oracle's dummy DUAL table - PostgreSQL allows SELECT without FROM
-        sql = re.sub(r'(?i)\s+FROM\s+dual\b', '', sql)
-        # Drop the ON OVERFLOW clause (defensive: normally already stripped before sqlglot,
-        # but the raw-fallback path reaches here with it still present).
-        sql = self._strip_listagg_on_overflow(sql)
-        # LISTAGG(expr, 'delim') WITHIN GROUP (ORDER BY cols) -> STRING_AGG(expr, 'delim' ORDER BY cols).
-        # Conservative: only the common form (simple expr/order-by without nested parens); anything
-        # more complex is left for the manual review flagged by _warn_unconvertible_oracle_sql.
-        sql = re.sub(
-            r"(?i)\bLISTAGG\s*\(\s*([^,()]+?)\s*,\s*('[^']*')\s*\)\s*WITHIN\s+GROUP\s*\(\s*ORDER\s+BY\s+([^()]+?)\s*\)",
-            r"STRING_AGG(\1, \2 ORDER BY \3)",
-            sql,
-        )
-        # Tidy the boolean placeholders left by outer-join extraction (all semantics-preserving:
-        # "WHERE TRUE AND x" == "WHERE x", "x AND TRUE" == "x", "WHERE TRUE" == no filter).
-        sql = re.sub(r'(?i)\bWHERE\s+TRUE\s+AND\s+', 'WHERE ', sql)
-        sql = re.sub(r'(?i)\s+AND\s+TRUE\b', '', sql)
-        sql = re.sub(r'(?i)\bWHERE\s+TRUE\b(?=\s*(?:;|\)|$|GROUP\s+BY|ORDER\s+BY|HAVING|LIMIT|UNION|INTERSECT|EXCEPT))', '', sql)
-        return sql
-
-    def convert_view_code(self, settings: dict):
-        view_code = settings['view_code'] or ''
-        view_type = settings.get('view_type', 'VIEW')
-        source_schema_name = settings.get('source_schema_name', '')
-        target_schema_name = settings['target_schema_name']
-        target_view_name = settings.get('target_view_name', '')
-        view_label = f"{source_schema_name}.{target_view_name}" if source_schema_name else target_view_name
-
-        # Surface constructs that cannot be reliably auto-converted before touching the SQL.
-        self._warn_unconvertible_oracle_sql(view_code, view_label)
-
-        # Parse the Oracle defining query and generate PostgreSQL (handles NVL/DECODE/SYSDATE/
-        # SUBSTR/INSTR/MINUS/REGEXP/MOD/analytic functions/casts, etc.), rewriting Oracle (+)
-        # outer joins into ANSI LEFT/RIGHT JOINs along the way. Fall back to the raw query on any
-        # parse failure so the view is still stored (with a warning) for manual fixing.
-        converted = view_code
-        try:
-            # Strip Oracle LISTAGG's ON OVERFLOW clause first - sqlglot cannot parse it, and
-            # leaving it in would force the whole view onto the raw-Oracle fallback path.
-            preprocessed = self._strip_listagg_on_overflow(view_code)
-            # Rewrite TRANSLATE(expr USING [N]CHAR_CS) - sqlglot cannot parse the USING form.
-            preprocessed = self._strip_translate_using(preprocessed)
-            marked = self._preprocess_oracle_outer_joins(preprocessed)
-            ast = sqlglot.parse_one(marked, read="oracle")
-            ast, unconverted_joins = self._convert_marked_outer_joins(ast)
-            converted = ast.sql(dialect="postgres")
-            # Strip any outer-join markers that could not be converted, then warn about them
-            converted = re.sub(r'\s*/\*\s*(?:left|right)_outer\s*\*/\s*', ' ', converted)
-            if unconverted_joins:
-                self.config_parser.print_log_message('WARNING', f"oracle_connector: convert_view_code: view {view_label} has {unconverted_joins} Oracle (+) outer-join condition(s) that could not be converted to ANSI joins (they remain as inner-join conditions). Manual review required.")
-        except Exception as e:
-            self.config_parser.print_log_message('WARNING', f"oracle_connector: convert_view_code: sqlglot conversion of view {view_label} failed ({e}); using the raw Oracle definition. Manual review required.")
-            converted = view_code
-
-        converted = self._postfix_oracle_to_pg_sql(converted)
-
-        # Translate Oracle SQL functions that sqlglot leaves as-is (e.g. GROUPING_ID -> GROUPING)
-        # to their PostgreSQL equivalents. Same mapping used for functions/procedures.
-        converted = self.apply_sql_functions_mapping(converted, settings)
-
-        # Re-point any source-schema-qualified references to the target schema (both the Oracle
-        # canonical quoted-upper form and an unquoted any-case form). Unqualified references are
-        # resolved by the target search_path set by the orchestrator before view creation.
-        if source_schema_name:
-            converted = converted.replace(f'"{source_schema_name.upper()}".', f'"{target_schema_name}".')
-            converted = re.sub(rf'(?i)\b{re.escape(source_schema_name)}\s*\.', f'"{target_schema_name}".', converted)
-            converted = converted.replace('""', '"')
-
-        # ALL_VIEWS.TEXT / ALL_MVIEWS.QUERY store only the defining query, so wrap it into a
-        # full CREATE [MATERIALIZED] VIEW statement (view_type is 'VIEW' or 'MATERIALIZED VIEW').
-        ddl = f'CREATE {view_type} "{target_schema_name}"."{target_view_name}" AS {converted.strip()}'
-        if not ddl.rstrip().endswith(';'):
-            ddl += ';'
-        return ddl
-
     def get_sequence_current_value(self, sequence_id: int):
         # Placeholder for fetching sequence current value
         return None
@@ -2921,8 +2711,144 @@ class OracleConnector(DatabaseConnector):
 
         return top_tables
 
+    ## How many tables the foreign key ranking of the pre-migration analysis lists. The
+    ## report has no configuration key of its own - informix_connector, the only other
+    ## connector which produces it, fixes the same number, and the two reports are meant to
+    ## be the same size. Recorded in development/OPEN_ISSUES.md.
+    TOP_FK_DEPENDENCIES_COUNT = 10
+
+    ## Written on a dependency whose referenced table is not part of this migration: it
+    ## belongs to another schema, or a filter removed it. The foreign key cannot be created
+    ## on the target, and the load of the referencing table is what will say so.
+    FK_REFERENCE_NOT_MIGRATED = ' [not migrated]'
+
+    ## Written when the referenced constraint cannot be read from ALL_CONSTRAINTS. The
+    ## migrator reads foreign keys through the same join, so a key whose parent is invisible
+    ## to this account is not migrated either.
+    FK_REFERENCE_NOT_VISIBLE = '<not visible to this account>'
+
+    @staticmethod
+    def _fk_columns_text(columns):
+        """One column is written bare, several as a parenthesised list."""
+        if not columns:
+            return ''
+        return f"({columns})" if ',' in columns else f".{columns}"
+
     def get_top_fk_dependencies(self, settings):
+        """
+        The tables of the source schema which carry the most foreign keys, and what each of
+        those keys references.
+
+        The ranking counts the keys DEFINED ON a table, which is the direction the entry of
+        the CHANGELOG and informix_connector describe: the tables at the top are the ones
+        whose data can only be loaded once everything they reference is loaded, and the ones
+        whose load fails first when a referenced table was left out.
+
+        A referenced table which is not migrated - it lives in another schema, or
+        include_tables / exclude_tables removes it - is marked, because the key pointing at
+        it cannot be created on the target.
+        """
         top_fk_dependencies = {}
+        source_schema_name = settings.get('source_schema_name', None)
+        owner_bind = source_schema_name.upper() if source_schema_name else None
+        top_n = self.TOP_FK_DEPENDENCIES_COUNT
+        if top_n <= 0:
+            self.config_parser.print_log_message('DEBUG', "oracle_connector: get_top_fk_dependencies: The foreign key ranking is switched off, skipping this part.")
+            return top_fk_dependencies
+
+        ## One row per foreign key constraint, with the columns of both ends assembled. The
+        ## constraint name is selected although the report does not print it - it is what
+        ## makes the grain of the row visible, and it is in the GROUP BY for that reason.
+        ## The whole schema is read and ranked in Python: LISTAGG over every key of one table
+        ## raises ORA-01489 once the text passes 4000 characters, and the table filters live
+        ## in the configuration and not in the catalog.
+        ## The referenced constraint is joined OUTER on purpose - a key whose parent this
+        ## account cannot see still counts, and is named as such in the report, instead of
+        ## disappearing from a count the reader takes for the whole truth.
+        query = """
+            SELECT
+                fk_cons.owner AS fk_owner,
+                fk_cons.table_name AS fk_table_name,
+                fk_cons.constraint_name AS fk_constraint_name,
+                listagg(fk_col.column_name, ', ') WITHIN GROUP (ORDER BY fk_col.position) AS fk_columns,
+                pk_cons.owner AS pk_owner,
+                pk_cons.table_name AS pk_table_name,
+                listagg(pk_col.column_name, ', ') WITHIN GROUP (ORDER BY pk_col.position) AS pk_columns
+            FROM all_constraints fk_cons
+            JOIN all_cons_columns fk_col ON fk_cons.owner = fk_col.owner
+                                        AND fk_cons.constraint_name = fk_col.constraint_name
+                                        AND fk_cons.table_name = fk_col.table_name
+            LEFT JOIN all_constraints pk_cons ON fk_cons.r_owner = pk_cons.owner
+                                             AND fk_cons.r_constraint_name = pk_cons.constraint_name
+            LEFT JOIN all_cons_columns pk_col ON pk_cons.owner = pk_col.owner
+                                             AND pk_cons.constraint_name = pk_col.constraint_name
+                                             AND pk_cons.table_name = pk_col.table_name
+                                             AND fk_col.position = pk_col.position
+            WHERE fk_cons.constraint_type = 'R'
+              AND (:owner IS NULL OR fk_cons.owner = :owner)
+            GROUP BY fk_cons.owner, fk_cons.table_name, fk_cons.constraint_name,
+                     pk_cons.owner, pk_cons.table_name
+            ORDER BY fk_cons.owner, fk_cons.table_name, fk_cons.constraint_name
+        """
+        try:
+            self.config_parser.print_log_message('DEBUG2', f"oracle_connector: get_top_fk_dependencies: Reading the foreign keys of schema {source_schema_name} with query: {query}")
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query, {'owner': owner_bind})
+            constraints = cursor.fetchall()
+            cursor.close()
+            self.disconnect()
+        except Exception as e:
+            ## Reported and not raised: the pre-migration analysis is a read-only survey and
+            ## must not stop the migration. The message is what tells the reader that the
+            ## empty ranking below means "not read" and not "no foreign keys".
+            self.config_parser.print_log_message('ERROR', f"oracle_connector: get_top_fk_dependencies: The foreign keys of schema {source_schema_name} could not be read, the ranking is left out of the analysis: {e}")
+            return top_fk_dependencies
+
+        per_table = {}
+        for row in constraints:
+            fk_owner = (row[0] or '').strip()
+            fk_table_name = (row[1] or '').strip()
+            fk_columns = (row[3] or '').strip()
+            pk_owner = (row[4] or '').strip()
+            pk_table_name = (row[5] or '').strip()
+            pk_columns = (row[6] or '').strip()
+
+            if not self.config_parser.is_object_selected('table', fk_table_name)[0]:
+                continue
+
+            if not pk_table_name:
+                ## The text already says the key cannot be created, so it carries no
+                ## second marker.
+                referenced = self.FK_REFERENCE_NOT_VISIBLE
+                marker = ''
+            else:
+                referenced = pk_table_name if pk_owner == fk_owner else f"{pk_owner}.{pk_table_name}"
+                referenced += self._fk_columns_text(pk_columns)
+                migrated = (pk_owner == fk_owner
+                            and self.config_parser.is_object_selected('table', pk_table_name)[0])
+                marker = '' if migrated else self.FK_REFERENCE_NOT_MIGRATED
+
+            entry = per_table.setdefault((fk_owner, fk_table_name), {'fk_count': 0, 'dependencies': []})
+            entry['fk_count'] += 1
+            entry['dependencies'].append(
+                f"{fk_table_name}{self._fk_columns_text(fk_columns)} -> {referenced}{marker}")
+
+        ## Most keys first, and by name where the count is the same, so that two runs over
+        ## the same schema print the same order.
+        ranked = sorted(per_table.items(), key=lambda item: (-item[1]['fk_count'], item[0][0], item[0][1]))
+        for order_num, ((owner, table_name), entry) in enumerate(ranked[:top_n], start=1):
+            top_fk_dependencies[order_num] = {
+                'owner': owner,
+                'table_name': table_name,
+                'fk_count': entry['fk_count'],
+                'dependencies': ', '.join(entry['dependencies']),
+            }
+
+        if not top_fk_dependencies:
+            self.config_parser.print_log_message('DEBUG', f"oracle_connector: get_top_fk_dependencies: No foreign keys found in schema {source_schema_name}.")
+        else:
+            self.config_parser.print_log_message('DEBUG2', f"oracle_connector: get_top_fk_dependencies: Top {top_n} tables by foreign key count: {top_fk_dependencies}")
         return top_fk_dependencies
 
     def target_table_exists(self, target_schema_name, target_table_name):
@@ -3029,7 +2955,18 @@ class OracleConnector(DatabaseConnector):
         if re.fullmatch(r"(?i)SYS_GUID\s*\(\s*\)", bare_value):
             if column_type.startswith('UUID') or self.is_string_type(column_type) or column_type.startswith('TEXT'):
                 return self.config_parser.get_uuid_default_function(column_type)
-            self.config_parser.print_log_message('WARNING', f"oracle_connector: convert_default_value: SYS_GUID() default on a {column_type} column has no PostgreSQL equivalent - default value is dropped.")
+            if column_type.startswith('BYTEA'):
+                ## SYS_GUID() answers a RAW(16), which is migrated as BYTEA, and 16 random
+                ## bytes are exactly what the hexadecimal of a generated UUID decodes to.
+                ## This used to be dropped as "no PostgreSQL equivalent" - it has one, and a
+                ## column which was filled with a unique value per row was left with none.
+                uuid_function = str(self.config_parser.get_uuid_default_function('TEXT')).strip()
+                if not uuid_function.endswith('::text'):
+                    ## replace() reads text and PostgreSQL does not cast a uuid to one on its
+                    ## own, so the cast is made sure of here rather than assumed
+                    uuid_function = f"({uuid_function})::text"
+                return f"decode(replace({uuid_function}, '-', ''), 'hex')"
+            self.config_parser.print_log_message('WARNING', f"oracle_connector: convert_default_value: SYS_GUID() default on a {column_type} column has no PostgreSQL equivalent - the column has NO default in the target and new rows get NULL where the source generated a unique value.")
             return ''
 
         return default_value

@@ -17,6 +17,7 @@
 import os
 import importlib
 from credativ_pg_migrator.migrator_logging import MigratorLogger
+from credativ_pg_migrator import identifier_case
 from credativ_pg_migrator.migrator_tables import MigratorTables
 from credativ_pg_migrator.constants import MigratorConstants
 import fnmatch
@@ -72,6 +73,12 @@ class Planner:
 
             self.check_pausing_resuming()
 
+            ## The row of the planner as a whole, opened by pre_planning(). Every branch below
+            ## used to close THIS row instead of the phase row it had opened itself, so the
+            ## phase of the workflow was never closed at all - no duration, no result, forever
+            ## - and this one was closed with 'finished OK' whatever the branch had done. P2-7.
+            planning_failed = False
+
             if self.config_parser.is_standard_workflow():
                 self.migrator_tables.insert_main({'task_name': 'Planner', 'subtask_name': 'Standard workflow'})
                 try:
@@ -100,7 +107,11 @@ class Planner:
 
                     self.check_pausing_resuming()
 
-                    self.migrator_tables.update_main_status({'task_name': 'Planner', 'subtask_name': '', 'success': True, 'message': 'finished OK'})
+                    ## the plan is complete and nothing in the target has been touched yet -
+                    ## the last moment at which a run which cannot come out right costs nothing
+                    self.check_target_name_collisions()
+
+                    self.migrator_tables.update_main_status({'task_name': 'Planner', 'subtask_name': 'Standard workflow', 'success': True, 'message': 'finished OK'})
 
                     try:
                         self.source_connection.disconnect()
@@ -113,7 +124,8 @@ class Planner:
 
                     self.config_parser.print_log_message('INFO', "planner: create_plan: phase done successfully.")
                 except Exception as e:
-                    self.migrator_tables.update_main_status({'task_name': 'Planner', 'subtask_name': '', 'success': False, 'message': f'ERROR: {e}'})
+                    planning_failed = True
+                    self.migrator_tables.update_main_status({'task_name': 'Planner', 'subtask_name': 'Standard workflow', 'success': False, 'message': f'ERROR: {e}'})
                     self.handle_error(e, "Planner")
 
             elif self.config_parser.is_mapping_workflow():
@@ -122,10 +134,11 @@ class Planner:
 
                     self.mapping_match_tables()
 
-                    self.migrator_tables.update_main_status({'task_name': 'Planner', 'subtask_name': '', 'success': True, 'message': 'finished OK'})
+                    self.migrator_tables.update_main_status({'task_name': 'Planner', 'subtask_name': 'Mapping workflow', 'success': True, 'message': 'finished OK'})
 
                 except Exception as e:
-                    self.migrator_tables.update_main_status({'task_name': 'Planner', 'subtask_name': '', 'success': False, 'message': f'ERROR: {e}'})
+                    planning_failed = True
+                    self.migrator_tables.update_main_status({'task_name': 'Planner', 'subtask_name': 'Mapping workflow', 'success': False, 'message': f'ERROR: {e}'})
                     self.handle_error(e, "Planner")
 
             elif self.config_parser.is_anonymization_workflow():
@@ -156,7 +169,7 @@ class Planner:
 
                     self.check_pausing_resuming()
 
-                    self.migrator_tables.update_main_status({'task_name': 'Planner', 'subtask_name': '', 'success': True, 'message': 'finished OK'})
+                    self.migrator_tables.update_main_status({'task_name': 'Planner', 'subtask_name': 'Anonymization workflow', 'success': True, 'message': 'finished OK'})
 
                     try:
                         self.source_connection.disconnect()
@@ -169,12 +182,24 @@ class Planner:
 
                     self.config_parser.print_log_message('INFO', "planner: create_plan: phase done successfully.")
                 except Exception as e:
-                    self.migrator_tables.update_main_status({'task_name': 'Planner', 'subtask_name': '', 'success': False, 'message': f'ERROR: {e}'})
+                    planning_failed = True
+                    self.migrator_tables.update_main_status({'task_name': 'Planner', 'subtask_name': 'Anonymization workflow', 'success': False, 'message': f'ERROR: {e}'})
                     self.handle_error(e, "Planner")
 
             else:
                 self.config_parser.print_log_message('ERROR', f"planner: create_plan: Unknown workflow type: {self.config_parser.get_workflow()}")
                 exit(1)
+
+            ## and the planner as a whole says what its workflow did, rather than 'finished OK'
+            ## over a branch which ended in an error the configuration told the run to survive
+            if planning_failed:
+                self.migrator_tables.update_main_status({
+                    'task_name': 'Planner', 'subtask_name': '', 'success': False,
+                    'message': 'the planning of the workflow FAILED - see the phase of the workflow above'})
+            else:
+                self.migrator_tables.update_main_status({
+                    'task_name': 'Planner', 'subtask_name': '', 'success': True,
+                    'message': 'finished OK'})
 
     def load_connector(self, source_or_target):
         """Dynamically load the database connector."""
@@ -1016,12 +1041,20 @@ class Planner:
                     for _, trigger_details in triggers.items():
                         trigger_name = trigger_details['name']
 
+                        ## The target names are handed over already spelled the way
+                        ## names_case_handling spells them, so a connector which interpolates
+                        ## them into its DDL cannot get it wrong: ms_sql wrote
+                        ## CREATE TRIGGER "TR_AuditSales" ... ON "migtest"."SalesOrders" while
+                        ## the table is `salesorders`. The connectors which convert them again
+                        ## are unharmed - the conversion is idempotent. 'source_*' stays the
+                        ## spelling of the source, which is what a connector needs to find
+                        ## anything in the code it was given.
                         converted_code = self.source_connection.convert_trigger({
                                 'source_schema_name': self.config_parser.get_source_schema(),
                                 'source_table_name': table_info['table_name'],
                                 'target_schema_name': self.config_parser.get_target_schema(),
-                                'target_table_name': target_table_name,
-                                'trigger_name': trigger_name,
+                                'target_table_name': self.config_parser.convert_names_case(target_table_name),
+                                'trigger_name': self.config_parser.convert_names_case(trigger_name),
                                 'trigger_sql': trigger_details['sql'],
                                 'table_list': [],
                                 'target_db_type': self.config_parser.get_target_db_type(),
@@ -1245,12 +1278,16 @@ class Planner:
             if not ref_tbl or not ref_cols_str:
                 continue
 
-            ref_tbl_target = ref_tbl
+            ## the name the referenced table really has in the target. This used to be the
+            ## name of the source, so with names_case_handling: lower the lookup in
+            ## table_unique_cols - which is keyed by the target name - never matched, and the
+            ## index below was created ON a table spelled the way the source spells it.
+            ref_tbl_target = fk.get('target_referenced_table_name') or self.config_parser.convert_names_case(ref_tbl)
             if self.config_parser.get_use_aliases_as_target_names():
                 ref_schema = fk.get('referenced_table_schema', '') or self.source_schema_name
                 alias_dict = self.migrator_tables.get_alias_for_table(ref_schema, ref_tbl)
                 if alias_dict and alias_dict.get('target_alias_name'):
-                    ref_tbl_target = alias_dict.get('target_alias_name')
+                    ref_tbl_target = self.config_parser.convert_names_case(alias_dict.get('target_alias_name'))
 
             norm_ref_cols = normalize_cols(ref_cols_str)
             if not norm_ref_cols:
@@ -1265,9 +1302,14 @@ class Planner:
 
             if not has_matching_unique:
                 cols_suffix = "_".join(norm_ref_cols)
-                idx_name = f"idx_fk_parent_{ref_tbl_target}_{cols_suffix}"[:63]
+                idx_name = self.config_parser.convert_names_case(
+                    f"idx_fk_parent_{ref_tbl_target}_{cols_suffix}"[:63])
 
-                clean_cols = [c.strip().strip('"').strip("'") for c in str(ref_cols_str).split(',')]
+                ## the columns are read from the constraint of the source, so they carry its
+                ## spelling - the index is created in the target and has to name them the way
+                ## the target has them
+                clean_cols = [self.config_parser.convert_names_case(c.strip().strip('"').strip("'"))
+                              for c in str(ref_cols_str).split(',')]
                 quoted_cols = ", ".join(f'"{c}"' for c in clean_cols if c)
                 index_sql = f'CREATE UNIQUE INDEX "{idx_name}" ON "{self.target_schema_name}"."{ref_tbl_target}" ({quoted_cols});'
 
@@ -1452,6 +1494,124 @@ class Planner:
 
         return converted
 
+    ## What is checked for a collision, once the plan is written and before anything is
+    ## created: the protocol table, the column holding the name of the source, the column
+    ## holding the name the target will have, and what the name has to be unique within.
+    ## PostgreSQL keeps tables, views, sequences, types, domains and indexes unique per schema,
+    ## and constraints, triggers and columns unique per table.
+    COLLISION_CHECKS = (
+        ('tables',             'source_table_name',      'target_table_name',      ('target_schema_name',),                      'table'),
+        ('columns',            'source_column_name',     'target_column_name',     ('target_schema_name', 'target_table_name'),  'column'),
+        ('views',              'source_view_name',       'target_view_name',       ('target_schema_name',),                      'view'),
+        ('sequences',          'source_sequence_name',   'target_sequence_name',   ('target_schema_name',),                      'sequence'),
+        ('user_defined_types', 'source_type_name',       'target_type_name',       ('target_schema_name',),                      'user defined type'),
+        ('domains',            'source_domain_name',     'target_domain_name',     ('target_schema_name',),                      'domain'),
+        ('collations',         'source_collation_name',  'target_collation_name',  ('target_schema_name',),                      'collation'),
+        ('text_search',        'source_object_name',     'target_object_name',     ('target_schema_name',),                      'text search object'),
+        ('indexes',            'index_name',             'target_index_name',      ('target_schema_name',),                      'index'),
+        ('constraints',        'constraint_name',        'target_constraint_name', ('target_schema_name', 'target_table_name'),  'constraint'),
+        ('triggers',           'trigger_name',           'target_trigger_name',    ('target_schema_name', 'target_table_name'),  'trigger'),
+    )
+
+    def check_target_name_collisions(self):
+        """
+        Whether names_case_handling collapses two objects of the source into one on the target.
+
+        Case folding is not injective. A source holding CUSTOMER and Customer is holding two
+        different tables; with names_case_handling: lower both of them want to be "customer",
+        and the migrator used to notice nothing at all - it dropped "customer" once per table
+        in the loop which prepares the target, created it for the first, and answered the
+        second with "already exists". What the user saw was one failed table and a message
+        which says nothing about the case of a name.
+
+        The check runs when the plan is complete and before anything in the target is dropped
+        or created, so a run which cannot come out right stops before it has done anything.
+        It reads the protocol tables, which by then hold both spellings of every name - so it
+        costs no query against the source.
+
+        With names_case_handling: keep nothing can collapse and the check is skipped.
+        """
+        case_handling = self.config_parser.get_names_case_handling()
+        if case_handling == 'keep':
+            self.config_parser.print_log_message(
+                'DEBUG', "planner: check_target_name_collisions: names_case_handling is 'keep' - "
+                         "no two names of the source can become one name in the target.")
+            return
+
+        collisions = []
+        for table_key, source_column, target_column, scope_columns, label in self.COLLISION_CHECKS:
+            protocol_table = getattr(self.config_parser, f'get_protocol_name_{table_key}')()
+            scope_list = ', '.join(f'"{column}"' for column in scope_columns)
+            query = f'''
+                SELECT {scope_list}, "{target_column}",
+                       string_agg(DISTINCT "{source_column}", ', ' ORDER BY "{source_column}")
+                FROM "{self.migrator_tables.protocol_schema}"."{protocol_table}"
+                WHERE "{target_column}" IS NOT NULL AND "{target_column}" <> ''
+                GROUP BY {scope_list}, "{target_column}"
+                HAVING count(DISTINCT "{source_column}") > 1
+            '''
+            try:
+                cursor = self.migrator_tables.protocol_connection.connection.cursor()
+                cursor.execute(query)
+                rows = cursor.fetchall()
+                cursor.close()
+            except Exception as e:
+                ## a protocol table which does not exist means that kind of object was not
+                ## planned - it is not a reason to stop, and it is not passed over silently
+                self.config_parser.print_log_message(
+                    'DEBUG', f"planner: check_target_name_collisions: {protocol_table} could not "
+                             f"be read ({e}) - no {label} was checked.")
+                continue
+            for row in rows:
+                ## every part of the name on its own quotes, the way the target is addressed:
+                ## "migtest"."orders"."total" and not "migtest.orders"."total"
+                parts = [str(value) for value in row[:len(scope_columns)] if value]
+                parts.append(str(row[len(scope_columns)]))
+                where = '.'.join(f'"{part}"' for part in parts)
+                collisions.append(f"{label}s {row[-1]} of the source all become {where}")
+
+        if not collisions:
+            self.config_parser.print_log_message(
+                'INFO', f"planner: check_target_name_collisions: names_case_handling is "
+                        f"'{case_handling}' and no two names of the source become one in the target.")
+            return
+
+        listed = '\n  - '.join(collisions)
+        raise ValueError(
+            f"names_case_handling is '{case_handling}', and it would make one target object out "
+            f"of two or more different objects of the source:\n  - {listed}\n"
+            f"The source tells them apart by the case of their letters and the target would not. "
+            f"Nothing has been created or dropped in the target - the run stops here rather than "
+            f"dropping the same object twice and reporting the second one as 'already exists'. "
+            f"Use names_case_handling: keep, or rename the objects which clash.")
+
+    def convert_view_identifier_case(self, converted_view_sql, source_view_name):
+        """
+        The identifiers of a converted view, spelled the way names_case_handling made the
+        objects they name.
+
+        A statement which cannot be read as PostgreSQL is answered exactly as it came in and
+        reported: the conversion of a view is allowed to fail, and a view whose text no parser
+        understands is one the user has to look at anyway. What must not happen is a guess -
+        a name changed by a search and replace inside a text nobody could parse would be the
+        kind of quiet damage this migrator treats as a bug.
+        """
+        if not converted_view_sql or not converted_view_sql.strip():
+            return converted_view_sql
+        converted, ok = identifier_case.convert_identifiers(
+            converted_view_sql,
+            self.config_parser.convert_names_case,
+            self.config_parser.get_source_db_type())
+        if not ok:
+            self.config_parser.print_log_message(
+                'WARNING', f"planner: stdwf_prepare_views: the converted query of view "
+                           f"{source_view_name} could not be read as PostgreSQL, so the case of "
+                           f"the names in it was left as the conversion wrote it. With "
+                           f"names_case_handling: {self.config_parser.get_names_case_handling()} "
+                           f"it may name objects which are spelled differently in the target.")
+            return converted_view_sql
+        return converted
+
     def stdwf_prepare_views(self):
         self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_views: Preparing views...")
         # if self.source_db_config.get('connectivity') == 'ddl':
@@ -1520,6 +1680,16 @@ class Planner:
                         self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_views: Views - remote objects substituting {row[0]} with {row[1]}")
                         converted_view_sql = re.sub(re.escape(row[0]), row[1], converted_view_sql, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
 
+                ## The names inside the query, spelled the way the target has them. Three of
+                ## the twelve connectors did this themselves and nine did not - ms_sql and
+                ## sybase_ase wrote the identifiers of the source in double quotes, so a view
+                ## of a migration with `lower` asked for "CUSTOMERS" while the table is
+                ## `customers`, and the other seven wrote them bare, which is right for
+                ## `lower` and wrong for `upper` and for `keep` over a mixed case source. It
+                ## is one transformation for all of them now - see identifier_case.py.
+                converted_view_sql = self.convert_view_identifier_case(
+                    converted_view_sql, view_info['view_name'])
+
                 self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_views: Converted view SQL: {converted_view_sql}")
                 self.migrator_tables.insert_view({
                     'source_schema_name': self.source_schema_name,
@@ -1577,6 +1747,44 @@ class Planner:
             self.config_parser.print_log_message( 'INFO', "planner: stdwf_prepare_aliases: No aliases found.")
 
         self.config_parser.print_log_message( 'INFO', "planner: stdwf_prepare_aliases: Aliases processing completed.")
+
+    def report_kind_not_read(self, kind, singular, phase):
+        """
+        Say that a kind of object was not read, where the source has such objects.
+
+        A fetch which answers {} says "the source holds none of these", and several connectors
+        answered that for objects their sources certainly do hold. The planner then wrote
+        "No user defined types found" and the summary showed 0 - and a reader who takes the
+        summary at its word migrates a schema which is missing the objects nobody said were
+        missing. P2-8 of development/OPEN_ISSUES.md.
+
+        Answers True when the kind was not read, so the caller can say the other thing when it
+        really was. The note is written into the journal of the run as well, with the row type
+        `not read`, which is where the summary picks it up.
+        """
+        what_is_there = self.source_connection.object_kind_not_read(kind)
+        if not what_is_there:
+            return False
+        message = (f"planner: {phase}: {kind.replace('_', ' ')} were NOT READ from this source. "
+                   f"This is not the same as the source having none: {what_is_there} Whatever "
+                   f"is there has to be migrated by hand.")
+        self.config_parser.print_log_message('WARNING', message)
+        try:
+            self.migrator_tables.insert_protocol({
+                'object_type': singular,
+                'object_name': f'({kind.replace("_", " ")} were not read)',
+                'object_action': 'not read',
+                'object_ddl': None,
+                'execution_timestamp': None,
+                'execution_success': None,
+                'execution_error_message': what_is_there,
+                'row_type': 'not read',
+                'execution_results': None,
+                'object_protocol_id': None,
+            })
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"planner: {phase}: the note that {kind} were not read could not be written into the protocol: {e}")
+        return True
 
     def stdwf_prepare_user_defined_types(self):
         self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_user_defined_types: Preparing user defined types...")
@@ -1644,8 +1852,9 @@ class Planner:
                 })
                 self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_user_defined_types: User defined type {type_name} processed successfully.")
             self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_user_defined_types: User defined types processed successfully.")
-        else:
-            self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_user_defined_types: No user defined types found.")
+        elif not self.report_kind_not_read('user_defined_types', 'user_defined_type',
+                                           'stdwf_prepare_user_defined_types'):
+            self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_user_defined_types: No user defined types found in the source.")
 
     def stdwf_prepare_collations(self):
         """
@@ -1765,7 +1974,8 @@ class Planner:
                 self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_domains: Domain {domain_info['domain_name']} processed successfully.")
             self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_domains: Domains processed successfully.")
         else:
-            self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_domains: No domains found.")
+            if not self.report_kind_not_read('domains', 'domain', 'stdwf_prepare_domains'):
+                self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_domains: No domains found in the source.")
 
     def stdwf_prepare_defaults(self):
         self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_defaults: Preparing defaults...")

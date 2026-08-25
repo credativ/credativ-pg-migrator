@@ -46,6 +46,7 @@ The following top-level keys must be present: `migrator`, `source`, `target`.
 | `data_migration_limitation` | list of lists \| null |  |  | Copies only part of a table. Each entry is [table_name_or_pattern, condition, column_name_or_pattern] and may carry a row limit as its fourth element - the condition is used only for tables that match the pattern, really have the column, and have more rows than the limit. The condition is written without WHERE and may contain the placeholders {source_schema_name} and {source_table_name}. Several entries matching one table are combined with AND. The key may also be left empty, which means the same as an empty list. (Three elements, or four with the row limit. Anything else stops the run.) |
 | `target_partitioning` | list of entries \| null |  |  | Creates the target table partitioned, whether or not the source table was. One entry per table. The key may also be left empty, which means the same as an empty list. |
 | [`validation`](#validation) | block |  |  | Post-migration data-integrity check, run by the --validate switch instead of a migration. |
+| [`query_conversion`](#query_conversion) | block |  |  | only for `mssql`, `sybase_ase`, `informix`, `ibm_db2_luw`, `ibm_db2_zos`, `ibm_db2_i`, `mysql`, `mariadb`, `oracle`, `sql_anywhere`, `sqlite`, `postgresql`. Conversion of the SELECT statements an application holds as text. A separate step over a finished migration - it creates nothing and moves no data: it reads files of statements, converts every SELECT for the migrated PostgreSQL schema, tests the result against the target and writes the answer into new files. Started by --convert-queries, or as the closing step of a migration when run_after_migration is true. |
 | [`mapping`](#mapping) | block |  |  | Settings of the 'mapping' workflow, which matches existing target objects onto existing source objects and copies only data. |
 | [`anonymization`](#anonymization) | block |  |  | Settings of the 'anonymization' workflow, which copies the data while masking the columns named here. A method name that is not registered stops the run before any data is read. |
 | [`summary`](#summary) | block |  |  | How many rows each ranking of the closing summary shows. |
@@ -230,6 +231,7 @@ What the migration does and how it does it.
 | `migrate_lob_values` | boolean |  | `true` | Copy the contents of BLOB and CLOB columns. false migrates them as NULL, which is much faster for a structural trial run. |
 | `validate_objects` | string | `retry`, `check`, `off` | `retry` | Final validity pass over views, functions/procedures and triggers, run at the very end of a standard migration. An object whose creation failed because a dependency did not exist yet can become creatable once the whole schema is present. 'retry' re-runs the stored DDL of objects that are still missing, then verifies and records validity; 'check' only verifies; 'off' skips the pass. true is accepted as 'retry', false and null as 'off'. Read case-insensitively. Accepted aliases: `check_only`, `verify` = `check`; `false`, `no`, `none`, `skip` = `off`; `on`, `true`, `yes` = `retry`. |
 | `on_error` | string | `stop`, `continue` | `stop` | Whether a failed object or table stops the migration or is recorded and skipped. |
+| `on_undecodable_bytes` | string | `substitute`, `fail`, `remove` | `substitute` | What happens to a value, or to a byte of an exported file, which the encoding expected for it cannot read. 'substitute' keeps it with the last resort encoding latin1, which maps every one of the 256 byte values and therefore loses no byte - the characters may be spelled wrongly and the original bytes can be read again - and reports every occurrence. 'fail' refuses it, so the table, chunk or file is recorded as failed and nothing is guessed. 'remove' deletes the byte, which is what the migrator did before 0.16.0; it is reported now rather than silent. Applied where bytes have to become text: the MS SQL Server connector (the wide and extended ODBC types), the SQLite connector (TEXT values, which SQLite does not enforce the encoding of, and the DDL scripts of connectivity 'ddl') and the CSV reader of a file data source, which reads the file in the encoding format_options.character_set declares. Read case-insensitively, validated at startup. |
 | `parallel_workers` | integer | >= 1 | `1` | Number of tables migrated concurrently. |
 | `batch_size` | integer | >= 1 | `100000` | Rows read from the source and written to the target in one round trip. |
 | `chunk_size` | integer |  | `-1` | Rows per independently logged and restartable chunk, for tables too large to copy in one pass. Must be larger than batch_size - a smaller value disables chunking with a warning. -1 disables chunking. Good values are 10x to 20x batch_size. |
@@ -310,6 +312,41 @@ Connection to an untouched copy of the target database from before the migration
 | `database` | string |  |  | Database holding the untouched copy. |
 | `schema` | string |  |  | Schema holding the untouched copy. |
 | `sslmode` | string | `disable`, `allow`, `prefer`, `require`, `verify-ca`, `verify-full` | `prefer` | sslmode of the PostgreSQL connection URI. |
+
+---
+
+## `query_conversion`
+
+Conversion of the SELECT statements an application holds as text. A separate step over a finished migration - it creates nothing and moves no data: it reads files of statements, converts every SELECT for the migrated PostgreSQL schema, tests the result against the target and writes the answer into new files. Started by --convert-queries, or as the closing step of a migration when run_after_migration is true.
+
+| Key | Type | Allowed values | Default | Notes |
+|---|---|---|---|---|
+| `enabled` | boolean |  | `false` | Whether the step may run at all. --convert-queries stops when it is false, so a configuration cannot convert queries by accident. |
+| `run_after_migration` | boolean |  | `false` | Also run the step as the closing step of a migration, after the objects were validated. False means it is run only by --convert-queries, which can be repeated without migrating again. |
+| `input` | list of string \| null |  |  | The files holding the statements, as paths or glob patterns resolved against the directory of this configuration file. A pattern which names no file is reported as a warning. A bare directory name is not read recursively - write the pattern out, so the log says which files were taken. |
+| `encoding` | string |  | `utf-8` | Encoding of the input files. A file which cannot be read in this encoding stops the run instead of being read as damaged text. |
+| `statement_separator` | string | `auto`, `semicolon`, `go`, `blank_line`, `whole_file` | `auto` | How a file is cut into statements. 'auto' takes both the semicolon and GO on a line of its own, which is what a file exported from a client of Sybase ASE or MS SQL Server holds. 'whole_file' is one statement per file. A separator inside a string literal, a comment or a $$ quoted body is never a separator. |
+| `parameter_style` | string | `auto`, `qmark`, `named`, `at`, `pyformat`, `numeric`, `none` | `auto` | The bind parameter markers the statements use: '?' (qmark), ':name' (named), '@name' (at), '%s' (pyformat), '$1' (numeric) or none. 'auto' recognises them from the file and reports a file which mixes two kinds. |
+| `parameter_output` | string | `original`, `numeric` | `original` | How the markers are written back into the converted statement. 'original' gives back what the application holds today, 'numeric' writes $1..$n for an application which is being ported to a PostgreSQL driver at the same time. |
+| `source_test` | string | `off`, `prepare` | `prepare` | Whether every statement is compiled against the SOURCE database before it is converted. It separates a statement the migrator could not convert from one which was already broken, or which reads an object the application creates at run time - an answer nothing on the target side can give. It is COMPILE ONLY and never executes: PREPARE, EXPLAIN, SET NOEXEC ON or the prepareStatement of the JDBC driver, whichever the connector of the source has; a source whose connector has none reports 'not run' and the run goes on. 'off' does not connect to the source at all. Read case-insensitively; false and null are accepted as 'off', true as 'prepare'. Accepted aliases: `false`, `no`, `none`, `skip` = `off`; `on`, `parse`, `true`, `yes` = `prepare`. |
+| `target_test` | string | `off`, `parse`, `explain` | `explain` | How much of the converted statement is proven against the target. 'parse' sends PREPARE - syntax, every table, column and function, and the types. 'explain' adds that a plan can be produced. Both run inside a read only transaction which is rolled back; neither reads any data. A statement with bind parameters is always tested with PREPARE, because EXPLAIN of one is refused by PostgreSQL as well. Read case-insensitively; false and null are accepted as 'off', true as 'explain'. Accepted aliases: `on`, `true`, `yes` = `explain`; `false`, `no`, `none`, `skip` = `off`. |
+| `timeout` | string |  | `30s` | statement_timeout of the test transaction, as PostgreSQL writes it ('30s', '2min'). The unit is required: PostgreSQL reads a bare number as milliseconds, so '30' would end every test after 30 ms and report every statement as one the target refused. |
+| `workers` | integer | >= 1 | `4` | Statements converted and tested concurrently, each with a connection of its own. |
+| `on_error` | string | `continue`, `stop` | `continue` | 'continue' converts the whole file whatever a single statement does - the file is the deliverable and has to be complete. 'stop' ends the run at the first statement which could not be converted or failed its test, for a pipeline which gates on it. |
+| [`output`](#query_conversionoutput) | block |  |  | Where the converted statements are written, and what the files hold. |
+
+### `query_conversion.output`
+
+Where the converted statements are written, and what the files hold.
+
+| Key | Type | Allowed values | Default | Notes |
+|---|---|---|---|---|
+| `directory` | string |  | `` | Directory for the output files, resolved against the directory of this configuration file when it is relative - the same way the input patterns are. Empty writes them next to the file they came from. It is created when it does not exist. |
+| `prefix` | string |  | `` | Written in front of the name of the input file. |
+| `suffix` | string |  | `_pg` | Written behind the name of the input file, in front of its extension: queries.sql becomes queries_pg.sql. |
+| `overwrite` | boolean |  | `false` | Whether an output file which exists already may be replaced. False refuses rather than overwriting. An output path which names an input file is always refused - the files of the user are never written to. |
+| `include_original` | boolean |  | `true` | Whether the statement of the source is written into the comment block above the converted one. |
+| `sidecar` | string | `json`, `csv`, `off` | `json` | A machine readable file next to the output file, holding one record per statement - what a CI job or a script which patches application sources reads. 'off' writes none. Read case-insensitively; false and null are accepted as 'off', true as 'json'. Accepted aliases: `on`, `true`, `yes` = `json`; `false`, `no`, `none`, `skip` = `off`. |
 
 ---
 

@@ -15,6 +15,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 from credativ_pg_migrator.database_connector import DatabaseConnector
+from credativ_pg_migrator.connectors.sql_anywhere_query_conversion import SqlAnywhereQueryConversion
 from credativ_pg_migrator.migrator_logging import MigratorLogger
 import sqlanydb
 import pyodbc
@@ -24,7 +25,24 @@ import time
 import datetime
 import re
 
-class SQLAnywhereConnector(DatabaseConnector):
+class SQLAnywhereConnector(SqlAnywhereQueryConversion, DatabaseConnector):
+
+    ## Measured for P3-2: the header is converted and the body is carried over as text.
+    ROUTINE_BODY_NAMES_NOT_CONVERTED = (
+        'the body is carried over as text, so every name in it is the one the routine of the '
+        'source wrote. The names are written without quotes, so PostgreSQL folds them to '
+        'lower case')
+
+    ## What this connector does not read out of SQL Anywhere - see
+    ## DatabaseConnector.OBJECT_KINDS_NOT_READ.
+    OBJECT_KINDS_NOT_READ = {
+        'user_defined_types': ('SQL Anywhere has user-defined data types, created with CREATE '
+                               'DOMAIN or its synonym CREATE DATATYPE and kept in SYS.SYSDOMAIN '
+                               'and SYS.SYSUSERTYPE. This connector reads neither.'),
+        'domains': ('the same objects as the user defined types above: in SQL Anywhere CREATE '
+                    'DOMAIN and CREATE DATATYPE make one and the same kind of object, and a '
+                    'CHECK or a DEFAULT on such a type is carried with it.'),
+    }
     def __init__(self, config_parser, source_or_target):
         if source_or_target != 'source':
             raise ValueError("SQL Anywhere is only supported as a source database")
@@ -55,59 +73,6 @@ class SQLAnywhereConnector(DatabaseConnector):
                 self.connection.close()
         except Exception as e:
             pass
-
-    def get_sql_functions_mapping(self, settings):
-        """ Returns a dictionary of SQL functions mapping for the target database """
-        target_db_type = settings.get('target_db_type', 'postgresql')
-        if target_db_type == 'postgresql':
-            return {
-                'current timestamp': 'CURRENT_TIMESTAMP',
-                'current_timestamp': 'CURRENT_TIMESTAMP',
-                'timestamp': 'CURRENT_TIMESTAMP',
-                'current date': 'CURRENT_DATE',
-                'current_date': 'CURRENT_DATE',
-                'current time': 'CURRENT_TIME',
-                'current_time': 'CURRENT_TIME',
-                'current user': 'CURRENT_USER',
-                'current_user': 'CURRENT_USER',
-                'last user': 'CURRENT_USER',
-                'current publisher': 'CURRENT_USER',
-                'getutcdate()': "timezone('UTC', now())",
-                'getdate()': 'CURRENT_TIMESTAMP',
-                'now()': 'CURRENT_TIMESTAMP',
-                'today()': 'CURRENT_DATE',
-                'user_name()': 'CURRENT_USER',
-                'user_id()': 'CURRENT_USER',
-                'user': 'CURRENT_USER',
-                'year(': 'extract(year from ',
-                'month(': 'extract(month from ',
-                'day(': 'extract(day from ',
-                'len(': 'length(',
-                'length(': 'length(',
-                'isnull(': 'coalesce(',
-                'ifnull(': 'coalesce(',
-                'string(': 'concat(',
-                'charindex(': 'position(',
-                'locate(': 'position(',
-                'stuff(': 'overlay(',
-                'dateformat(': 'to_char(',
-                'datepart(yyyy,': "date_part('year',",
-                'datepart(year,': "date_part('year',",
-                'datepart(month,': "date_part('month',",
-                'datepart(yy,': "date_part('year',",
-                'datepart(qq,': "date_part('quarter',",
-                'datepart(mm,': "date_part('month',",
-                'datepart(dy,': "date_part('doy',",
-                'datepart(dd,': "date_part('day',",
-                'datepart(wk,': "date_part('week',",
-                'datepart(hh,': "date_part('hour',",
-                'datepart(mi,': "date_part('minute',",
-                'datepart(ss,': "date_part('second',",
-                'datepart(ms,': "date_part('milliseconds',",
-            }
-        else:
-            self.config_parser.print_log_message('ERROR', f"sql_anywhere_connector: get_sql_functions_mapping: Unsupported target database type: {target_db_type}")
-            return {}
 
     def migrate_sequences(self, target_connector, settings):
         """
@@ -1802,7 +1767,7 @@ class SQLAnywhereConnector(DatabaseConnector):
             target_trigger_name = self.config_parser.convert_names_case(trigger_name)
             ## the name of the function is the name of the trigger, which is unique per schema
             ## in the source, and is cut to the length PostgreSQL stores
-            function_name = f"{target_trigger_name}_trigfunc"[:63]
+            function_name = self.config_parser.convert_names_case(f"{target_trigger_name}_trigfunc")[:63]
             body_quote = '$$' if '$$' not in converted_body else '$sa_trigger$'
 
             function_sql = (f'CREATE OR REPLACE FUNCTION "{target_schema_name}"."{function_name}"()\n'
@@ -1947,56 +1912,6 @@ class SQLAnywhereConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"sql_anywhere_connector: fetch_view_code: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
-
-    def convert_view_code(self, settings: dict):
-        view_code = settings.get('view_code')
-        if not view_code:
-            return view_code
-
-        source_schema = settings.get('source_schema_name', '')
-        target_schema = settings.get('target_schema_name', 'public')
-
-        # 1. Strip source schema qualification: "DBA". -> ""
-        if source_schema:
-            view_code = re.sub(rf"(?i)\"{re.escape(source_schema)}\"\.", "", view_code)
-
-        # 2. Strip double quotes from function calls e.g. "COUNT"( -> count(
-        view_code = re.sub(r'"([A-Za-z0-9_]+)"\s*\(', r'\1(', view_code)
-
-        # 3. Convert empty COUNT() -> count(*)
-        view_code = re.sub(r"(?i)\bCOUNT\s*\(\s*\)", "count(*)", view_code)
-
-        # 4. Convert IF cond THEN val1 ELSE val2 ENDIF -> CASE WHEN cond THEN val1 ELSE val2 END
-        view_code = re.sub(r"(?i)\bIF\s+(.+?)\s+THEN\s+(.+?)\s+ELSE\s+(.+?)\s+ENDIF\b", r"CASE WHEN \1 THEN \2 ELSE \3 END", view_code)
-
-        # 5. Convert LIST(expr, sep ...) -> string_agg(expr::text, sep ...)
-        view_code = re.sub(r"(?i)\bLIST\s*\(\s*([^\s,]+)\s*,", r"string_agg(\1::text,", view_code)
-
-        # 6. Convert SELECT TOP N -> SELECT ... LIMIT N
-        def replace_top(match):
-            top_n = match.group(1)
-            rest = match.group(2)
-            return f"SELECT {rest} LIMIT {top_n}"
-
-        view_code = re.sub(r"(?i)\bSELECT\s+TOP\s+(\d+)\s+(.+?)(?=\)|\s*$)", replace_top, view_code, flags=re.DOTALL)
-
-        # 7. Convert boolean comparisons: "is_active" = 1 -> "is_active" = true
-        view_code = re.sub(r'is_active"\s*=\s*1\b', 'is_active" = true', view_code)
-        view_code = re.sub(r'is_active"\s*=\s*0\b', 'is_active" = false', view_code)
-
-        # 8. Fix recursive CTE string concatenation type matching
-        view_code = re.sub(r"as\s+varchar\s*\(\s*500\s*\)", "as text", view_code, flags=re.IGNORECASE)
-
-        # 9. Apply standard function mappings
-        view_code = self.apply_sql_functions_mapping(view_code, settings)
-
-        # 10. Ensure CREATE OR REPLACE VIEW
-        if not view_code.lower().startswith("create"):
-            view_code = "CREATE OR REPLACE VIEW " + view_code
-        else:
-            view_code = re.sub(r"(?i)^CREATE\s+(MATERIALIZED\s+)?VIEW", "CREATE OR REPLACE VIEW", view_code)
-
-        return view_code
 
     def get_sequence_current_value(self, sequence_id: int):
         pass
@@ -2220,7 +2135,67 @@ class SQLAnywhereConnector(DatabaseConnector):
         cursor.close()
         return rows
 
+    ## The special values SQL Anywhere allows as a column DEFAULT, and what each of them is
+    ## in PostgreSQL. They are matched against the WHOLE default, which is why they cannot go
+    ## into get_sql_functions_mapping(): `TIMESTAMP` alone is a default here and a type name
+    ## everywhere else, and a mapping which rewrote every occurrence of the word would rewrite
+    ## the views and the routines with it.
+    DEFAULT_SPECIAL_VALUES = {
+        'CURRENT DATE': 'CURRENT_DATE',
+        'CURRENT TIME': 'CURRENT_TIME',
+        'CURRENT TIMESTAMP': 'CURRENT_TIMESTAMP',
+        'CURRENT UTC TIMESTAMP': "(now() AT TIME ZONE 'UTC')",
+        'UTC TIMESTAMP': "(now() AT TIME ZONE 'UTC')",
+        'TIMESTAMP': 'CURRENT_TIMESTAMP',
+        'CURRENT USER': 'CURRENT_USER',
+        'USER': 'CURRENT_USER',
+        'LAST USER': 'CURRENT_USER',
+        'CURRENT DATABASE': 'current_database()',
+        'CURRENT PUBLISHER': 'CURRENT_USER',
+        'CURRENT REMOTE USER': 'CURRENT_USER',
+    }
+
+    ## What a special value really means where PostgreSQL cannot say the same thing. The
+    ## value above is still used - a column which had a default keeps one - and the
+    ## difference is reported, because new rows get something else than the source gave them.
+    DEFAULT_SPECIAL_VALUES_WITH_A_DIFFERENCE = {
+        'TIMESTAMP': ("SQL Anywhere sets such a column to the current timestamp on every "
+                      "INSERT AND ON EVERY UPDATE. CURRENT_TIMESTAMP is the insert half of "
+                      "it; the update half needs a BEFORE UPDATE trigger in the target, "
+                      "which this migration does not create."),
+        'LAST USER': ("SQL Anywhere sets such a column to the user who last changed the row, "
+                      "on every INSERT AND ON EVERY UPDATE. CURRENT_USER is the insert half of "
+                      "it; the update half needs a BEFORE UPDATE trigger in the target, "
+                      "which this migration does not create."),
+        'CURRENT PUBLISHER': ("this is the publisher of the SQL Remote setup and not the "
+                              "connected user. PostgreSQL has nothing to answer with, so "
+                              "CURRENT_USER is used - new rows get the user who inserted "
+                              "them, which is not the same value."),
+        'CURRENT REMOTE USER': ("this is the user of the SQL Remote / MobiLink connection "
+                                "which is applying the row. PostgreSQL has no such user, so "
+                                "CURRENT_USER is used - new rows get the user who inserted "
+                                "them, which is not the same value."),
+    }
+
     def convert_default_value(self, settings) -> dict:
+        """
+        The DEFAULT of a column of the source, as PostgreSQL says it.
+
+        The DEFAULT of SQL Anywhere is a closed grammar - a special value, a string, a
+        number, a constant expression, a built-in function over constants, AUTOINCREMENT,
+        GLOBAL AUTOINCREMENT or NULL - and **it cannot reference a column**: a constant
+        expression there "must not reference database objects". That settles what a
+        double-quoted token in one is: a **string**, written by a database whose
+        `quoted_identifier` option was off, and not an identifier.
+
+        This used to be read the other way round. Anything which still held a double-quoted
+        token after the conversion was called a column reference and the whole default was
+        dropped - at INFO, so the default log level did not even show it - which threw away
+        legitimate constant defaults such as `'a' || "b"`. Only a default which was one
+        double-quoted string and nothing else was converted, so the same syntax was read as a
+        string in one place and as a column in the other. Every double-quoted token is a
+        string now. P1-4 of development/OPEN_ISSUES.md.
+        """
         extracted_default_value = settings.get('extracted_default_value')
         if not extracted_default_value:
             return extracted_default_value
@@ -2237,6 +2212,18 @@ class SQLAnywhereConnector(DatabaseConnector):
             if not (inner.startswith('(') and not inner.endswith(')')):
                 val = inner
 
+        # A special value of the DEFAULT grammar, which is the whole default or nothing.
+        # Read before anything else touches the text: `TIMESTAMP` is one of them.
+        special = re.sub(r'\s+', ' ', val).strip().upper()
+        if special in self.DEFAULT_SPECIAL_VALUES:
+            difference = self.DEFAULT_SPECIAL_VALUES_WITH_A_DIFFERENCE.get(special)
+            if difference:
+                self.config_parser.print_log_message('WARNING',
+                    f"sql_anywhere_connector: convert_default_value: DEFAULT {special} is "
+                    f"migrated as {self.DEFAULT_SPECIAL_VALUES[special]}, which is not the "
+                    f"same thing: {difference}")
+            return self.DEFAULT_SPECIAL_VALUES[special]
+
         # Clean double quotes around function names e.g. "LOWER"( -> LOWER(
         val = re.sub(r'"([A-Za-z0-9_]+)"\s*\(', r'\1(', val)
 
@@ -2245,18 +2232,13 @@ class SQLAnywhereConnector(DatabaseConnector):
             column_type = settings.get('column_type', '')
             return self.config_parser.get_uuid_default_function(column_type)
 
-        # Convert simple double-quoted string literals e.g. "ACTIVE" -> 'ACTIVE'
-        if re.fullmatch(r'"[^\"]*"', val):
-            val = "'" + val[1:-1].replace("'", "''") + "'"
+        # Every double-quoted token which is left is a string literal - see the docstring.
+        # PostgreSQL writes one in single quotes, and doubles a single quote inside it.
+        val = re.sub(r'"((?:[^"]|"")*)"',
+                     lambda match: "'" + match.group(1).replace('""', '"').replace("'", "''") + "'",
+                     val)
 
-        val = self.apply_sql_functions_mapping(val, settings)
-
-        # If val still contains double-quoted identifiers (column references), drop it as PostgreSQL DEFAULT cannot reference columns
-        if re.search(r'"[A-Za-z0-9_]+"', val):
-            self.config_parser.print_log_message('INFO', f"sql_anywhere_connector: convert_default_value: Default value '{extracted_default_value}' contains column reference - dropped for PostgreSQL target.")
-            return None
-
-        return val
+        return self.apply_sql_functions_mapping(val, settings)
 
     def get_table_checksum(self, schema_name: str, table_name: str, columns: list):
         if not columns:

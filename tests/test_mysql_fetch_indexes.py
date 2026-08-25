@@ -31,7 +31,11 @@ class TestMySQLFetchIndexes(unittest.TestCase):
 
         self.assertIn(1, result)
         self.assertEqual(result[1]['index_name'], 'idx_expr')
-        self.assertIn(result[1]['index_columns'], ('lower("email")', "lower('email')"))
+        ## the identifier of the source stays an identifier. `lower('email')` - the second
+        ## spelling this used to accept - is an index on the constant 'email' and not on the
+        ## column, which is what the backtick handling of clean_index_expression produced
+        ## until P1-3 was repaired.
+        self.assertEqual(result[1]['index_columns'], 'lower("email")')
         self.assertEqual(result[1]['is_function_based'], 'YES')
 
         self.assertIn(2, result)

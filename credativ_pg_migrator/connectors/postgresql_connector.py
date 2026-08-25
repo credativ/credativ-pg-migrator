@@ -18,14 +18,60 @@ import time
 import psycopg2
 import psycopg2.extras
 from psycopg2 import sql
-from credativ_pg_migrator.database_connector import DatabaseConnector
+from credativ_pg_migrator.database_connector import DatabaseConnector, first_line
 from credativ_pg_migrator.migrator_logging import MigratorLogger
 from credativ_pg_migrator.constants import MigratorConstants
+from credativ_pg_migrator import collations
 import traceback
 import re
 import json
 import datetime
 from decimal import Decimal
+import sqlglot
+
+
+## --------------------------------------------------------------------------------------
+## The conversion of a bare statement, PostgreSQL to PostgreSQL. §7 of
+## development/archive/APPLICATION_QUERIES_CONVERSION_STRATEGY.md, P3-5 of
+## development/OPEN_ISSUES.md.
+##
+## There is no dialect to convert here - the statement is already PostgreSQL, and the cost
+## table of §7.1 calls this connector trivial for that reason. What it is not is empty: a
+## migration moves the rows into a new physical order in a new database, and the constructs
+## below are the ones which read that physical order, or the state of the session, or the
+## catalogue - each of them valid PostgreSQL on the target, each of them answering something
+## else there, and none of them visible to any level of the target test.
+## --------------------------------------------------------------------------------------
+
+## The system columns. PostgreSQL refuses to create a user column of any of these names, so
+## a name found here is always the system column and never something the application declared.
+POSTGRESQL_SYSTEM_COLUMNS = re.compile(
+    r'(?i)(?<![\w])(?:ctid|xmin|xmax|cmin|cmax|tableoid)(?![\w(])')
+
+## The sequence functions which answer what the SESSION did. nextval() is refused before this
+## by gate 3 of the query conversion - it writes.
+POSTGRESQL_SESSION_SEQUENCE = re.compile(r'(?i)(?<![\w.])(?:currval|lastval)\s*\(')
+
+## A name resolved out of a string literal at run time, through the search_path of whoever
+## runs the statement.
+POSTGRESQL_REG_CAST = re.compile(
+    r'(?i)::\s*(regclass|regconfig|regdictionary|regproc|regprocedure|regoper|regoperator'
+    r'|regtype|regnamespace|regrole)\b')
+
+## The catalogue of the server, and the functions which report on it.
+POSTGRESQL_CATALOGUE = re.compile(
+    r'(?i)(?<![\w.])(?:pg_catalog\.|information_schema\.|pg_class\b|pg_attribute\b'
+    r'|pg_namespace\b|pg_index\b|pg_constraint\b|pg_proc\b|pg_type\b|pg_stat_[a-z_]+\b'
+    r'|pg_settings\b|pg_roles\b|pg_user\b|pg_tables\b|pg_views\b|pg_indexes\b)')
+
+## What answers a property of the connection rather than of the data.
+POSTGRESQL_SESSION_FUNCTIONS = re.compile(
+    r'(?i)(?<![\w.])(?:current_database|current_schema|current_catalog|current_user'
+    r'|session_user|current_role|inet_client_addr|inet_server_addr|pg_backend_pid'
+    r'|version)\s*(?:\(|\b)')
+
+## An explicit collation, which has to exist on the target cluster and mean the same there.
+POSTGRESQL_COLLATE = re.compile(r'(?i)(?<![\w.])COLLATE\s+')
 
 class PostgreSQLConnector(DatabaseConnector):
     def __init__(self, config_parser, source_or_target):
@@ -1482,6 +1528,12 @@ class PostgreSQLConnector(DatabaseConnector):
 
             # An element of a function-based index is an expression
             if self.expression_is_parenthesized(col) or (is_function_based and '(' in col):
+                ## The collations are taken out of the expression before anything reads it:
+                ## the name of a collation is not an identifier of this migration, and the
+                ## conversion below folds it with the rest of them - COLLATE "C" became
+                ## COLLATE "c" under names_case_handling: lower, which PostgreSQL does not
+                ## have. They are put back at the end of this branch.
+                col, found_collations = collations.take_out(col)
                 expression = self.convert_expression_identifiers(col, target_columns)
                 expression = expression.replace(r"\'", "'").replace(r'\"', '"')
                 if self.config_parser.get_source_db_type() != 'postgresql':
@@ -1495,12 +1547,25 @@ class PostgreSQLConnector(DatabaseConnector):
                 if self.config_parser.get_source_db_type() == 'postgresql':
                     # PostgreSQL collations are migrated with the schema - keep them in the
                     # expression, only point them to the collation in the target schema.
-                    expression = re.sub(
-                        r'(?i)\bCOLLATE\s+((?:"(?:[^"]|"")+"|[a-zA-Z0-9_]+)(?:\.(?:"(?:[^"]|"")+"|[a-zA-Z0-9_]+))?)',
-                        lambda match: self.get_collate_clause(match.group(1), user_collations).strip(),
-                        expression)
+                    expression, _ = collations.put_back(
+                        expression, found_collations,
+                        resolve=lambda name: self.get_collate_clause(name, user_collations))
                 else:
-                    expression = re.sub(r'(?i)\bCOLLATE\s+[`\'"]?[a-zA-Z0-9_]+[`\'"]?', '', expression)
+                    ## A collation of another engine used to be deleted here without a word,
+                    ## for every source which is not PostgreSQL. It decides which strings
+                    ## count as equal, so a case-insensitive index became a case-sensitive
+                    ## one - it answers a query with fewer rows than the source did, and a
+                    ## unique one stops refusing two values which differ only in case. What
+                    ## PostgreSQL can say is carried over now (`_bin` compares byte by byte,
+                    ## which is COLLATE "C") and what it cannot is reported. P1-3.
+                    expression, _ = collations.put_back(
+                        expression, found_collations,
+                        existing_names=self.get_existing_collation_names(),
+                        report=self.config_parser.print_log_message,
+                        where=(f"postgresql_connector: get_create_index_sql: index "
+                               f"'{index_name}' on table "
+                               f"'{target_schema_name}.{target_table_name}'"),
+                        index_type=index_type)
                 expression = self.qualify_text_search_references(expression, text_search_objects)
                 if not self.expression_is_parenthesized(expression):
                     expression = f"({expression})"
@@ -3409,13 +3474,178 @@ class PostgreSQLConnector(DatabaseConnector):
         target_schema_name = settings['target_schema_name']
         view_type = settings.get('view_type', 'VIEW')
 
-        view_code = self.qualify_text_search_references(view_code, settings.get('text_search_objects'))
+        ## the shared body converter, so that the query of a view and the statement of an
+        ## application cannot be given different treatment (§15 phase 2 of the strategy). It
+        ## is not asked to parse anything: the text comes from pg_get_viewdef() of the source,
+        ## which PostgreSQL itself wrote, and a parse gate here could only refuse a view which
+        ## migrates today.
+        view_code = self.convert_statement_code(settings)
 
         ddl = f'CREATE {view_type} "{target_schema_name}"."{view_name}" AS {view_code}'
         if not ddl.strip().endswith(';'):
              ddl += ';'
 
         return ddl
+
+    ## The source test of §8.1. PREPARE resolves every name, every function and every type
+    ## and produces a plan, and it runs nothing. It is sent inside the same read only
+    ## transaction the target test uses, and rolled back - the source of a migration is a
+    ## production database and this step may not leave a thing behind in it.
+    SOURCE_TEST_PARAMETER_STYLE = 'numbered'
+
+    SOURCE_TEST_PROBE_NAME = 'credativ_pg_migrator_source_probe'
+
+    def source_test_native_mechanism(self):
+        return 'PREPARE'
+
+    def source_test_probe(self, sql, parameter_count=0):
+        body = (sql or '').rstrip().rstrip(';')
+        if not body:
+            return [], []
+        timeout = self.config_parser.get_query_conversion_timeout()
+        name = self.SOURCE_TEST_PROBE_NAME
+        return ([
+            'BEGIN;',
+            'SET LOCAL transaction_read_only = on;',
+            f"SET LOCAL statement_timeout = '{timeout}';",
+            f'PREPARE {name} AS {body};',
+            f'DEALLOCATE {name};',
+        ], ['ROLLBACK;'])
+
+    ## ---------------------------------------------------------------- application queries
+
+    def query_conversion_supported(self):
+        return True
+
+    def convert_statement_code(self, settings: dict):
+        """
+        One statement of PostgreSQL, converted for PostgreSQL - the body of a view and the
+        statement of an application are given the same one.
+
+        There is no dialect conversion: what the two share is the text search references,
+        which name an object of the migration from inside a string literal and can therefore
+        not be rewritten as identifiers. Everything else the statement needs - the schema, the
+        names the migration gave the tables and the columns - is the work of the name map of
+        §7.3, which runs over the parsed statement outside the connector.
+        """
+        code = settings['view_code']
+        target_db_type = settings.get('target_db_type') or 'postgresql'
+        if target_db_type != 'postgresql':
+            raise ValueError(f"the target database type {target_db_type} is not supported - "
+                             f"this connector migrates PostgreSQL to PostgreSQL")
+        return self.qualify_text_search_references(code, settings.get('text_search_objects'))
+
+    def postgresql_conversion_blockers(self, source_code):
+        """
+        The reasons the statement may not be offered as a conversion. Each of them is valid
+        PostgreSQL on the target and answers something else there, so none of them is caught
+        by the target test - which is the whole reason they are listed.
+        """
+        statement = self.sql_without_literals_and_comments(source_code or '')
+        reasons = []
+        if POSTGRESQL_SYSTEM_COLUMNS.search(statement):
+            reasons.append(
+                "the statement reads a system column (ctid, xmin, xmax, cmin, cmax or "
+                "tableoid). These carry the physical identity of a row and the transaction "
+                "which wrote it: the migration inserted the rows again, in an order of its "
+                "own, so every one of those values is another one on the target - and the "
+                "statement is accepted there, which is why it is stopped here. Rewrite it "
+                "around the primary key")
+        if POSTGRESQL_SESSION_SEQUENCE.search(statement):
+            reasons.append(
+                "currval() and lastval() answer what the PREVIOUS statement of the same "
+                "session took out of a sequence. A statement converted on its own has no such "
+                "predecessor, and the sequences of the target were set to the values the "
+                "migration found - PostgreSQL answers the RETURNING clause of the statement "
+                "which wrote instead")
+        return reasons
+
+    def postgresql_conversion_warnings(self, source_code):
+        """
+        What is carried over unchanged and still answers something else on the target,
+        because the target is another server with another catalogue and another session.
+        """
+        warnings = []
+        statement = self.sql_without_literals_and_comments(source_code or '')
+
+        if POSTGRESQL_REG_CAST.search(source_code or ''):
+            warnings.append(
+                "the statement names an object inside a string literal and casts it "
+                "('name'::regclass, 'name'::regconfig). Such a name is resolved through the "
+                "search_path when the statement runs and cannot be rewritten as an "
+                "identifier, so the map of the migration does not reach it: where the object "
+                "was migrated into another schema or under another name, the literal has to "
+                "be written out with the schema of the target")
+        if POSTGRESQL_CATALOGUE.search(statement):
+            warnings.append(
+                "the statement reads the catalogue of the server (pg_catalog / "
+                "information_schema). It answers about the TARGET database - its tables, its "
+                "settings, its statistics - and not about the database the application was "
+                "written against; nothing of the catalogue is migrated")
+        if POSTGRESQL_SESSION_FUNCTIONS.search(statement):
+            warnings.append(
+                "the statement asks about the connection - the database, the schema, the role "
+                "or the server version. Every one of those answers the target after the "
+                "migration, so a comparison against a name the application has written down "
+                "stops being true")
+        if POSTGRESQL_COLLATE.search(statement):
+            warnings.append(
+                "the statement names a collation explicitly. It has to exist on the target "
+                "cluster and be built from the same locale data - a collation of another "
+                "version sorts other rows first, and neither the migration nor the target "
+                "test can see that")
+        return warnings
+
+    def convert_query_code(self, settings: dict):
+        """
+        One statement of an application, converted for PostgreSQL - the same conversion the
+        query of a view is given. See the contract in DatabaseConnector.convert_query_code().
+
+        The statement is already the dialect of the target, so what this answers is mostly the
+        statement it was given. It is still read as PostgreSQL first: a statement the parser
+        cannot read is reported as one which was not converted, and not handed on as one which
+        was - the name map of §7.3 and gate 4 both parse it further down, and a statement which
+        arrives there unreadable is reported with a message about a stage it never reached.
+        """
+        statement_id = settings.get('statement_id', '')
+        source_code = settings['query_code']
+        warnings = self.postgresql_conversion_warnings(source_code)
+
+        try:
+            parsed = sqlglot.parse_one(source_code, read='postgres')
+        except Exception as e:
+            return {'code': '', 'converted': False, 'warnings': warnings,
+                    'error': f"the statement could not be read as PostgreSQL: {first_line(e)}"}
+        if parsed is None:
+            return {'code': '', 'converted': False, 'warnings': warnings,
+                    'error': 'the parser read no statement at all'}
+
+        blockers = self.postgresql_conversion_blockers(source_code)
+        if blockers:
+            return {'code': '', 'converted': False, 'warnings': warnings,
+                    'error': '; '.join(blockers)}
+
+        try:
+            converted = self.convert_statement_code({
+                'view_code': source_code,
+                'source_schema_name': settings.get('source_schema_name'),
+                'target_schema_name': settings.get('target_schema_name'),
+                'target_db_type': settings.get('target_db_type', 'postgresql'),
+            })
+        except ValueError as e:
+            return {'code': '', 'converted': False, 'warnings': warnings, 'error': first_line(e)}
+        except Exception as e:
+            return {'code': '', 'converted': False, 'warnings': warnings,
+                    'error': f"the conversion ended with an error: {first_line(e)}"}
+
+        if not (converted or '').strip():
+            return {'code': '', 'converted': False, 'warnings': warnings,
+                    'error': 'the conversion produced no statement at all'}
+
+        self.config_parser.print_log_message(
+            'DEBUG', f"postgresql_connector: convert_query_code: {statement_id}: {converted}")
+        return {'code': converted, 'converted': True, 'warnings': warnings, 'error': None}
+
 
     def fetch_user_defined_types(self, schema: str):
         user_defined_types = {}

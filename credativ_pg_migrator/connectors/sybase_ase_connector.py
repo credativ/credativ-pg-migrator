@@ -18,7 +18,7 @@ import jaydebeapi
 from jaydebeapi import Error
 import pyodbc
 from pyodbc import Error
-from credativ_pg_migrator.database_connector import DatabaseConnector
+from credativ_pg_migrator.database_connector import DatabaseConnector, first_line
 from credativ_pg_migrator.migrator_logging import MigratorLogger
 from credativ_pg_migrator.jvm_helper import detach_thread_from_jvm
 import re
@@ -27,6 +27,8 @@ import sys
 from tabulate import tabulate
 import sqlglot
 from credativ_pg_migrator.connectors.tsql_parser import TsqlParser
+from credativ_pg_migrator.query_conversion import outer_joins as query_outer_joins
+from credativ_pg_migrator.query_conversion.outer_joins import outer_join_warnings
 from sqlglot import exp, TokenType
 from sqlglot.dialects import TSQL
 import time
@@ -4146,7 +4148,10 @@ class SybaseASEConnector(DatabaseConnector):
                 f"sybase_ase_connector: convert_trigger: Trigger {trigger_name}: {plain_returns} plain RETURN statement(s) converted to 'RETURN {returned_record}' - a trigger function of PostgreSQL cannot return without a value.")
 
         # 7. Assemble DDL
-        pg_func = f"""CREATE OR REPLACE FUNCTION "{target_schema_name}"."{trigger_name}_func"()
+        ## the whole generated name follows the case handling, not only the part which came
+        ## from the trigger - "TR_X_func" is consistent but reads like a defect
+        trigger_function_name = self.config_parser.convert_names_case(f"{trigger_name}_func")
+        pg_func = f"""CREATE OR REPLACE FUNCTION "{target_schema_name}"."{trigger_function_name}"()
 RETURNS trigger AS $$
 DECLARE
 {chr(10).join(declarations)}
@@ -4160,7 +4165,7 @@ $$ LANGUAGE plpgsql;
         pg_trigger = f"""CREATE TRIGGER "{trigger_name}"
 AFTER {pg_events} ON "{target_schema_name}"."{target_table_name}"
 FOR EACH ROW
-EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
+EXECUTE FUNCTION "{target_schema_name}"."{trigger_function_name}"();
 """
         return pg_func + '\n' + pg_trigger
 
@@ -4711,7 +4716,20 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
         view_code_str = ''.join([code[0] for code in view_code])
         return view_code_str
 
-    def convert_view_code(self, settings: dict):
+    def convert_statement_code(self, settings: dict):
+        """
+        One statement of the source converted for PostgreSQL, without a wrapper around it.
+
+        This is the conversion the query of a view is given - the outer joins written '*=',
+        the string concatenation with '+', the double quoted string literals, the user
+        defined types, the functions of the source and the schema of the target. It is used
+        for the query of a view and for a statement of an application; 'view_code' carries
+        the statement.
+
+        Raises ValueError when the statement cannot be parsed. The error carries the text as
+        far as the conversion got in its 'partial_code' attribute, for a caller which prefers
+        that to nothing.
+        """
 
         def quote_column_names(node):
             if isinstance(node, sqlglot.exp.Column):
@@ -4832,71 +4850,46 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
 
 
         def transform_sybase_joins(expression):
-            # Check for EQ nodes with outer join comments
-            outer_joins = []
-            for node in expression.find_all(sqlglot.exp.EQ):
-                if node.comments and any('left_outer' in c for c in node.comments):
-                    outer_joins.append((node, 'LEFT'))
-                elif node.comments and any('right_outer' in c for c in node.comments):
-                    outer_joins.append((node, 'RIGHT'))
+            """
+            The '*=' and '=*' outer joins, rewritten by the shared module.
 
-            for node, join_type in outer_joins:
-                # LEFT JOIN: A *= B -> left=A, right=B (preserves A, B is null supplying)
-                # RIGHT JOIN: A =* B -> left=A, right=B (preserves B, A is null supplying)
+            This used to be an implementation of its own, written against a model of sqlglot
+            in which the tables behind the comma of a FROM clause stood in
+            `From.expressions`. They do not any more - the extra tables are implicit joins on
+            the SELECT - so the table the marked condition named was never found, the rewrite
+            gave up on every statement and the marker went through to the end. A view kept
+            the '/* left_outer */' in its text and a statement of an application was reported
+            as one whose outer join could not be rewritten. Every Sybase ASE statement written
+            with '*=' was affected, which is the shape the strategy names as the example of
+            what this step is for.
 
-                null_supplying_col = node.right if join_type == 'LEFT' else node.left
-
-                # Identify target table from null supplying column
-                target_alias = ""
-                if isinstance(null_supplying_col, sqlglot.exp.Column):
-                     target_alias = null_supplying_col.table
-
-                if not target_alias:
-                    continue
-
-                select_node = node.find_ancestor(sqlglot.exp.Select)
-                if not select_node:
-                    continue
-
-                # Find target table in FROM clause
-                target_table_node = None
-                from_clause = select_node.args.get('from')
-                if from_clause:
-                     for child in from_clause.expressions:
-                         # 1. Direct match (Table or Aliased Subquery)
-                         if child.alias_or_name == target_alias:
-                             target_table_node = child
-                             break
-
-                         # 2. Wrapper match (Subquery/Paren without explicit alias, containing the table)
-                         # e.g. FROM (table) -> child is Subquery/Paren
-                         child_tables = list(child.find_all(sqlglot.exp.Table))
-                         if len(child_tables) == 1 and child_tables[0].alias_or_name == target_alias:
-                             target_table_node = child
-                             break
-
-                if target_table_node:
-                    # Remove from FROM clause
-                    from_clause.expressions.remove(target_table_node)
-
-                    # Create JOIN
-                    join_condition = node.copy()
-                    join_condition.comments = None
-
-                    join = sqlglot.exp.Join(
-                        this=target_table_node,
-                        kind="LEFT",
-                        on=join_condition
-                    )
-
-                    # Add to Select joins
-                    if "joins" not in select_node.args:
-                        select_node.args["joins"] = []
-                    select_node.args["joins"].append(join)
-
-                    # Replace condition in WHERE with TRUE
-                    node.replace(sqlglot.exp.Boolean(this=True))
-
+            The shared module is the one Oracle's '(+)' and SQL Anywhere's '*=' already go
+            through, and it is written for the model sqlglot has. Returns the expression; a
+            condition it could not attribute keeps its marker, and the caller refuses such a
+            statement rather than offering it as converted.
+            """
+            converted_joins = set()
+            expression, unconverted = query_outer_joins.convert_marked_outer_joins(
+                expression, converted_joins)
+            if unconverted:
+                self.config_parser.print_log_message(
+                    'WARNING', f"sybase_ase_connector: convert_statement_code: {unconverted} outer "
+                               f"join(s) written '*=' or '=*' could not be attributed to a table of "
+                               f"the FROM clause and were not rewritten.")
+            ## A restriction on the inner table belongs to the join in this dialect and to the
+            ## result of the join in PostgreSQL, where it throws away the rows the outer join
+            ## added - the LEFT JOIN would be an inner join again. It moves into the ON clause,
+            ## and what moved is reported, because it decides which rows the statement answers.
+            expression, moved = query_outer_joins.move_inner_table_predicates(
+                expression, converted_joins)
+            if moved:
+                report = settings.setdefault('conversion_report', {})
+                report['moved_predicates'] = report.get('moved_predicates', []) + moved
+                self.config_parser.print_log_message(
+                    'WARNING', f"sybase_ase_connector: convert_statement_code: "
+                               f"{', '.join(moved)} restrict the inner table of an outer join and "
+                               f"were moved into its ON clause - in the WHERE clause of PostgreSQL "
+                               f"they would undo the outer join.")
             return expression
 
         def replace_cast_types(node):
@@ -4927,7 +4920,7 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
         ## shared with the other T-SQL sources - see convert_string_concatenation()
         ## and is_string_expression() of the base connector
 
-        self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: convert_string_concatenation: settings in convert_view_code: {settings}")
+        self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: convert_statement_code: settings in convert_view_code: {settings}")
         converted_code = settings['view_code']
 
         # Apply remote_objects_substitution
@@ -4938,39 +4931,28 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
                 if source_obj and target_obj:
                     # Case-insensitive replacement
                     converted_code = re.sub(re.escape(source_obj), target_obj, converted_code, flags=re.IGNORECASE)
-                    self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: convert_string_concatenation: Applied remote object substitution: {source_obj} -> {target_obj}")
+                    self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: convert_statement_code: Applied remote object substitution: {source_obj} -> {target_obj}")
 
-        # Pre-process Sybase specific join syntax
-        # *= -> = /* left_outer */
-        # =* -> = /* right_outer */
-        # Pre-process Sybase specific join syntax
-        # *= -> = /* left_outer */
-        # =* -> = /* right_outer */
-        converted_code = re.sub(r'\*=', '= /* left_outer */', converted_code)
-        converted_code = re.sub(r'=\*', '= /* right_outer */', converted_code)
-
-        # Remove 'noholdlock' hints (often interpreted as aliases)
-        converted_code = re.sub(r'\bnoholdlock\b', '', converted_code, flags=re.IGNORECASE)
+        converted_code = self.prepare_query_for_parsing(converted_code)
 
         converted_code = self._apply_udt_to_base_type_substitutions(converted_code, settings)
-
-        # Convert double-quoted string literals to single-quoted strings
-        # Sybase often allows "string" where PostgreSQL expects 'string' (which would otherwise parse as an identifier)
-        def replacer_dq(m):
-            inner = m.group(1)
-            inner = inner.replace("'", "''")
-            return f"'{inner}'"
-
-        converted_code = re.sub(r'"([^"]*)"', replacer_dq, converted_code)
 
         if settings['target_db_type'] == 'postgresql':
 
             try:
                 parsed_code = sqlglot.parse_one(converted_code, read='tsql')
             except Exception as e:
-                self.config_parser.print_log_message('ERROR', f"sybase_ase_connector: convert_string_concatenation: Error parsing View code: {e}")
-                # Fallback to the unparsed converted_code instead of empty string to avoid crashes
-                return converted_code
+                ## The statement could not be read, so there is no conversion of it. What the
+                ## caller does with that is the caller's decision - a view keeps its source
+                ## text and is reported as failed, a query of an application is reported as
+                ## NOT CONVERTED - but nothing here answers with a text which was not
+                ## converted as if it had been.
+                error = ValueError(f"the statement could not be parsed as T-SQL: {first_line(e)}")
+                ## the text a caller keeps is the statement with its own operator, not with the
+                ## marker: PostgreSQL reads the marker as a comment and the outer join would be
+                ## an inner one, created without complaint
+                error.partial_code = query_outer_joins.unmark_tsql_outer_joins(converted_code)
+                raise error
 
             # double quote column names
             parsed_code = parsed_code.transform(quote_column_names)
@@ -4984,19 +4966,19 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
             # Map Sybase native cast datatypes to Postgres native equivalents
             parsed_code = parsed_code.transform(replace_cast_types)
 
-            self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: convert_string_concatenation: Double quoted columns: {parsed_code.sql(dialect='postgres')}")
+            self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: convert_statement_code: Double quoted columns: {parsed_code.sql(dialect='postgres')}")
 
             # replace source schema with target schema
             parsed_code = parsed_code.transform(replace_schema_names)
-            self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: convert_string_concatenation: Replaced schema names: {parsed_code.sql(dialect='postgres')}")
+            self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: convert_statement_code: Replaced schema names: {parsed_code.sql(dialect='postgres')}")
 
             # double quote schema and table names
             parsed_code = parsed_code.transform(quote_schema_and_table_names)
-            self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: convert_string_concatenation: Double quoted schema and table names: {parsed_code.sql(dialect='postgres')}")
+            self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: convert_statement_code: Double quoted schema and table names: {parsed_code.sql(dialect='postgres')}")
 
             # replace functions
             parsed_code = parsed_code.transform(replace_functions)
-            self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: convert_string_concatenation: Replaced functions: {parsed_code.sql(dialect='postgres')}")
+            self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: convert_statement_code: Replaced functions: {parsed_code.sql(dialect='postgres')}")
 
             ## The statement is generated for PostgreSQL. With the default dialect of sqlglot,
             ## which was used here, the niladic keyword functions are written as calls -
@@ -5007,16 +4989,140 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
             parsed_code = parsed_code.transform(self.keep_source_variables)
             converted_code = parsed_code.sql(dialect='postgres')
             converted_code = converted_code.replace("()()", "()")
+            ## the 'TRUE' the outer join rewrite leaves where a condition moved into an ON
+            ## clause - "WHERE TRUE AND x" is "WHERE x", and the shorter one is what a
+            ## developer has to read
+            converted_code = query_outer_joins.tidy_boolean_placeholders(converted_code)
 
             converted_code = self.apply_sql_functions_mapping(converted_code, settings)
 
             # converted_code = converted_code.replace(f"{settings['source_database']}..", f"{settings['target_schema_name']}.")
             # converted_code = converted_code.replace(f"{settings['source_database']}.{settings['source_schema_name']}.", f"{settings['target_schema_name']}.")
             # converted_code = converted_code.replace(f"{settings['source_schema_name']}.", f"{settings['target_schema_name']}.")
-            self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: convert_string_concatenation: Converted view: {converted_code}")
+            self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: convert_statement_code: Converted view: {converted_code}")
         else:
-            self.config_parser.print_log_message('ERROR', f"sybase_ase_connector: convert_string_concatenation: Unsupported target database type: {settings['target_db_type']}")
+            self.config_parser.print_log_message('ERROR', f"sybase_ase_connector: convert_statement_code: Unsupported target database type: {settings['target_db_type']}")
+
+        ## An outer join whose condition could not be attributed leaves its marker behind, and
+        ## what stands around it is the comma join it started from - an INNER join. The view
+        ## would be created and would answer fewer rows. Refused here, for the view path and
+        ## the query path alike.
+        marker_message = query_outer_joins.unconverted_marker_message(converted_code)
+        if marker_message:
+            error = ValueError(marker_message)
+            ## it parsed and it converted - it is the outer join alone which could not be
+            ## done, and a caller must not report it as a statement it could not read
+            error.outer_join_failure = True
+            raise error
         return converted_code
+
+
+    def convert_view_code(self, settings: dict):
+        """
+        The query of a view, converted for the target.
+
+        A statement which cannot be parsed keeps the text of the source, exactly as before:
+        the view is reported as failed by the migration and its source code stays readable in
+        the protocol.
+        """
+        try:
+            return self.convert_statement_code(settings)
+        except ValueError as e:
+            self.config_parser.print_log_message('ERROR', f"sybase_ase_connector: convert_view_code: {e}")
+            return getattr(e, 'partial_code', settings['view_code'])
+
+    def prepare_query_for_parsing(self, query_code):
+        """
+        The statement rewritten into something a T-SQL parser can read, without converting
+        anything: this is what makes the constructs of Sybase ASE parseable at all.
+
+          '*=' and '=*' - the outer join of ASE written in the WHERE clause. No parser of any
+          other dialect knows them, so they become an equality carrying a marker which says
+          which side was outer; the conversion turns the marker into a LEFT / RIGHT JOIN.
+
+          'noholdlock' - a read hint which a parser reads as the alias of the table.
+
+          "text" - with quoted_identifier off, a double quoted literal is a STRING in ASE and
+          an identifier everywhere else.
+
+        It is used by convert_statement_code() and by the query conversion, which has to
+        classify the statement before it converts it - a statement which cannot be parsed
+        would be reported as unreadable although the conversion can do it.
+        """
+        if not query_code:
+            return query_code
+
+        ## shared with ms_sql - the two are one family and wrote the same operator
+        prepared = query_outer_joins.mark_tsql_outer_joins(
+            query_code, self.sql_without_literals_and_comments)
+        prepared = re.sub(r'\bnoholdlock\b', '', prepared, flags=re.IGNORECASE)
+
+        def single_quote(match):
+            return "'" + match.group(1).replace("'", "''") + "'"
+
+        return re.sub(r'"([^"]*)"', single_quote, prepared)
+
+    ## The source test of §8.1. SET NOEXEC ON makes the server compile every statement behind
+    ## it - the names are resolved and the plan is made - and run none of them. It is a
+    ## setting of the SESSION, so it is taken back in the cleanup whatever the statement did;
+    ## a connection which cannot be put back is closed instead of being used again, because
+    ## every statement of the migrator behind it would silently answer nothing.
+    SOURCE_TEST_PARAMETER_STYLE = None
+
+    def source_test_native_mechanism(self):
+        return 'SET NOEXEC ON'
+
+    def source_test_probe(self, sql, parameter_count=0):
+        body = (sql or '').rstrip().rstrip(';')
+        if not body:
+            return [], []
+        if parameter_count:
+            ## a bind marker has no place in a batch which is submitted as text, and putting
+            ## a literal in its place would compile another statement than the application
+            ## runs. Not tested, and the block of the statement says so.
+            return [], []
+        return ['SET NOEXEC ON', body], ['SET NOEXEC OFF']
+
+    def query_conversion_supported(self):
+        return True
+
+    def convert_query_code(self, settings: dict):
+        """
+        One statement of an application, converted for PostgreSQL - the same conversion the
+        query of a view is given. See the contract in DatabaseConnector.convert_query_code().
+        """
+        statement_id = settings.get('statement_id', '')
+        ## the converter writes what it had to decide into this dictionary - it is made per
+        ## call, so nothing is carried from one statement to the next or between threads
+        statement_settings = {
+            'view_code': settings['query_code'],
+            'source_schema_name': settings['source_schema_name'],
+            'target_schema_name': settings['target_schema_name'],
+            'target_db_type': settings.get('target_db_type', 'postgresql'),
+            'conversion_report': {},
+        }
+        try:
+            converted = self.convert_statement_code(statement_settings)
+        except ValueError as e:
+            return {'code': '', 'converted': False, 'warnings': [], 'error': first_line(e)}
+        except Exception as e:
+            return {'code': '', 'converted': False, 'warnings': [],
+                    'error': f"the conversion ended with an error: {first_line(e)}"}
+
+        if not (converted or '').strip():
+            return {'code': '', 'converted': False, 'warnings': [],
+                    'error': 'the conversion produced no statement at all'}
+
+        warnings = outer_join_warnings(statement_settings.get('conversion_report') or {})
+        ## the outer joins of the source are rewritten by the conversion; a marker left in the
+        ## text says it did not finish, and such a statement is not offered as converted
+        if '/* left_outer */' in converted or '/* right_outer */' in converted:
+            return {'code': '', 'converted': False, 'warnings': warnings,
+                    'error': "the outer join written '*=' or '=*' could not be rewritten as a "
+                             "LEFT JOIN / RIGHT JOIN - the statement needs to be rewritten by hand"}
+
+        self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: convert_query_code: {statement_id}: {converted}")
+        return {'code': converted, 'converted': True, 'warnings': warnings, 'error': None}
 
     def get_sequence_current_value(self, sequence_name):
         pass

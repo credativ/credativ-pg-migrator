@@ -54,6 +54,33 @@ class MigratorConstants:
             return None
         return MigratorConstants.MESSAGE_LEVEL_SEVERITIES.get(str(level).strip().upper())
 
+    ## What the validation of one table can end in. Three outcomes and not two: a table for
+    ## which no check could run - no primary key, no checksum on that source, every check
+    ## switched off - is not a table which passed. "We could not tell" is not "it is correct",
+    ## and a report which cannot say the difference cannot be used as evidence. P2-2.
+    VALIDATION_PASSED = 'PASSED'
+    VALIDATION_FAILED = 'FAILED'
+    VALIDATION_NOT_VALIDATED = 'NOT VALIDATED'
+
+    ## The mark each outcome gets in the Status column of the validation summary.
+    VALIDATION_OUTCOME_MARKS = {
+        VALIDATION_PASSED: 'PASS',
+        VALIDATION_FAILED: 'X',
+        VALIDATION_NOT_VALIDATED: '?',
+    }
+
+    @staticmethod
+    def get_validation_outcomes():
+        """The three outcomes, from the best to the one which says nothing."""
+        return (MigratorConstants.VALIDATION_PASSED,
+                MigratorConstants.VALIDATION_FAILED,
+                MigratorConstants.VALIDATION_NOT_VALIDATED)
+
+    @staticmethod
+    def get_validation_outcome_mark(outcome):
+        """The mark of an outcome in the summary; '-' for a row which has none recorded."""
+        return MigratorConstants.VALIDATION_OUTCOME_MARKS.get(outcome, '-')
+
     @staticmethod
     def get_default_name():
         return 'migrator'

@@ -119,10 +119,12 @@ mapping:
   # NOTE: forced_column_mappings is currently only echoed into the mapping
   # report - it is NOT applied to the column matching. Do not rely on it to
   # correct a column match; adjust the heuristics or rename in the target.
+  # A configuration which carries entries is told so again at the start of the
+  # run, because a setting that does nothing looks exactly like one that works.
   # forced_column_mappings:
-  #   - table: "CUSTOMERS"
-  #     source: "CUST_NO"
-  #     target: "customer_number"
+  #   - table: "CUSTOMERS"          # or table_regex: "^CUST_.*$"
+  #     source_column: "CUST_NO"
+  #     target_column: "customer_number"
 
 # Per-table override of the conflict action.
 table_settings:

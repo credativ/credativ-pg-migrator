@@ -269,7 +269,7 @@ reported as a warning — PostgreSQL then refuses it, which is the honest outcom
 - **Domains** exist only in Oracle 23ai; on older releases (11g/12c/19c/21c) there are no domain objects to migrate, and the 23ai path is best-effort and has not been validated against a live 23ai instance.
 - **Data-type coverage**: `SDO_GEOMETRY` (spatial) is not mapped and falls back to `TEXT` (it requires PostGIS on the target); `BFILE` (external file locator) is not migrated. `INTERVAL YEAR TO MONTH` is mapped to PostgreSQL `INTERVAL` but its value semantics differ, so such columns are worth verifying. Any type can still be overridden with custom data-type replacement rules.
 - **Large-table extraction**: data is fetched in chunks using `OFFSET … FETCH NEXT`, which becomes less efficient at very large offsets. Keyset/ROWID-range pagination is a planned optimization.
-- **Views / materialized views**: the defining query is parsed with `sqlglot` and generated as PostgreSQL, including rewriting Oracle **`(+)` outer joins** into ANSI `LEFT`/`RIGHT JOIN`s. A few constructs still cannot be auto-converted reliably and are logged as `WARNING`s for manual review: **`CONNECT BY` / `START WITH`** hierarchical queries (need a recursive CTE), **`ROWNUM`** (use `LIMIT`), and complex **`LISTAGG`** forms. An unusual `(+)` predicate that could not be mapped to a join is also warned about individually. There is no separate toggle for materialized vs. regular views (both follow `migrate_views`), and view dependency ordering is not topologically resolved.
+- **Views / materialized views**: the defining query is parsed with `sqlglot` and generated as PostgreSQL, including rewriting Oracle **`(+)` outer joins** into ANSI `LEFT`/`RIGHT JOIN`s. Oracle writes the marker on the column, condition by condition, so it says which conditions belong to the join: `AND o.status(+) = 'X'` carries one and is moved into the `ON` clause, `AND o.status = 'X'` does not and stays in the `WHERE` clause — where Oracle applies it too, turning the outer join into an inner one on both sides. Nothing is inferred for Oracle, because Oracle already said it. The marker is read from the parsed statement, so it is found inside a call as well (`UPPER(o.cid(+))`), which used to be reported as an outer join that could not be rewritten. A `(+)` under an `OR` is **not** rewritten and is reported — Oracle refuses that itself with ORA-01719, and moving it into the `ON` clause would leave an inner join, which answers fewer rows and looks healthy while doing it. `TRUNC(d, 'MM')` is written with the field PostgreSQL knows (`date_trunc('month', d)`) rather than with the format model of Oracle, and `ADD_MONTHS` becomes the addition of an interval. The same conversion is what `--convert-queries` gives the statements of an application; it lives in `connectors/oracle_query_conversion.py`, which imports no Oracle driver. A few constructs still cannot be auto-converted reliably and are logged as `WARNING`s for manual review: **`CONNECT BY` / `START WITH`** hierarchical queries (need a recursive CTE), **`ROWNUM`** (use `LIMIT`), and complex **`LISTAGG`** forms. An unusual `(+)` predicate that could not be mapped to a join is also warned about individually. There is no separate toggle for materialized vs. regular views (both follow `migrate_views`), and view dependency ordering is not topologically resolved.
 
 ### 4.4 PostgreSQL
 - **Mode**: Native Connection
@@ -282,7 +282,7 @@ mapping, default-value rewriting or SQL function mapping is needed, and object d
 from the catalog with `pg_get_viewdef`, `pg_get_functiondef`, `pg_get_triggerdef`,
 `pg_get_constraintdef` and `pg_get_indexdef`, so they are already valid PostgreSQL.
 
-- **Migrated**: tables (including **partitioned tables** — a partitioned parent is recreated with its `PARTITION BY` clause and each partition as `PARTITION OF ... FOR VALUES ...`), data, primary keys, indexes, foreign keys with their `ON DELETE`/`ON UPDATE` rules, CHECK constraints, identity columns, generated columns, collations, full text search dictionaries and configurations, domains, user-defined types (enums, composite types, range types), sequences (`CREATE SEQUENCE` + `setval`, continuing from the source position), views and materialized views, functions, procedures and aggregates, triggers, and table/column comments.
+- **Migrated**: tables (including **partitioned tables** — a partitioned parent is recreated with its `PARTITION BY` clause and each partition as `PARTITION OF ... FOR VALUES ...`), data, primary keys, indexes, foreign keys with their `ON DELETE`/`ON UPDATE` rules, CHECK constraints, identity columns, generated columns, collations, full text search dictionaries and configurations, domains, user-defined types (enums, composite types, range types), sequences (`CREATE SEQUENCE` + `setval`, continuing from the source position), views and materialized views, functions, procedures and aggregates, triggers, and table/column comments. `--convert-queries` converts the statements of an application here too, although the statement is already the dialect of the target: what it adds is the map of the migration, the test against the new database, and the constructs a migration takes away — a statement reading a system column (`ctid`, `xmin`, `tableoid`) is refused, because the migration inserted the rows again in an order of its own and every one of those values is another one on the target, while the target accepts the statement without a word.
 - **Aggregates**: user-defined aggregates are migrated together with the functions and procedures, but always **after** them, because an aggregate references its state transition and final functions. An aggregate has no body — `pg_get_functiondef()` refuses it — so its `CREATE AGGREGATE` is rebuilt from `pg_aggregate`: `SFUNC`, `STYPE`, `SSPACE`, `FINALFUNC` with `FINALFUNC_EXTRA`/`FINALFUNC_MODIFY`, the parallel support functions `COMBINEFUNC`/`SERIALFUNC`/`DESERIALFUNC`, `INITCOND`, the complete moving-aggregate implementation used by window frames, `SORTOP`, `HYPOTHETICAL` and `PARALLEL`. Ordered-set and hypothetical-set aggregates are included. Routines belonging to an extension are skipped — they come with the extension and must be listed in `migration.required_extensions` instead.
 - **Comments on routines** are set separately from the `CREATE` statement, with the object type as the keyword (`COMMENT ON FUNCTION`/`PROCEDURE`/`AGGREGATE`) and the identity arguments, which are needed to address an overloaded routine.
 - **Extensions**: extensions are **not** created from the source automatically — they have to be listed in `migration.required_extensions`, which the migrator creates with `CREATE EXTENSION IF NOT EXISTS` before anything else. The pre-migration analysis checks this for you: it lists every extension of the source with its version and schema, whether it is installed in the target and whether it is at least available there, and it verifies that the configured list covers everything the objects selected for migration actually need. Dependencies are read from `pg_depend` — not guessed from the SQL text — so every finding names the objects requiring the extension (`pgcrypto: required by column documents.checksum (generated)`), covering column types, defaults and generated expressions, index operator classes, constraints, triggers, views, functions and text search objects. Only what the configuration selects is analysed: `include_tables`/`exclude_tables` and the `migrate_indexes`/`migrate_constraints`/`migrate_triggers`/`migrate_views`/`migrate_funcprocs` switches are honoured. An extension already installed in the target counts as covered. **A missing dependency stops the migrator** after the analysis — with the full report and a ready-to-paste `required_extensions:` block — rather than letting a table, index or view fail halfway through the migration.
@@ -315,7 +315,7 @@ Host, port, database name, and credentials are specified in other fields of the 
 
 **Current status (Informix as source):** Informix is the reference connector for procedural code — it is the only engine whose functions, procedures and triggers are converted completely rather than best-effort, and the only one whose pre-migration analysis fills all five TOP-N metrics (rows, size, columns, indexes, constraints) including foreign-key dependency ranking. Tables, data, primary keys, indexes, foreign keys, CHECK constraints and SERIAL/identity columns are migrated.
 
-**Known limitations (Informix):** views are migrated in the rudimentary way — only the schema name inside the definition is replaced, with no SQL transpilation, so view bodies using Informix-specific syntax need review. Column defaults are passed through unchanged (no implicit rewriting of Informix-specific default expressions). Foreign-key `ON DELETE` actions, standalone sequences, user-defined types, domains, generated columns and comments are not migrated.
+**Known limitations (Informix):** views are converted without a SQL parser — no parser of this migrator models Informix — so the defining query is rewritten construct by construct instead: the operators Informix stores as calls of its system schema (`"informix".equal(a, b)`), the `OUTER()` outer joins, `MATCHES`, `FIRST` / `SKIP`, `TODAY` and `CURRENT`, the durations counted in `UNITS`, the `DATETIME` / `INTERVAL` literals and types, the `[m,n]` subscript, `DECODE`, `MDY`, `EXTEND`, `LAST_DAY` and the function mapping. A construct outside that list is left as it is, so a view which uses one is created by PostgreSQL only if PostgreSQL happens to understand it, and a view whose text still holds one after the conversion is reported. The same conversion is what `--convert-queries` gives the statements of an application. Column defaults are passed through unchanged (no implicit rewriting of Informix-specific default expressions). Foreign-key `ON DELETE` actions, standalone sequences, user-defined types, domains, generated columns and comments are not migrated.
 
 ### 4.6 Sybase ASE (ODBC example)
 
@@ -347,6 +347,22 @@ Other ODBC parameters such as DSN or connection string are configured alongside 
 - **Computed columns** (`AS <expression> MATERIALIZED`) become PostgreSQL generated columns — `MATERIALIZED` maps to `STORED`, a computed column which is not materialized to `VIRTUAL` (PostgreSQL 18+, `STORED` with a `WARNING` on an older target). The expression is translated with it: `CONVERT(<type>, <expression>)` becomes `CAST(<expression> AS <type>)` with the type of the target, `$` amounts become plain numbers, and the function mapping is applied (`isnull` → `coalesce`, …). The columns are left out of the data migration, because PostgreSQL computes them itself and refuses a supplied value. `CONVERT` with a third argument — the *style* number, which formats a date or a number — has no equivalent in a `CAST` and is **not** converted: it is reported as a `WARNING` and has to be completed by hand, rather than silently producing differently formatted values.
 
 Functions, procedures and triggers are converted (T-SQL → PL/pgSQL, via the shared T-SQL parser), as are views.
+
+**The `*=` / `=*` outer joins** are rewritten as ANSI `LEFT` / `RIGHT JOIN`s, in views and in the
+statements of an application alike — the same conversion MS SQL Server gets, from the same shared
+code in `query_conversion/outer_joins.py`, because the two are one dialect family and wrote the
+same operator. The asterisk stands next to the table whose rows are kept, so `c.id *= o.cid`
+becomes `customer LEFT JOIN orders`. The half which decides whether the result is right is the
+WHERE clause: a condition which restricts the **inner** table belongs to the join in this dialect,
+and in the WHERE clause of PostgreSQL it is applied to the result of the join, where it throws away
+exactly the rows the outer join added — the `LEFT JOIN` would be an inner join again, valid and
+answering fewer rows. Such a condition is moved into the `ON` clause and the move is reported,
+because it decides which rows come back. Three things are deliberately left where they stand:
+`AND inner.col IS NULL`, which is how this dialect asks for the rows without a match and which
+inside an `ON` clause is never true; a condition which reads more than one table; and anything
+under an `OR`. A join written as ANSI in the source is not touched at all. What cannot be
+attributed to a table of the FROM clause is **reported and not converted** — the alternative is the
+comma join it started from, which is an inner join PostgreSQL accepts without complaint.
 
 **Data types worth knowing about (Sybase ASE):** the `TIMESTAMP` of Sybase is **not** a point in time — it is the row version of the row, a `VARBINARY(8)` the server writes on every change (the `ROWVERSION` of MS SQL), and it is migrated as `BYTEA`. PostgreSQL does not maintain such a column; the values of the source are copied, they are not updated afterwards. `MONEY` / `SMALLMONEY` become `NUMERIC(19,4)` / `NUMERIC(10,4)`, `BIGTIME` becomes `TIME` (it holds a time of the day, not a point in time) and `BIGDATETIME` becomes `TIMESTAMP`.
 
@@ -582,7 +598,7 @@ Two properties of SQLite shape this connector and explain most of its behavior:
 - **CHECK constraints**, both table-level (named via `CONSTRAINT x CHECK (...)`) and column-level, parsed from the DDL and translated to PostgreSQL. Constraints SQLite does not name itself get a generated name that is reduced to plain characters and shortened, so it survives PostgreSQL's 63-byte identifier limit without colliding. The literals of the condition are adapted to the type the target column really gets: `0` / `1` against a column migrated as `BOOLEAN` become `FALSE` / `TRUE`. A condition that cannot exist on the target at all — a number compared with a column that had to be migrated as `TEXT` (4.7.5a), or a value other than 0/1 compared with a `BOOLEAN` column — is **not** migrated; the constraint is skipped with a `WARNING` naming it, instead of failing the migration with `operator does not exist`.
 - **Generated columns**, both `STORED` and `VIRTUAL`. PostgreSQL only has stored generated columns, so both kinds become `GENERATED ALWAYS AS (...) STORED`. Their expressions are translated to PostgreSQL, and the columns are excluded from the data `INSERT` — PostgreSQL computes them itself and rejects supplied values. Note that PostgreSQL 12+ is required; the migrator's pre-migration capability check enforces this.
 - **Default values**: literals are taken over unchanged, `CURRENT_TIMESTAMP` / `CURRENT_DATE` / `CURRENT_TIME` are preserved, the parentheses SQLite wraps expression defaults in are removed, a blob literal `X'AABB'` becomes `'\xaabb'::bytea`, and any remaining expression is translated to PostgreSQL. `NULL` defaults are dropped.
-- **Views** are migrated. The defining `SELECT` is isolated from the stored `CREATE VIEW` statement and transpiled to PostgreSQL with `sqlglot` (`ifnull`→`coalesce`, `substr`→`substring`, `instr`→`strpos`, and so on). Because SQLite statements reference tables without any schema qualification, the names of migrated tables and views in the query are rewritten to `"target_schema"."name"`, so the view does not depend on the target `search_path`.
+- **Views** are migrated. The defining `SELECT` is isolated from the stored `CREATE VIEW` statement and transpiled to PostgreSQL with `sqlglot` (`ifnull`→`coalesce`, `substr`→`substring`, `instr`→`strpos`, and so on). Because SQLite statements reference tables without any schema qualification, the names of migrated tables and views in the query are rewritten to `"target_schema"."name"`, so the view does not depend on the target `search_path`. The same transpilation is what `--convert-queries` gives the statements of an application, without the schema qualification — there the names of the target come from the map of the migration, applied to the parsed statement. What the query path adds is the refusals: a call which sqlglot writes as valid PostgreSQL answering **other values** (`total()` as `sum()`, which is NULL over no rows where `total()` is 0.0; `random()`, which answers another range under the same name; `printf()` as the `format()` PostgreSQL really has) is not offered as a conversion, and neither is ROWID, `GLOB`, `MATCH`, `COLLATE NOCASE` or the SQLite catalogue. It also warns about what survives a passing test: `LIKE` ignores the case of the ASCII letters in SQLite, a `CAST` there never fails, and `CURRENT_TIMESTAMP` is UTC.
 - **Triggers** are converted to a PL/pgSQL **trigger function plus a `CREATE TRIGGER`** statement. Timing (`BEFORE` / `AFTER` / `INSTEAD OF`), the event, `UPDATE OF <columns>` and the `WHEN` condition are preserved; `NEW.` / `OLD.` work unchanged in PL/pgSQL; `SELECT RAISE(ABORT, 'text')` becomes `RAISE EXCEPTION 'text'` and `RAISE(IGNORE)` becomes `RETURN NULL`. A correct `RETURN` is appended for the trigger kind (`NEW` for `BEFORE`/`INSTEAD OF` insert and update, `OLD` for delete, `NULL` for `AFTER`). The generated function carries `SET search_path = "target_schema", pg_catalog`, so the unqualified table names typical of a SQLite trigger body resolve in the migrated schema.
 - **Pre-migration analysis** is fully supported for all five metrics (`by_rows`, `by_size`, `by_columns`, `by_indexes`, `by_constraints`).
 - **Post-migration validation** (`--validate`) is supported: row counts, table checksums, random row sampling and LOB byte sizes.
@@ -672,6 +688,8 @@ When `migration.migrate_lob_values` is `false`, `BLOB`-backed columns are migrat
 - **Configuration**: `system_catalog` selects the metadata source — `SYS` (the `sys.*` catalog views) or `INFORMATION_SCHEMA`.
 - **Tested version**: MS SQL Server 2022.
 - **Migrated**: tables and data, primary keys, indexes, foreign keys, IDENTITY columns, sequences (SQL Server 2012+ standalone sequence objects), user-defined types, aliases/synonyms, views, functions, procedures and triggers (T-SQL converted to PL/pgSQL through the shared T-SQL parser).
+
+- **The `*=` / `=*` outer joins of the old Transact-SQL** are rewritten as ANSI `LEFT` / `RIGHT JOIN`s, in views and in the statements of an application alike. The asterisk stands next to the table whose rows are kept, so `c.id *= o.cid` becomes `customer LEFT JOIN orders`. The half which decides whether the result is right is the WHERE clause: a condition which restricts the **inner** table belongs to the join in this dialect, and in the WHERE clause of PostgreSQL it is applied to the result of the join, where it throws away exactly the rows the outer join added — the `LEFT JOIN` would be an inner join again, valid and answering fewer rows. Such a condition is moved into the `ON` clause and the move is reported, because it decides which rows come back. Three things are deliberately left where they stand: `AND inner.col IS NULL`, which is how this dialect asks for the rows without a match and which inside an `ON` clause is never true; a condition which reads more than one table; and anything under an `OR`. A join written as ANSI in the source is not touched at all. What cannot be attributed to a table of the FROM clause is **reported and not converted** — the alternative is the comma join it started from, which is an inner join PostgreSQL accepts without complaint. The rewrite is shared by the two connectors of the family and lives in `query_conversion/outer_joins.py`.
 - **Not migrated**: CHECK constraints, foreign-key `ON DELETE` actions, table and column comments (extended properties such as `MS_Description`), computed columns and domains/rules.
 
 ### 4.9 MySQL and MariaDB
@@ -682,7 +700,7 @@ MySQL and MariaDB have **separate connectors** with almost the same behavior; th
   - **MySQL**: Native (`mysql-connector-python`), JDBC (`jaydebeapi`) or ODBC (`pyodbc`)
   - **MariaDB**: Native (`mariadb`), JDBC (`jaydebeapi`) or ODBC (`pyodbc`). For native connectivity on Debian/Ubuntu the C development headers are required first: `sudo apt install libmariadb-dev`, then `pip install mariadb`.
 - **Tested version**: MySQL 5.7. MariaDB has not yet been validated against a live instance.
-- **Migrated**: tables and data, primary keys, indexes (including **function-based** indexes, whose expressions are transpiled with `sqlglot`), foreign keys, `AUTO_INCREMENT` as identity columns, generated columns (`STORED` and `VIRTUAL`), table and column comments, and views (transpiled from the MySQL dialect to PostgreSQL, with `CHARACTER SET` / `COLLATE` clauses stripped and `GROUP BY ... WITH ROLLUP` rewritten to `GROUP BY ROLLUP (...)`).
+- **Migrated**: tables and data, primary keys, indexes (including **function-based** indexes, whose expressions are transpiled with `sqlglot`), foreign keys, `AUTO_INCREMENT` as identity columns, generated columns (`STORED` and `VIRTUAL`), table and column comments, and views (transpiled from the MySQL dialect to PostgreSQL, with `CHARACTER SET` / `COLLATE` clauses stripped and `GROUP BY ... WITH ROLLUP` rewritten to `GROUP BY ROLLUP (...)`). The transpiled statement is corrected where the transpiler answers a MySQL construct with something PostgreSQL does not have (`DAYOFWEEK` → `DAY_OF_WEEK`, `DATEDIFF` → a cast of an interval) or does not mean (`CONCAT_WS` wrapped in a CASE which answers NULL where MySQL skips it); a view whose statement cannot be parsed is reported and keeps the text of the source rather than being written into the target in the dialect of the source. The same conversion is what `--convert-queries` gives the statements of an application, and it lives in `connectors/mysql_query_conversion.py`, shared by the two connectors.
 - **MariaDB only**: standalone `SEQUENCE` objects (MariaDB 10.3+) are migrated as PostgreSQL sequences. MySQL has no sequences.
 - **Not migrated**: functions, procedures and triggers — the connectors contain placeholders only, so nothing is fetched or converted. CHECK constraints, foreign-key `ON DELETE` actions, user-defined types and domains are not handled either.
 - **Zero dates**: MySQL/MariaDB accept `'0000-00-00'`, which PostgreSQL rejects. Three settings control this: `migration.zero_datetime_default` (what happens to such a *default*), `migration.zero_datetime_value` (what such a *value* becomes; `NULL` by default) and `migration.relax_not_null_datetime` (drop `NOT NULL` on target date/time columns so the `NULL`s can be stored). See section 5.
@@ -691,7 +709,7 @@ MySQL and MariaDB have **separate connectors** with almost the same behavior; th
 
 - **Connectivity**: Native (`sqlanydb`, install separately — see section 3.1) or ODBC (`pyodbc`).
 - **Tested version**: SQL Anywhere 17.
-- **Migrated**: tables and data, primary keys, indexes, foreign keys, `AUTOINCREMENT` columns as identity columns, and views.
+- **Migrated**: tables and data, primary keys, indexes, foreign keys, `AUTOINCREMENT` columns as identity columns, and views. The defining query of a view is parsed as T-SQL and generated as PostgreSQL, after the constructs no T-SQL parser reads have been rewritten: the `*=` outer join (which becomes a `LEFT JOIN`, or is reported where its conditions cannot be attributed — and a `WHERE` condition which restricts the inner table is moved into the `ON` clause, because SQL Anywhere writes `*=` as the Transact-SQL compatibility syntax of Sybase ASE and reads it the way ASE does: such a condition belongs to the join, and left in the `WHERE` clause of PostgreSQL it would throw away exactly the rows the outer join added), the `TOP n START AT m` paging, `STRING()` and `IF … ENDIF`. What the parser reads and means differently is corrected — `LOCATE(a, b)` searches the second argument in the first and T-SQL reads it the other way round, and `TIMESTAMP` is a date and a time in SQL Anywhere and the row version of a table in T-SQL. A view whose query no parser can read falls back to the rewrites which need none, which is what the whole conversion was before. The same conversion is what `--convert-queries` gives the statements of an application; it lives in `connectors/sql_anywhere_query_conversion.py`, which imports no driver.
 - **Not migrated**: functions, procedures and triggers (placeholders only), CHECK constraints, foreign-key `ON DELETE` actions, sequences, user-defined types, domains, generated columns and comments. This is currently the least complete of the live-connection connectors.
 
 ### 4.11 Feature status per connector
@@ -886,6 +904,70 @@ This allows you to:
 - Compare source vs generated PL/pgSQL for functions/procedures and triggers wherever conversion is supported (see section 8.2 for which engines those are) — this is the practical way to review the best-effort conversions before trusting them.
 - Rerun or manually fix individual objects without redoing the entire migration.
 
+### 7.1 How object names are spelled — `names_case_handling`
+
+`migration.names_case_handling` takes `lower`, `upper` or `keep` (the default), and the rule it
+follows has two halves:
+
+- **The target schema is used exactly as the configuration spells it.** It is never
+  case-converted — you wrote it and you mean it.
+- **Every object name inside that schema follows the setting**: tables, columns, indexes,
+  constraints, triggers, views, sequences, routines, types, domains, collations.
+
+The protocol tables record **both** spellings, and the difference matters:
+
+| column | holds |
+|---|---|
+| `source_*` | the name as the source database spells it — **never** converted |
+| `target_*` | the name the object really has in the target — the spelling the setting produced |
+
+The source spelling is kept unchanged on purpose. A source can hold `CUSTOMER` and `Customer`
+as two different tables, and the record of what was read has to be able to tell them apart. In
+the four tables which historically had a single bare name column — `indexes`, `constraints`,
+`triggers` and `default_values` — that bare column (`index_name`, `constraint_name`,
+`trigger_name`, `default_value_name`) is the **source** spelling, and `target_index_name` and
+its siblings hold what the target has.
+
+**Two source objects can become one target object.** Case folding is not injective: with
+`lower`, `CUSTOMER` and `Customer` both want to be `customer`. The migrator checks for this
+when the plan is complete and **before anything in the target is dropped or created**, and
+stops with the objects named:
+
+```
+names_case_handling is 'lower', and it would make one target object out of two or more
+different objects of the source:
+  - tables CUSTOMER, Customer of the source all become "migtest"."customer"
+The source tells them apart by the case of their letters and the target would not. Nothing
+has been created or dropped in the target - the run stops here rather than dropping the same
+object twice and reporting the second one as 'already exists'. Use names_case_handling: keep,
+or rename the objects which clash.
+```
+
+With `keep` nothing can collapse, so the check is skipped.
+
+**The names inside a converted view follow the setting too.** A view's defining query names the
+tables and columns of the target, so those names have to be the ones the migration gave them.
+This is applied to every connector in one place, after its own conversion has run — the schema
+is left exactly as configured, and the functions, the data types and the contents of string
+literals are not names this migration gave anything, so they are not touched. Undelimited names
+are folded the way the source folds them before the setting is applied: `SELECT * FROM customers`
+against Db2 or Oracle reads the table `CUSTOMERS`, and `keep` has to keep *that*, not the case
+someone happened to type. The same transformation is applied to the statements `--convert-queries`
+converts, where the bind parameters (`$1`…`$n`) are not identifiers and are left alone.
+
+A converted query which cannot be read as PostgreSQL is left exactly as the conversion wrote it
+and reported — a name changed by a search and replace inside a text nobody could parse is not a
+conversion.
+
+**Routines and triggers** follow the setting too: the routine is created under the name the
+setting gives it (which is also the name its `COMMENT ON` uses — the two used to disagree), the
+trigger, the function it calls and the table it is on are all named the same way, and the
+statements inside the body go through the same transformation as a view. Two names in a body are
+never renamed: `NEW` and `OLD` are variables of PL/pgSQL and are always folded to lower case, so
+writing `"NEW"` for one under `upper` would look for a variable which is not there. The *field* of
+such a record is the column of the table the trigger is on and does follow the setting —
+`NEW."total"` with `lower`, `NEW."TOTAL"` with `upper`.
+
 Treat the migration database as read‑only metadata. You can query it freely for analysis, but avoid modifying its tables directly unless instructed by the tool’s maintainers.
 
 ---
@@ -897,7 +979,7 @@ Treat the migration database as read‑only metadata. You can query it freely fo
 - Tables, constraints, indexes, foreign keys are migrated by every connector.
 - Sequences are created for serial/identity columns. Standalone sequence *objects* are additionally migrated for Oracle, MS SQL Server, MariaDB, PostgreSQL and the three DB2 connectors; MySQL, SQLite and Sybase ASE have no such objects, and they are not implemented for Informix or SQL Anywhere.
 - Sequences on the target can be set to match the highest existing values in migrated tables.
-- View migration depth differs per connector: PostgreSQL takes definitions straight from the catalog, Oracle, SQLite, MySQL/MariaDB, MS SQL Server, Sybase ASE and the DB2 connectors transpile the defining query to PostgreSQL SQL (with `sqlglot` or the shared T-SQL parser), while for Informix and SQL Anywhere only the schema name inside the definition is replaced.
+- View migration depth differs per connector: PostgreSQL takes definitions straight from the catalog, Oracle, SQLite, MySQL/MariaDB, MS SQL Server, Sybase ASE and the DB2 connectors transpile the defining query to PostgreSQL SQL (with `sqlglot` or the shared T-SQL parser), Informix rewrites it construct by construct without a parser (section 4.5 lists what is rewritten), and SQL Anywhere is parsed as T-SQL once the constructs no T-SQL parser reads have been rewritten (section 4.10).
 - Beyond the common set, some connectors reach further: PostgreSQL migrates partitioned tables, collations, full text search objects, domains and user-defined types; Sybase ASE migrates named default objects, rules/domains and user-defined types; Oracle migrates packages, object/collection types and 23ai domains.
 - Not every source feature has a PostgreSQL counterpart. Where a construct cannot be reproduced exactly, the connector degrades it deliberately, logs a `WARNING`, and records what was changed in the migration database — for example SQLite partial indexes (section 4.7.7) or Oracle package state (section 4.3).
 - The per-connector, per-feature status is maintained in `FEATURE_MATRIX.md`.

@@ -15,8 +15,10 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 from credativ_pg_migrator.database_connector import DatabaseConnector
+from credativ_pg_migrator.connectors.mysql_query_conversion import MySqlQueryConversion
 from credativ_pg_migrator.migrator_logging import MigratorLogger
 from credativ_pg_migrator.jvm_helper import detach_thread_from_jvm
+from credativ_pg_migrator import collations
 # import mariadb  ## only for native connectivity - install mariadb-connector-python
 import traceback
 import re
@@ -29,7 +31,13 @@ import sqlglot
 import jaydebeapi
 import pyodbc
 
-class MariaDBConnector(DatabaseConnector):
+class MariaDBConnector(MySqlQueryConversion, DatabaseConnector):
+
+    ## MariaDB has neither kind of object - see DatabaseConnector.OBJECT_KINDS_ABSENT.
+    OBJECT_KINDS_ABSENT = {
+        'user_defined_types': 'MariaDB has no CREATE TYPE: a column takes a built-in type or an ENUM/SET declared on the column itself.',
+        'domains': 'MariaDB has no CREATE DOMAIN. A CHECK constraint on the column is the nearest thing it has, and that is migrated with the table it stands on.',
+    }
     def __init__(self, config_parser, source_or_target):
         if source_or_target not in ['source', 'target']:
             raise ValueError("MariaDB/MariaDB must be either source or target database")
@@ -84,48 +92,6 @@ class MariaDBConnector(DatabaseConnector):
             finally:
                 self.connection = None
                 detach_thread_from_jvm()
-
-    def get_sql_functions_mapping(self, settings):
-        """ Returns a dictionary of SQL functions mapping for the target database """
-        target_db_type = settings['target_db_type']
-        if target_db_type == 'postgresql':
-            return {
-                'uuid_to_bin(uuid(), 1)': 'gen_random_uuid()::text',
-                'uuid_to_bin(uuid(),1)': 'gen_random_uuid()::text',
-                'uuid_to_bin(uuid(), 0)': 'gen_random_uuid()::text',
-                'uuid_to_bin(uuid(),0)': 'gen_random_uuid()::text',
-                'uuid_to_bin(uuid())': 'gen_random_uuid()::text',
-                'uuid()': 'gen_random_uuid()',
-                'sysdate()': 'current_timestamp',
-                'now()': 'current_timestamp',
-                'current_timestamp()': 'current_timestamp',
-                'current_date()': 'current_date',
-                'current_time()': 'current_time',
-                'curdate()': 'current_date',
-                'curtime()': 'current_time',
-                'utc_timestamp()': "(now() at time zone 'utc')",
-                'utc_date()': "(current_date at time zone 'utc')",
-                'utc_time()': "(current_time at time zone 'utc')",
-                'unix_timestamp()': 'extract(epoch from now())::bigint',
-                'rand()': 'random()',
-                'ifnull(': 'coalesce(',
-                'isnull(': 'coalesce(',
-                'char_length(': 'length(',
-                'character_length(': 'length(',
-                'length(': 'length(',
-                'concat(': 'concat(',
-                'substring(': 'substring(',
-                'substr(': 'substring(',
-                'instr(': 'strpos(',
-                'replace(': 'replace(',
-                'upper(': 'upper(',
-                'lower(': 'lower(',
-                'ltrim(': 'ltrim(',
-                'rtrim(': 'rtrim(',
-                'space(': "repeat(' ', ",
-            }
-        else:
-            self.config_parser.print_log_message('ERROR', f"mariadb_connector: get_sql_functions_mapping: Unsupported target database type: {target_db_type}")
 
     def migrate_sequences(self, target_connector, settings):
         """
@@ -726,11 +692,55 @@ class MariaDBConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"mariadb_connector: migrate_table: Worker {worker_id}: Full stack trace: {traceback.format_exc()}")
             raise e
 
-    def clean_index_expression(self, expr: str) -> str:
+    def report_index_conversion(self, level, message):
+        """
+        Say what happened to the expression of an index.
+
+        The connector is built without a configuration in the tests of fetch_indexes(), and a
+        message which cannot be written must not turn into an error of its own - the rest of
+        the file guards the same way.
+        """
+        if getattr(self, 'config_parser', None) is not None:
+            self.config_parser.print_log_message(level, message)
+
+    def clean_index_expression(self, expr: str, index_name: str = '', index_type: str = '',
+                               source_table_name: str = '') -> str:
+        """
+        The expression of a functional index of the source, as PostgreSQL says it.
+
+        Two things used to happen here quietly, and both changed what the index means (P1-3 of
+        development/OPEN_ISSUES.md):
+
+          * `COLLATE <name>` was deleted. A collation decides which strings count as equal, so
+            a case-insensitive index became case-sensitive - it answers a query with fewer
+            rows, and a unique one stops refusing two values which differ only in case. What
+            happens to a collation is decided in collations.py now, and every collation whose
+            meaning is not carried over is reported, per index.
+          * a `sqlglot.transpile` which raised was answered with `except Exception: pass`,
+            which left the **raw MySQL expression** standing as the PostgreSQL one. Usually
+            PostgreSQL refuses it and the index is recorded as failed; sometimes it does not -
+            `a || b` is an OR in MySQL and a concatenation in PostgreSQL - and then the
+            index is built on something nobody wrote. Such an expression is refused now and
+            said out loud.
+
+        Returns '' when the expression cannot be converted; the caller reports the index as
+        one which was not migrated.
+        """
         if not expr:
             return ""
-        # 1. Clean backslash escapes on quotes and backticks
-        expr = expr.replace(r"\'", "'").replace(r'\"', '"').replace('`', '"')
+        where = (f"index '{index_name}'" if index_name else 'a functional index')
+        if source_table_name:
+            where += f" on table '{source_table_name}'"
+        where = f"{self.__class__.__module__.rsplit('.', 1)[-1]}: clean_index_expression: {where}"
+        source_expression = expr
+
+        # 1. Clean the backslash escapes MySQL keeps the expression text with. The backticks
+        #    are NOT turned into double quotes here any more: sqlglot reads a backtick as the
+        #    identifier quote of MySQL, and a double quote as the start of a STRING - so
+        #    `upper(\`name\`)` used to be transpiled into `UPPER('name')` and the index was
+        #    built on the constant 'name' rather than on the column. Every functional index of
+        #    a MySQL or MariaDB source was indexing a string literal.
+        expr = expr.replace(r"\'", "'").replace(r'\"', '"')
 
         # 2. Strip character set introducers (e.g. _utf8mb4'...' -> '...', _latin1"..." -> "...")
         expr = re.sub(r'(?i)_[a-zA-Z0-9_]+(\'|")', r'\1', expr)
@@ -738,19 +748,37 @@ class MariaDBConnector(DatabaseConnector):
         # 3. Strip CHARACTER SET / CHARSET <name>
         expr = re.sub(r'(?i)\b(?:CHARACTER\s+SET|CHARSET)\s+[a-zA-Z0-9_]+', '', expr)
 
-        # 4. Strip COLLATE <name>
-        expr = re.sub(r'(?i)\bCOLLATE\s+[`\'"]?[a-zA-Z0-9_]+[`\'"]?', '', expr)
-
-        # 5. Transpile expression to PostgreSQL dialect via sqlglot if available
+        # 4. Transpile the expression to the PostgreSQL dialect. The COLLATE clause is left in
+        #    it on purpose - sqlglot carries it over, and taking it out beforehand would give
+        #    the parser a different expression than the one the source really has.
         try:
             transpiled = sqlglot.transpile(expr, read="mysql", write="postgres")
-            if transpiled and transpiled[0]:
-                expr = transpiled[0]
-        except Exception:
-            pass
+        except Exception as e:
+            self.report_index_conversion('ERROR',
+                f"{where} is NOT migrated: its expression cannot be read as MySQL - {e}. The "
+                f"expression of the source is: {source_expression}. It used to be handed to "
+                f"PostgreSQL unchanged, which builds the index on something else where the "
+                f"same text is valid there too. Create the index by hand in the target.")
+            return ""
+        if not transpiled or not transpiled[0]:
+            self.report_index_conversion('ERROR',
+                f"{where} is NOT migrated: nothing came back from the conversion of its "
+                f"expression. The expression of the source is: {source_expression}. Create "
+                f"the index by hand in the target.")
+            return ""
+        expr = transpiled[0]
+
+        # 5. Take the collations out of the way of the generic rewrites of
+        #    apply_sql_functions_mapping(), which delete a COLLATE clause, and put back
+        #    afterwards what PostgreSQL can say - reporting what it cannot.
+        expr, found_collations = collations.take_out(expr)
 
         # 6. Apply standard function mapping
         expr = self.apply_sql_functions_mapping(expr, {'target_db_type': 'postgresql'})
+
+        expr, _ = collations.put_back(
+            expr, found_collations, report=self.report_index_conversion,
+            where=where, index_type=index_type)
 
         expr = re.sub(r'\s+', ' ', expr).strip()
         return expr
@@ -840,7 +868,12 @@ class MariaDBConnector(DatabaseConnector):
                 if column_name is not None:
                     table_indexes[index_name]['index_columns'].append(column_name)
                 elif expression is not None:
-                    expr_clean = self.clean_index_expression(str(expression))
+                    ## the name and the type of the index are needed for what has to be said
+                    ## about a collation which cannot be carried over: a unique index which
+                    ## loses a case-insensitive collation stops refusing rows the source did
+                    expr_clean = self.clean_index_expression(
+                        str(expression), index_name=index_name, index_type=constraint_type,
+                        source_table_name=source_table_name)
                     if expr_clean:
                         table_indexes[index_name]['index_columns'].append(expr_clean)
                         table_indexes[index_name]['is_function_based'] = 'YES'
@@ -1107,32 +1140,6 @@ class MariaDBConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"mariadb_connector: fetch_view_code: Error fetching view {source_view_name} code: {e}")
             raise
 
-    def convert_view_code(self, settings: dict):
-        view_code = settings['view_code']
-        target_db_type = settings.get('target_db_type', self.config_parser.get_target_db_type() if getattr(self, 'config_parser', None) else 'postgresql')
-
-        if target_db_type == 'postgresql' and view_code:
-            view_code = re.sub(r'(?i)\b(?:CHARACTER\s+SET|CHARSET)\s+[a-zA-Z0-9_]+', '', view_code)
-            view_code = re.sub(r'(?i)\bCOLLATE\s+[`\'"]?[a-zA-Z0-9_]+[`\'"]?', '', view_code)
-            view_code = re.sub(r'(?i)\bGROUP\s+BY\s+(.*?)\s+WITH\s+ROLLUP\b', r'GROUP BY ROLLUP (\1)', view_code, flags=re.DOTALL)
-
-        if target_db_type == 'postgresql':
-            try:
-                transpiled = sqlglot.transpile(view_code, read="mysql", write="postgres")
-                if transpiled:
-                    view_code = transpiled[0]
-            except Exception as e:
-                if getattr(self, 'config_parser', None) and hasattr(self.config_parser, 'args'):
-                    self.config_parser.print_log_message('WARNING', f"mariadb_connector: convert_view_code: sqlglot transpilation failed: {e}")
-
-        converted_view_code = view_code
-        converted_view_code = converted_view_code.replace('`', '"')
-        converted_view_code = converted_view_code.replace(f'''"{settings['source_schema_name']}".''', f'''"{settings['target_schema_name']}".''')
-        converted_view_code = converted_view_code.replace(f'''{settings['source_schema_name']}.''', f'''"{settings['target_schema_name']}".''')
-        converted_view_code = converted_view_code.replace('""', '"')
-        
-        converted_view_code = self.apply_sql_functions_mapping(converted_view_code, settings)
-        return converted_view_code
 
     def get_sequence_current_value(self, sequence_id: int):
         # Implement sequence current value fetching logic

@@ -15,6 +15,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import json
+import os
 import re
 import uuid
 import psycopg2
@@ -1221,11 +1222,195 @@ class MigratorTables:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: update_protocol_task_started: ({func_run_id}): Exception: {e}")
             raise
 
+    ## The protocol tables are selected by the plural name of the object type -
+    ## get_protocol_name_indexes() - and the journal of the run calls the same object by its
+    ## singular name. Two vocabularies for one thing, so the one place which has to cross
+    ## between them writes the crossing down instead of guessing it.
+    PROTOCOL_TABLE_TO_JOURNAL_OBJECT = {
+        'tables': 'table',
+        'indexes': 'index',
+        'constraints': 'constraint',
+        'funcprocs': 'funcproc',
+        'triggers': 'trigger',
+        'views': 'view',
+        'sequences': 'sequence',
+        'user_defined_types': 'user_defined_type',
+        'collations': 'collation',
+        'text_search': 'text search',
+        'domains': 'domain',
+        'default_values': 'default_value',
+        'aliases': 'alias',
+        'data_sources': 'data_source',
+        'source_table_partitioning': 'source_table_partitioning',
+        'target_table_partitioning': 'target_table_partitioning',
+        'target_columns_alterations': 'target_column_alteration',
+    }
+
+    def update_protocol_task_finished(self, object_type, row_id, message, success=False):
+        """
+        Record that the work on one object has ended, and how.
+
+        The counterpart of update_protocol_task_started(), and it **did not exist**: the
+        orchestrator called it for an index whose SQL came out empty and got
+        `AttributeError: 'MigratorTables' object has no attribute
+        'update_protocol_task_finished'`. The `except` around index_worker caught that and
+        recorded the index as failed with the AttributeError as its message - the right
+        outcome for the wrong reason, and a message which told the reader nothing about the
+        index. P2-1 of development/OPEN_ISSUES.md.
+
+        `success` defaults to **False** because that is what the only caller means: an object
+        the migration did not create. An object which was created is recorded by the
+        update_*_status() method of its own kind, which knows what else to write.
+
+        The row of the journal is updated as well. Every object is written there when it is
+        planned, with `execution_success` still empty, and an object which is never finished
+        leaves that row saying the work began and never saying what came of it.
+        """
+        func_run_id = uuid.uuid4()
+        method_name = f"get_protocol_name_{object_type}"
+        if not hasattr(self.config_parser, method_name):
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_protocol_task_finished: ({func_run_id}): Invalid object_type '{object_type}'. Method {method_name} not found.")
+            return
+        try:
+            table_name = getattr(self.config_parser, method_name)()
+        except BaseException as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_protocol_task_finished: ({func_run_id}): Error calling {method_name}: {e}")
+            return
+
+        id_column = "sequence_id" if object_type == "sequences" else "id"
+        query = f"""
+            UPDATE "{self.protocol_schema}"."{table_name}"
+            SET task_completed = clock_timestamp(),
+            success = %s,
+            message = %s
+            WHERE {id_column} = %s
+            RETURNING *
+        """
+        params = ('TRUE' if success else 'FALSE', message, row_id)
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: update_protocol_task_finished: ({func_run_id}): Updating record for table {table_name} with params: {params}")
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+            self.protocol_connection.connection.commit()
+            if not row:
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: update_protocol_task_finished: ({func_run_id}): No row {row_id} in {table_name} to finish.")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_protocol_task_finished: ({func_run_id}): Error updating finished status for object type {object_type} {row_id} in {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_protocol_task_finished: ({func_run_id}): Exception: {e}")
+            raise
+
+        journal_object = self.PROTOCOL_TABLE_TO_JOURNAL_OBJECT.get(object_type)
+        if journal_object:
+            try:
+                self.update_protocol({
+                    'object_type': journal_object,
+                    'object_protocol_id': row_id,
+                    'execution_success': success,
+                    'execution_error_message': message,
+                    'execution_results': None,
+                })
+            except Exception as e:
+                ## the object itself is recorded; a journal which could not be written must
+                ## not throw that record away again
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: update_protocol_task_finished: ({func_run_id}): Error updating the journal for {journal_object} {row_id}: {e}")
+
+    ## Which protocol table holds the objects each phase of a migration works on. A phase
+    ## which closed itself with 'finished OK' is asked here whether the objects it was there
+    ## for really arrived - see update_main_status(). A phase which is not in this map creates
+    ## no objects of its own, and there is a test which will not let a new one be added
+    ## without one of the two being decided.
+    PHASE_OBJECT_TABLES = {
+        'tables migration': ('tables', 'tables'),
+        'user defined types migration': ('user_defined_types', 'user defined types'),
+        'collations migration': ('collations', 'collations'),
+        'text search objects migration': ('text_search', 'text search objects'),
+        'domains migration': ('domains', 'domains'),
+        'indexes migration': ('indexes', 'indexes'),
+        'constraints migration': ('constraints', 'constraints'),
+        'functions/procedures migration': ('funcprocs', 'functions/procedures'),
+        'triggers migration': ('triggers', 'triggers'),
+        'views migration': ('views', 'views'),
+        'sequences migration': ('sequences', 'sequences'),
+    }
+
+    ## The phases which create no objects of their own, so there is nothing to ask about them.
+    ## They are listed rather than left out, so that a phase which is neither is noticed.
+    PHASES_WITHOUT_OBJECTS = {
+        '': 'the run as a whole, and the planner as a whole',
+        'Resume after crash': 'reads the protocol tables of the run it resumes',
+        'Standard workflow': 'the planning of a standard migration - the objects it plans are counted by the phases which create them',
+        'Mapping workflow': 'the planning of a mapping run',
+        'Anonymization workflow': 'the planning of an anonymisation run',
+        'mapping data copy': 'copies rows into tables which already exist',
+        'comments migration': 'writes COMMENT ON statements, which are not objects of their own',
+        'objects validation': 'reads what the other phases created - its result is the final_valid column',
+        'data migration': 'the rows of the tables, counted in the data migration protocol',
+    }
+
+    def count_failed_objects(self, object_type):
+        """
+        `(total, failed)` over the protocol table of one kind of object.
+
+        `failed` counts the rows which were **attempted and did not succeed** - `success IS
+        FALSE`. A row whose success is still NULL was never attempted (an index which the
+        configuration excluded, a run which stopped before it) and is not a failure: counting
+        it as one would report a deliberate skip as a broken migration.
+
+        Answers `(None, None)` when the table is not there, which is what a phase of a
+        workflow that does not create it looks like.
+        """
+        method_name = f"get_protocol_name_{object_type}"
+        if not hasattr(self.config_parser, method_name):
+            return None, None
+        try:
+            table_name = getattr(self.config_parser, method_name)()
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(f"""
+                SELECT COUNT(*), COUNT(CASE WHEN success IS FALSE THEN 1 END)
+                FROM "{self.protocol_schema}"."{table_name}"
+            """)
+            row = cursor.fetchone()
+            cursor.close()
+            return (row[0], row[1]) if row else (None, None)
+        except Exception as e:
+            try:
+                self.protocol_connection.connection.rollback()
+            except Exception:
+                pass
+            self.config_parser.print_log_message('DEBUG', f"migrator_tables: count_failed_objects: {object_type}: {e}")
+            return None, None
+
+    def phase_result(self, subtask_name, success, message):
+        """
+        What a phase really ended in, from the objects it was there for.
+
+        Every phase used to close itself with `success: True, message: 'finished OK'` whatever
+        had happened inside it, so the summary read clean over a migration in which objects had
+        failed - and the failures were in their own protocol tables all along, one query away.
+        P2-7 of development/OPEN_ISSUES.md.
+
+        A phase which reports a failure of its own keeps it. A phase which reports success is
+        asked whether the objects it creates really arrived: if some of them did not, it did
+        not finish OK, and the message says how many of how many. The check is here, in the one
+        method every phase closes itself through, rather than in the nineteen places which call
+        it - a new phase cannot forget it, and no call site can go back to claiming success.
+        """
+        if str(success).upper() != 'TRUE':
+            return success, message
+        if subtask_name not in self.PHASE_OBJECT_TABLES:
+            return success, message
+        object_type, label = self.PHASE_OBJECT_TABLES[subtask_name]
+        total, failed = self.count_failed_objects(object_type)
+        if not failed:
+            return success, message
+        return False, f'finished, but {failed} of {total} {label} FAILED - see the {object_type} protocol table for which'
+
     def update_main_status(self, settings):
         task_name = settings.get('task_name')
         subtask_name = settings.get('subtask_name')
-        success = settings.get('success')
-        message = settings.get('message')
+        success, message = self.phase_result(subtask_name, settings.get('success'), settings.get('message'))
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_main()
         query = f"""
@@ -1291,7 +1476,49 @@ class MigratorTables:
         """)
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: create_table_for_user_defined_types: Table {table_name} created in schema {self.protocol_schema}")
 
+    ## The keys of a settings dictionary which hold a name the target object really carries.
+    ## The target *schema* is deliberately not among them: it is used exactly as the
+    ## configuration spells it, and only the names of the objects inside it follow
+    ## names_case_handling. See with_target_names() below.
+    TARGET_NAME_KEYS = (
+        'target_table_name', 'target_column_name', 'target_alias_name',
+        'target_view_name', 'target_view_alias', 'target_funcproc_name',
+        'target_sequence_name', 'target_type_name', 'target_domain_name',
+        'target_collation_name', 'target_object_name', 'target_index_name',
+        'target_constraint_name', 'target_trigger_name', 'target_default_value_name',
+        'target_referenced_table_name', 'target_referenced_column_name',
+    )
+
+    def with_target_names(self, settings):
+        """
+        The settings with every target name spelled the way the target really has it.
+
+        The protocol tables are the migrator's own record of what it created, and they are
+        what --validate, the object validation pass and the query conversion read back. They
+        used to hold the name of the *source* in the target columns as well: the case handling
+        was applied when the DDL was generated and nowhere else, so a migration with
+        names_case_handling: lower created "customers" and recorded "CUSTOMERS". Everything
+        which read the record afterwards had to remember to convert, and --validate did not -
+        it asked the target for a relation which is not there.
+
+        The conversion happens here, once, at the boundary where a row is written. The
+        source_* columns are never touched: two objects of the source which differ only in
+        case are two different objects, and the record of what was read has to say so.
+
+        It is safe to call on a dictionary whose names are already converted - the conversion
+        is idempotent - which is why the callers which convert on their own may stay as they
+        are.
+        """
+        converted = dict(settings)
+        for key in self.TARGET_NAME_KEYS:
+            value = converted.get(key)
+            if value:
+                converted[key] = self.config_parser.convert_names_case(value)
+        return converted
+
     def insert_user_defined_type(self, settings):
+        ## the target names are recorded the way the target really spells them
+        settings = self.with_target_names(settings)
         func_run_id = uuid.uuid4()
         ## source_schema_name, source_type_name, source_type_sql, target_schema_name, target_type_name, target_type_sql, target_basic_type, type_comment
         source_schema_name = settings['source_schema_name']
@@ -1414,6 +1641,8 @@ class MigratorTables:
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: create_table_for_domains: Table {table_name} created in schema {self.protocol_schema}")
 
     def insert_domain(self, settings):
+        ## the target names are recorded the way the target really spells them
+        settings = self.with_target_names(settings)
         func_run_id = uuid.uuid4()
         ## source_schema_name, source_domain_name, source_domain_sql, target_schema_name, target_domain_name, target_domain_sql, domain_comment
         source_schema_name = settings['source_schema_name']
@@ -1550,6 +1779,8 @@ class MigratorTables:
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: create_table_for_collations: Table {table_name} created in schema {self.protocol_schema}")
 
     def insert_collation(self, settings):
+        ## the target names are recorded the way the target really spells them
+        settings = self.with_target_names(settings)
         func_run_id = uuid.uuid4()
         source_schema_name = settings['source_schema_name']
         source_collation_name = settings['source_collation_name']
@@ -1696,6 +1927,8 @@ class MigratorTables:
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: create_table_for_text_search: Table {table_name} created in schema {self.protocol_schema}")
 
     def insert_text_search(self, settings):
+        ## the target names are recorded the way the target really spells them
+        settings = self.with_target_names(settings)
         func_run_id = uuid.uuid4()
         source_schema_name = settings['source_schema_name']
         source_object_name = settings['source_object_name']
@@ -1829,6 +2062,7 @@ class MigratorTables:
             (id SERIAL PRIMARY KEY,
             default_value_schema TEXT,
             default_value_name TEXT,
+            target_default_value_name TEXT,
             default_value_sql TEXT,
             extracted_default_value TEXT,
             default_value_data_type TEXT,
@@ -1852,13 +2086,16 @@ class MigratorTables:
         table_name = self.config_parser.get_protocol_name_default_values()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (default_value_schema, default_value_name, default_value_sql,
-            extracted_default_value, default_value_data_type)
-            VALUES (%s, %s, %s, %s, %s)
+            (default_value_schema, default_value_name, target_default_value_name,
+            default_value_sql, extracted_default_value, default_value_data_type)
+            VALUES (%s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (default_value_schema, default_value_name, default_value_sql,
-                  extracted_default_value, default_value_data_type)
+        params = (default_value_schema, default_value_name,
+                  ## the name the object really has in the target - 'default_value_name' stays
+                  ## the spelling of the source
+                  self.config_parser.convert_names_case(default_value_name),
+                  default_value_sql, extracted_default_value, default_value_data_type)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -1912,9 +2149,10 @@ class MigratorTables:
             'id': row[0],
             'default_value_schema': row[1],
             'default_value_name': row[2],
-            'default_value_sql': row[3],
-            'extracted_default_value': row[4],
-            'default_value_data_type': row[5],
+            'target_default_value_name': row[3],
+            'default_value_sql': row[4],
+            'extracted_default_value': row[5],
+            'default_value_data_type': row[6],
         }
 
     def get_default_value_details(self, settings):
@@ -2374,6 +2612,8 @@ class MigratorTables:
             raise
 
     def insert_data_migration(self, settings):
+        ## the target names are recorded the way the target really spells them
+        settings = self.with_target_names(settings)
         func_run_id = uuid.uuid4()
         ## source_schema_name, source_table_name, source_table_id, source_table_rows, worker_id, target_schema_name, target_table_name, target_table_rows
         source_schema_name = settings['source_schema_name']
@@ -2918,6 +3158,7 @@ class MigratorTables:
             target_schema_name TEXT,
             target_table_name TEXT,
             target_alias_name TEXT,
+            target_index_name TEXT,
             index_sql TEXT,
             index_columns TEXT,
             index_comment TEXT,
@@ -3045,6 +3286,7 @@ class MigratorTables:
             source_table_id INTEGER,
             target_schema_name TEXT,
             target_table_name TEXT,
+            target_trigger_name TEXT,
             trigger_id BIGINT,
             trigger_name TEXT,
             trigger_event TEXT,
@@ -3094,6 +3336,111 @@ class MigratorTables:
         """)
         self.config_parser.print_log_message('DEBUG', f"migrator_tables: create_table_for_views: Created protocol table {table_name} for views.")
 
+    def create_table_for_queries(self):
+        """
+        The protocol table of the query conversion.
+
+        The step runs on its own, after a migration and possibly long after it, so the schema
+        of the migrator metadata may not be there any more. It is created when it is missing -
+        created, never dropped: create_protocol(), which does drop it, belongs to the planner
+        of a migration and is not called from here.
+
+        It really is never dropped now. It used to be dropped and rebuilt at the start of every
+        run, which took the record of the run before it with it - the record §13.3 of the
+        strategy needs as the resume point of an incremental re-run, and the history a user
+        compares two runs against. A run is told apart from the ones before it by run_started,
+        and the columns which were missing against §11 of the strategy - statement_kind,
+        gate_refused, unresolved_objects, task_started, task_completed - are added to a table
+        which was created by an older version.
+        """
+        table_name = self.config_parser.get_protocol_name_queries()
+        self.protocol_connection.execute_query(f"""CREATE SCHEMA IF NOT EXISTS "{self.protocol_schema}" """)
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
+            (id SERIAL PRIMARY KEY,
+            run_started TIMESTAMP,
+            input_file TEXT,
+            statement_ordinal INTEGER,
+            line_from INTEGER,
+            line_to INTEGER,
+            statement_name TEXT,
+            statement_hash TEXT,
+            statement_kind TEXT,
+            gate_refused TEXT,
+            status TEXT,
+            reason TEXT,
+            source_sql TEXT,
+            target_sql TEXT,
+            source_test_result TEXT,
+            source_test_message TEXT,
+            target_test_result TEXT,
+            target_test_message TEXT,
+            target_test_duration_ms NUMERIC,
+            warnings TEXT,
+            unresolved_objects TEXT,
+            identical_to INTEGER,
+            task_created TIMESTAMP DEFAULT clock_timestamp(),
+            task_started TIMESTAMP,
+            task_completed TIMESTAMP,
+            success BOOLEAN,
+            message TEXT
+            )
+        """)
+        ## a table left behind by an older version is brought up to the shape above rather than
+        ## being dropped - the rows in it are the history this change exists to keep
+        for column, definition in (('run_started', 'TIMESTAMP'),
+                                   ('statement_kind', 'TEXT'),
+                                   ('gate_refused', 'TEXT'),
+                                   ('unresolved_objects', 'TEXT'),
+                                   ('task_started', 'TIMESTAMP'),
+                                   ('task_completed', 'TIMESTAMP')):
+            self.protocol_connection.execute_query(
+                f"""ALTER TABLE "{self.protocol_schema}"."{table_name}"
+                    ADD COLUMN IF NOT EXISTS {column} {definition}""")
+        self.config_parser.print_log_message('DEBUG', f"migrator_tables: create_table_for_queries: Created protocol table {table_name} for converted queries.")
+        self.apply_comments([table_name])
+
+    def insert_query(self, settings):
+        """One converted - or refused - statement of the query conversion."""
+        func_run_id = uuid.uuid4()
+        table_name = self.config_parser.get_protocol_name_queries()
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."{table_name}"
+            (run_started, input_file, statement_ordinal, line_from, line_to, statement_name,
+             statement_hash, statement_kind, gate_refused,
+             status, reason, source_sql, target_sql,
+             source_test_result, source_test_message,
+             target_test_result, target_test_message, target_test_duration_ms,
+             warnings, unresolved_objects, identical_to,
+             task_started, task_completed, success, message)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s)
+        """
+        source_test = settings.get('source_test') or {}
+        target_test = settings.get('target_test') or {}
+        warnings = settings.get('warnings') or []
+        unresolved = settings.get('unresolved_objects') or []
+        params = (
+            settings.get('run_started'),
+            settings.get('input_file'), settings.get('ordinal'),
+            settings.get('line_from'), settings.get('line_to'),
+            settings.get('name'), settings.get('sha256'),
+            settings.get('statement_kind'), settings.get('gate_refused'),
+            settings.get('status'), settings.get('reason'),
+            settings.get('source_sql'), settings.get('target_sql'),
+            source_test.get('result'), source_test.get('message'),
+            target_test.get('result'), target_test.get('message'), target_test.get('duration_ms'),
+            '\n'.join(warnings) if warnings else None,
+            '\n'.join(unresolved) if unresolved else None,
+            settings.get('identical_to'),
+            settings.get('task_started'), settings.get('task_completed'),
+            settings.get('status') in ('CONVERTED', 'UNCHANGED'),
+            settings.get('reason') or None)
+        try:
+            self.protocol_connection.execute_query(query, params)
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_query: ({func_run_id}): {settings.get('input_file')}: {e}")
+
     def decode_protocol_row(self, row):
         return {
             'id': row[0],
@@ -3142,10 +3489,11 @@ class MigratorTables:
             'target_schema_name': row[7],
             'target_table_name': row[8],
             'target_alias_name': row[9],
-            'index_sql': row[10],
-            'index_columns': row[11],
-            'index_comment': row[12],
-            'is_function_based': row[13]
+            'target_index_name': row[10],
+            'index_sql': row[11],
+            'index_columns': row[12],
+            'index_comment': row[13],
+            'is_function_based': row[14]
         }
 
     def decode_funcproc_row(self, row):
@@ -3198,24 +3546,25 @@ class MigratorTables:
             'source_table_id': row[3],
             'target_schema_name': row[4],
             'target_table_name': row[5],
-            'trigger_id': row[6],
-            'trigger_name': row[7],
-            'trigger_event': row[8],
-            'trigger_new': row[9],
-            'trigger_old': row[10],
-            'trigger_row_statement': row[11],
-            'trigger_source_sql': row[12],
-            'trigger_target_sql': row[13],
-            'trigger_comment': row[14],
-            'task_created': row[15],
-            'task_started': row[16],
-            'task_completed': row[17],
-            'success': row[18],
-            'message': row[19],
-            'final_valid': row[20],
-            'final_valid_message': row[21],
+            'target_trigger_name': row[6],
+            'trigger_id': row[7],
+            'trigger_name': row[8],
+            'trigger_event': row[9],
+            'trigger_new': row[10],
+            'trigger_old': row[11],
+            'trigger_row_statement': row[12],
+            'trigger_source_sql': row[13],
+            'trigger_target_sql': row[14],
+            'trigger_comment': row[15],
+            'task_created': row[16],
+            'task_started': row[17],
+            'task_completed': row[18],
+            'success': row[19],
+            'message': row[20],
+            'final_valid': row[21],
+            'final_valid_message': row[22],
             'requires_manual_adjustment': bool(row[22]) if len(row) > 22 else False,
-            'manual_adjustment_details': row[23] if len(row) > 23 else None,
+            'manual_adjustment_details': row[24] if len(row) > 23 else None,
         }
 
     def decode_view_row(self, row):
@@ -3285,6 +3634,8 @@ class MigratorTables:
             raise
 
     def insert_tables(self, settings):
+        ## the target names are recorded the way the target really spells them
+        settings = self.with_target_names(settings)
         func_run_id = uuid.uuid4()
         source_schema_name = settings['source_schema_name']
         source_table_name = settings['source_table_name']
@@ -3429,18 +3780,25 @@ class MigratorTables:
             raise
 
     def insert_indexes(self, settings):
+        ## the target names are recorded the way the target really spells them
+        settings = self.with_target_names(settings)
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_indexes()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
             (source_schema_name, source_table_name, source_table_id, index_owner, index_name, index_type,
-            target_schema_name, target_table_name, target_alias_name, index_sql, index_columns, index_comment, is_function_based)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            target_schema_name, target_table_name, target_alias_name, target_index_name,
+            index_sql, index_columns, index_comment, is_function_based)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
         params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_table_id'), settings.get('index_owner'),
                   settings.get('index_name'), settings.get('index_type'), settings.get('target_schema_name'),
-                  settings.get('target_table_name'), settings.get('target_alias_name', ''), settings.get('index_sql'), settings.get('index_columns'),
+                  settings.get('target_table_name'), settings.get('target_alias_name', ''),
+                  ## the name the index really has in the target - the spelling names_case_handling
+                  ## produced. 'index_name' above stays the spelling of the source.
+                  self.config_parser.convert_names_case(settings.get('index_name')),
+                  settings.get('index_sql'), settings.get('index_columns'),
                   settings.get('index_comment'), True if settings.get('is_function_based') == 'YES' else False)
         try:
             cursor = self.protocol_connection.connection.cursor()
@@ -3502,12 +3860,14 @@ class MigratorTables:
             target_schema_name TEXT,
             target_table_name TEXT,
             target_alias_name TEXT,
+            target_constraint_name TEXT,
             constraint_name TEXT,
             constraint_type TEXT,
             constraint_owner TEXT,
             constraint_columns TEXT,
             referenced_table_schema TEXT,
             referenced_table_name TEXT,
+            target_referenced_table_name TEXT,
             referenced_columns TEXT,
             constraint_sql TEXT,
             delete_rule TEXT,
@@ -3532,48 +3892,58 @@ class MigratorTables:
             'target_schema_name': row[4],
             'target_table_name': row[5],
             'target_alias_name': row[6],
-            'constraint_name': row[7],
-            'constraint_type': row[8],
-            'constraint_owner': row[9],
-            'constraint_columns': row[10],
-            'referenced_table_schema': row[11],
-            'referenced_table_name': row[12],
-            'referenced_columns': row[13],
-            'constraint_sql': row[14],
-            'delete_rule': row[15],
-            'update_rule': row[16],
-            'constraint_comment': row[17],
-            'constraint_status': row[18],
-            'task_created': row[19],
-            'task_started': row[20],
-            'task_completed': row[21],
-            'success': row[22],
-            'message': row[23]
+            'target_constraint_name': row[7],
+            'constraint_name': row[8],
+            'constraint_type': row[9],
+            'constraint_owner': row[10],
+            'constraint_columns': row[11],
+            'referenced_table_schema': row[12],
+            'referenced_table_name': row[13],
+            'target_referenced_table_name': row[14],
+            'referenced_columns': row[15],
+            'constraint_sql': row[16],
+            'delete_rule': row[17],
+            'update_rule': row[18],
+            'constraint_comment': row[19],
+            'constraint_status': row[20],
+            'task_created': row[21],
+            'task_started': row[22],
+            'task_completed': row[23],
+            'success': row[24],
+            'message': row[25]
         }
 
     def insert_constraint(self, settings):
+        ## the target names are recorded the way the target really spells them
+        settings = self.with_target_names(settings)
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_constraints()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
             (source_table_id, source_schema_name, source_table_name,
-            target_schema_name, target_table_name, target_alias_name, constraint_name,
+            target_schema_name, target_table_name, target_alias_name,
+            target_constraint_name, constraint_name,
             constraint_type,
             constraint_owner, constraint_columns,
-            referenced_table_schema, referenced_table_name,
+            referenced_table_schema, referenced_table_name, target_referenced_table_name,
             referenced_columns, constraint_sql,
             delete_rule, update_rule, constraint_comment,
             constraint_status)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
         params = (settings['source_table_id'], settings['source_schema_name'], settings['source_table_name'],
-                    settings['target_schema_name'], settings['target_table_name'], settings.get('target_alias_name', ''), settings['constraint_name'],
+                    settings['target_schema_name'], settings['target_table_name'], settings.get('target_alias_name', ''),
+                    ## the names the target really has - 'constraint_name' and
+                    ## 'referenced_table_name' stay the spelling of the source
+                    self.config_parser.convert_names_case(settings['constraint_name']),
+                    settings['constraint_name'],
                     settings['constraint_type'] if 'constraint_type' in settings else '',
                     settings['constraint_owner'] if 'constraint_owner' in settings else '',
                     settings['constraint_columns'] if 'constraint_columns' in settings else '',
                     settings['referenced_table_schema'] if 'referenced_table_schema' in settings else '',
                     settings['referenced_table_name'] if 'referenced_table_name' in settings else '',
+                    self.config_parser.convert_names_case(settings.get('referenced_table_name') or ''),
                     settings['referenced_columns'] if 'referenced_columns' in settings else '',
                     settings['constraint_sql'] if 'constraint_sql' in settings else '',
                     settings['delete_rule'] if 'delete_rule' in settings else '',
@@ -3632,6 +4002,8 @@ class MigratorTables:
             raise
 
     def insert_funcprocs(self, settings):
+        ## the target names are recorded the way the target really spells them
+        settings = self.with_target_names(settings)
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_funcprocs()
         query = f"""
@@ -3728,6 +4100,8 @@ class MigratorTables:
         return clamped, message
 
     def insert_sequence(self, settings):
+        ## the target names are recorded the way the target really spells them
+        settings = self.with_target_names(settings)
         func_run_id = uuid.uuid4()
         protocol_table_name = self.config_parser.get_protocol_name_sequences()
 
@@ -3805,15 +4179,21 @@ class MigratorTables:
             raise
 
     def insert_trigger(self, settings):
+        ## the target names are recorded the way the target really spells them
+        settings = self.with_target_names(settings)
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_triggers()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema_name, source_table_name, source_table_id, target_schema_name, target_table_name, trigger_id, trigger_name, trigger_event, trigger_new, trigger_old, trigger_source_sql, trigger_target_sql, trigger_comment, requires_manual_adjustment, manual_adjustment_details)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (source_schema_name, source_table_name, source_table_id, target_schema_name, target_table_name, target_trigger_name, trigger_id, trigger_name, trigger_event, trigger_new, trigger_old, trigger_source_sql, trigger_target_sql, trigger_comment, requires_manual_adjustment, manual_adjustment_details)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_table_id'), settings.get('target_schema_name'), settings.get('target_table_name'), settings.get('trigger_id'), settings.get('trigger_name'), settings.get('trigger_event'), settings.get('trigger_new'), settings.get('trigger_old'), settings.get('trigger_source_sql'), settings.get('trigger_target_sql'), settings.get('trigger_comment'), bool(settings.get('requires_manual_adjustment')), settings.get('manual_adjustment_details'))
+        params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_table_id'), settings.get('target_schema_name'), settings.get('target_table_name'),
+                  ## the name the trigger really has in the target - 'trigger_name' stays the
+                  ## spelling of the source
+                  self.config_parser.convert_names_case(settings.get('trigger_name')),
+                  settings.get('trigger_id'), settings.get('trigger_name'), settings.get('trigger_event'), settings.get('trigger_new'), settings.get('trigger_old'), settings.get('trigger_source_sql'), settings.get('trigger_target_sql'), settings.get('trigger_comment'), bool(settings.get('requires_manual_adjustment')), settings.get('manual_adjustment_details'))
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -3926,6 +4306,8 @@ class MigratorTables:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: update_object_final_valid: Error updating {object_type} {row_id} in {table_name}: {e}")
 
     def insert_view(self, settings):
+        ## the target names are recorded the way the target really spells them
+        settings = self.with_target_names(settings)
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_views()
         query = f"""
@@ -4407,9 +4789,12 @@ class MigratorTables:
             lines.append("")
 
         lines.append("[ TIMING & EXECUTION PROFILES ]")
-        lines.append("-" * 80)
-        lines.append(f"{'Phase / Step':<44} | {'Duration':<14} | Start Time")
-        lines.append("-" * 80)
+        lines.append("-" * 110)
+        ## The result of each phase, which this table did not show at all: a phase which failed
+        ## looked exactly like one which succeeded, so the status the phases were writing -
+        ## even once it was true - was read by nobody. P2-7.
+        lines.append(f"{'Phase / Step':<44} | {'Duration':<14} | {'Start':<10} | Result")
+        lines.append("-" * 110)
 
         try:
             query = f"""SELECT * FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_main()}" ORDER BY id"""
@@ -4429,9 +4814,19 @@ class MigratorTables:
                 sub = task_data['subtask_name']
                 display_name = f"  {sub}" if sub else name
                 display_name = display_name[:44]
-                lines.append(f"{display_name:<44} | {length_str:<14} | {started_str}")
-        except Exception:
-            pass
+
+                if not task_data['task_completed']:
+                    ## the phase was opened and never closed - the run did not get that far,
+                    ## or the phase does not close the row it opened
+                    result = 'DID NOT FINISH'
+                elif task_data['success'] is True:
+                    result = 'OK'
+                else:
+                    result = str(task_data['message'] or 'FAILED')
+
+                lines.append(f"{display_name:<44} | {length_str:<14} | {started_str:<10} | {result}")
+        except Exception as e:
+            self.config_parser.print_log_message('DEBUG', f"migrator_tables: print_migration_summary: timing table: {e}")
 
         lines.append("")
         if self.config_parser.get_workflow() == 'mapping':
@@ -4484,6 +4879,33 @@ class MigratorTables:
             ('Views', self.config_parser.get_protocol_name_views(), None),
             ('Aliases', self.config_parser.get_protocol_name_aliases(), None)
         ]
+
+        ## Which kinds of object the run could not READ out of the source. A source which has
+        ## none of a kind and a connector which cannot read that kind both used to end as a 0
+        ## in this table, and only one of the two means the migration is complete. The planner
+        ## writes a row of type 'not read' into the journal for the second one. P2-8.
+        kinds_not_read = {}
+        try:
+            cursor.execute(f"""
+                SELECT object_type, execution_error_message
+                FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name()}"
+                WHERE row_type = 'not read'
+            """)
+            for object_type, what_is_there in cursor.fetchall():
+                kinds_not_read[object_type] = what_is_there
+        except Exception:
+            try:
+                self.protocol_connection.connection.rollback()
+            except Exception:
+                pass
+
+        ## the journal names an object in the singular, the summary in the plural
+        summary_name_to_object_type = {
+            'User Defined Types': 'user_defined_type',
+            'Domains': 'domain',
+            'Collations': 'collation',
+            'Text Search Objects': 'text search',
+        }
 
         for obj_name, table_name, add_cols in objects_to_check:
             try:
@@ -4545,11 +4967,23 @@ class MigratorTables:
                             elif fv is False:
                                 invalid_count = c
                         if valid_count or invalid_count:
-                            details.append(f"Valid: {valid_count}, Invalid: {invalid_count}")
+                            ## "Valid" was what this said, and the pass behind it asks the
+                            ## catalogue whether the object is THERE. Being there is not doing
+                            ## what the object of the source did, and for a PL/pgSQL routine it
+                            ## is not even a promise that the body runs. P2-6.
+                            details.append(f"In target: {valid_count}, Missing: {invalid_count}")
                     except Exception:
                         self.protocol_connection.connection.rollback()
 
+                ## a kind the run could not read is not a kind the source has none of
+                not_read = kinds_not_read.get(summary_name_to_object_type.get(obj_name))
+                if not_read and not total:
+                    details.insert(0, f"NOT READ from this source - {not_read}")
+
                 details_str = ", ".join(details)
+                if not_read and not total:
+                    lines.append(f"{obj_name:<24} | {'?':>6} | {'-':>7} | {'-':>6} | {details_str}")
+                    continue
                 if obj_name == 'Altered Columns':
                     lines.append(f"{obj_name:<24} | {total:>6} | {'-':>7} | {'-':>6} | {details_str}")
                 else:
@@ -4594,6 +5028,64 @@ class MigratorTables:
             success_str = str(comments_total) if not self.config_parser.is_dry_run() else '-'
             failed_str = '0' if not self.config_parser.is_dry_run() else '-'
             lines.append(f"{'Comments':<24} | {comments_total:>6} | {success_str:>7} | {failed_str:>6} | ")
+        except Exception:
+            self.protocol_connection.connection.rollback()
+
+        ## The statements of an application, when the run converted any. The table holds the
+        ## rows of earlier runs too, so only the run which has just finished is counted - the
+        ## newest run_started in it. Nothing is printed when the step did not run, which is
+        ## the normal case: query_conversion.run_after_migration is false by default.
+        try:
+            queries_table = self.config_parser.get_protocol_name_queries()
+            cursor.execute(f"""
+                SELECT status, count(*)
+                FROM "{self.protocol_schema}"."{queries_table}"
+                WHERE run_started = (SELECT max(run_started)
+                                     FROM "{self.protocol_schema}"."{queries_table}")
+                GROUP BY status
+            """)
+            query_counts = {row[0]: row[1] for row in cursor.fetchall()}
+            if query_counts:
+                cursor.execute(f"""
+                    SELECT count(DISTINCT input_file)
+                    FROM "{self.protocol_schema}"."{queries_table}"
+                    WHERE run_started = (SELECT max(run_started)
+                                         FROM "{self.protocol_schema}"."{queries_table}")
+                """)
+                query_files = cursor.fetchone()[0]
+                lines.append("")
+                lines.append("[ QUERY CONVERSION ]")
+                lines.append("-" * 80)
+                lines.append(f"{'Outcome':<24} | {'Count':>6} | Meaning")
+                lines.append("-" * 80)
+                for status, meaning in (
+                        ('CONVERTED', 'converted and the target accepted it'),
+                        ('UNCHANGED', 'already valid PostgreSQL'),
+                        ('CONVERTED_FAILING', 'converted, the target refused it'),
+                        ('NOT CONVERTED', 'the converter could not do it'),
+                        ('SKIPPED', 'a gate refused it - not a read')):
+                    lines.append(f"{status:<24} | {query_counts.get(status, 0):>6} | {meaning}")
+                lines.append("-" * 80)
+                statements = sum(query_counts.values())
+                lines.append(f"{'TOTAL':<24} | {statements:>6} | in {query_files} file(s)")
+                attention = query_counts.get('CONVERTED_FAILING', 0) + query_counts.get('NOT CONVERTED', 0)
+                total_errors += attention
+                if attention:
+                    cursor.execute(f"""
+                        SELECT input_file, line_from, line_to, status, reason
+                        FROM "{self.protocol_schema}"."{queries_table}"
+                        WHERE run_started = (SELECT max(run_started)
+                                             FROM "{self.protocol_schema}"."{queries_table}")
+                          AND status IN ('CONVERTED_FAILING', 'NOT CONVERTED')
+                        ORDER BY input_file, statement_ordinal LIMIT 5
+                    """)
+                    lines.append(f"{attention} statement(s) need attention, the first of them:")
+                    for input_file, line_from, line_to, status, reason in cursor.fetchall():
+                        where = f"{os.path.basename(input_file or '')}:{line_from}-{line_to}"
+                        lines.append(f"  {status:<18} {where} - {(reason or '')[:60]}")
+                    lines.append("The whole list is in the output files and in the protocol table.")
+        except psycopg2.errors.UndefinedTable:
+            self.protocol_connection.connection.rollback()
         except Exception:
             self.protocol_connection.connection.rollback()
 
@@ -5427,6 +5919,8 @@ class MigratorTables:
         }
 
     def insert_columns(self, settings):
+        ## the target names are recorded the way the target really spells them
+        settings = self.with_target_names(settings)
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_columns()
         query = f"""
@@ -5524,6 +6018,8 @@ class MigratorTables:
         return None
 
     def insert_aliases(self, settings):
+        ## the target names are recorded the way the target really spells them
+        settings = self.with_target_names(settings)
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_aliases()
         query = f"""
@@ -6066,6 +6562,13 @@ class MigratorTables:
                 target_constraints_count bigint,
                 row_count_passed text,
                 table_hash_passed text,
+                row_hash_passed text,
+                lob_size_passed text,
+                columns_count_passed text,
+                indexes_count_passed text,
+                constraints_count_passed text,
+                validation_outcome text,
+                validation_message text,
                 validated_at timestamp default current_timestamp
             )
         """
@@ -6180,24 +6683,46 @@ class MigratorTables:
         source_constraints_count = settings.get('source_constraints_count')
         target_constraints_count = settings.get('target_constraints_count')
         
-        row_logic = settings.get('row_logic')
-        if row_logic is True: row_cnt_res = 'PASS'
-        elif row_logic is False: row_cnt_res = 'X'
-        elif row_logic is None and settings.get('row_msg', '').startswith('Skip'): row_cnt_res = 'SKIP'
-        else: row_cnt_res = '-'
+        ## What each of the four checks said. A check which ran and could not decide wrote
+        ## its own 'Skip:' message, and a check which was never asked for leaves a '-': the
+        ## two are not the same thing and the row keeps them apart.
+        def verdict_mark(logic, message):
+            if logic is True:
+                return 'PASS'
+            if logic is False:
+                return 'X'
+            if str(message or '').startswith('Skip'):
+                return 'SKIP'
+            return '-'
 
-        table_hash_logic = settings.get('table_hash_logic')
-        if table_hash_logic is True: tbl_hash_res = 'PASS'
-        elif table_hash_logic is False: tbl_hash_res = 'X'
-        elif table_hash_logic is None and settings.get('table_msg', '').startswith('Skip'): tbl_hash_res = 'SKIP'
-        else: tbl_hash_res = '-'
+        row_cnt_res = verdict_mark(settings.get('row_logic'), settings.get('row_msg'))
+        tbl_hash_res = verdict_mark(settings.get('table_hash_logic'), settings.get('table_msg'))
+        ## Recorded for the first time. The row sample and the LOB sizes could already fail a
+        ## table in the log and were written into no column at all, so the summary - which
+        ## builds its verdict out of these columns - showed such a table as PASS.
+        row_hash_res = verdict_mark(settings.get('row_hash_logic'), settings.get('row_hash_msg'))
+        lob_size_res = verdict_mark(settings.get('lob_size_logic'), settings.get('lob_size_msg'))
+
+        ## The structural checks. The four counts beside them were recorded from the first
+        ## day and compared by nothing, so a table which arrived with half its indexes was
+        ## reported as validated; the summary later worked out a verdict of its own from the
+        ## numbers, by comparing them for equality, which is not what they mean. The verdict
+        ## the validator reached is recorded here and the summary reads it. P2-3.
+        columns_count_res = verdict_mark(settings.get('columns_logic'), settings.get('columns_msg'))
+        indexes_count_res = verdict_mark(settings.get('indexes_logic'), settings.get('indexes_msg'))
+        constraints_count_res = verdict_mark(settings.get('constraints_logic'), settings.get('constraints_msg'))
+
+        ## The outcome the validator derived - PASSED, FAILED or NOT VALIDATED. The summary
+        ## reads it instead of deriving a verdict of its own out of two of the four columns.
+        validation_outcome = settings.get('outcome')
+        validation_message = settings.get('validation_message')
 
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{self.config_parser.get_validation_tables_name()}"
-            (source_schema_name, source_table_name, source_row_count, target_schema_name, target_table_name, target_row_count, source_table_hash, target_table_hash, source_columns_count, target_columns_count, source_indexes_count, target_indexes_count, source_constraints_count, target_constraints_count, row_count_passed, table_hash_passed)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (source_schema_name, source_table_name, source_row_count, target_schema_name, target_table_name, target_row_count, source_table_hash, target_table_hash, source_columns_count, target_columns_count, source_indexes_count, target_indexes_count, source_constraints_count, target_constraints_count, row_count_passed, table_hash_passed, row_hash_passed, lob_size_passed, columns_count_passed, indexes_count_passed, constraints_count_passed, validation_outcome, validation_message)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
-        params = (source_schema_name, source_table_name, source_row_count, target_schema_name, target_table_name, target_row_count, str(source_table_hash) if source_table_hash is not None else None, str(target_table_hash) if target_table_hash is not None else None, source_columns_count, target_columns_count, source_indexes_count, target_indexes_count, source_constraints_count, target_constraints_count, row_cnt_res, tbl_hash_res)
+        params = (source_schema_name, source_table_name, source_row_count, target_schema_name, target_table_name, target_row_count, str(source_table_hash) if source_table_hash is not None else None, str(target_table_hash) if target_table_hash is not None else None, source_columns_count, target_columns_count, source_indexes_count, target_indexes_count, source_constraints_count, target_constraints_count, row_cnt_res, tbl_hash_res, row_hash_res, lob_size_res, columns_count_res, indexes_count_res, constraints_count_res, validation_outcome, validation_message)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -6315,7 +6840,9 @@ class MigratorTables:
         query = f"""
             SELECT v.target_schema_name, v.target_table_name, MAX(t.source_schema_name), MAX(t.source_table_name), MAX(v.source_row_count), MAX(v.target_row_count), MAX(v.source_table_hash), MAX(v.target_table_hash),
                    MAX(v.source_columns_count), MAX(v.target_columns_count), MAX(v.source_indexes_count), MAX(v.target_indexes_count), MAX(v.source_constraints_count), MAX(v.target_constraints_count),
-                   MAX(v.row_count_passed), MAX(v.table_hash_passed)
+                   MAX(v.row_count_passed), MAX(v.table_hash_passed),
+                   MAX(v.row_hash_passed), MAX(v.lob_size_passed), MAX(v.validation_outcome),
+                   MAX(v.columns_count_passed), MAX(v.indexes_count_passed), MAX(v.constraints_count_passed)
             FROM "{self.protocol_schema}"."{self.config_parser.get_validation_tables_name()}" v
             LEFT JOIN "{self.protocol_schema}"."{protocol_tables}" t
             ON v.target_schema_name = t.target_schema_name AND v.target_table_name = t.target_table_name
@@ -6352,6 +6879,15 @@ class MigratorTables:
             total = len(results)
 
             passed_count = 0
+            ## A table which could not be measured is counted on its own. Adding it to either
+            ## of the other two is what P2-2 is about: it is neither a pass nor a failure.
+            not_validated_count = 0
+            row_hash_tests = 0
+            row_hash_pass = 0
+            row_hash_fail = 0
+            lob_tests = 0
+            lob_pass = 0
+            lob_fail = 0
             row_count_tests = 0
             row_count_pass = 0
             row_count_fail = 0
@@ -6384,7 +6920,7 @@ class MigratorTables:
                 header = f"| {'No.':>{max_num_len}} | {'Source Table':<{max_source_len}} | {'Target Table':<{max_target_len}} |"
                 if is_mapping:
                     header += f" {'Action':<15} |"
-                header += f" {'Status':<6} | {'RowCnt':<6} | {'SrcRows':>10} | {'TgtRows':>10} | {'TblHash':<7} | {'SrcHash':<15} | {'TgtHash':<15} | {'Cols':<7} | {'Idxs':<7} | {'Cons':<7} |"
+                header += f" {'Status':<6} | {'RowCnt':<6} | {'SrcRows':>10} | {'TgtRows':>10} | {'TblHash':<7} | {'SrcHash':<15} | {'TgtHash':<15} | {'RowHash':<7} | {'LOBs':<7} | {'Cols':<11} | {'Idxs':<11} | {'Cons':<11} |"
                 sep = "|" + "|".join(['-' * len(c) for c in header.split('|')[1:-1]]) + "|"
                 details_lines.append(header)
                 details_lines.append(sep)
@@ -6403,59 +6939,81 @@ class MigratorTables:
                     src_cons_cnt = r[12]
                     tgt_cons_cnt = r[13]
                     
+                    ## A check is counted as run when it reached a verdict. SKIP means it
+                    ## was asked for and could not decide, and '-' that it was never asked -
+                    ## neither of them is a pass. A SKIP used to be added to the passed
+                    ## column, which is the same conflation of "we could not tell" with "it
+                    ## is correct" one level down from the table verdict. P2-2.
+                    def tally(mark, tests, passes, failures):
+                        if mark == "PASS":
+                            return tests + 1, passes + 1, failures
+                        if mark == "X":
+                            return tests + 1, passes, failures + 1
+                        return tests, passes, failures
+
                     row_cnt_res = r[14] if r[14] is not None else "-"
-                    if row_cnt_res != "-":
-                        row_count_tests += 1
-                        if row_cnt_res == "PASS" or row_cnt_res == "SKIP":
-                            row_count_pass += 1
-                        else:
-                            row_count_fail += 1
+                    row_count_tests, row_count_pass, row_count_fail = tally(
+                        row_cnt_res, row_count_tests, row_count_pass, row_count_fail)
 
                     tbl_hash_res = r[15] if r[15] is not None else "-"
-                    if tbl_hash_res != "-":
-                        table_hash_tests += 1
-                        if tbl_hash_res == "PASS" or tbl_hash_res == "SKIP":
-                            table_hash_pass += 1
-                        else:
-                            table_hash_fail += 1
+                    table_hash_tests, table_hash_pass, table_hash_fail = tally(
+                        tbl_hash_res, table_hash_tests, table_hash_pass, table_hash_fail)
 
-                    cols_str = "-"
-                    cols_res = "-"
-                    if src_cols_cnt is not None and tgt_cols_cnt is not None:
-                        cols_tests += 1
-                        cols_str = f"{src_cols_cnt}/{tgt_cols_cnt}"
-                        if src_cols_cnt == tgt_cols_cnt:
-                            cols_res = "PASS"
-                            cols_pass += 1
-                        else:
-                            cols_res = "X"
-                            cols_fail += 1
+                    row_hash_res = r[16] if r[16] is not None else "-"
+                    row_hash_tests, row_hash_pass, row_hash_fail = tally(
+                        row_hash_res, row_hash_tests, row_hash_pass, row_hash_fail)
 
-                    idxs_str = "-"
-                    idxs_res = "-"
-                    if src_idxs_cnt is not None and tgt_idxs_cnt is not None:
-                        idxs_tests += 1
-                        idxs_str = f"{src_idxs_cnt}/{tgt_idxs_cnt}"
-                        if src_idxs_cnt == tgt_idxs_cnt:
-                            idxs_res = "PASS"
-                            idxs_pass += 1
-                        else:
-                            idxs_res = "X"
-                            idxs_fail += 1
+                    lob_res = r[17] if r[17] is not None else "-"
+                    lob_tests, lob_pass, lob_fail = tally(
+                        lob_res, lob_tests, lob_pass, lob_fail)
 
-                    cons_str = "-"
-                    cons_res = "-"
-                    if src_cons_cnt is not None and tgt_cons_cnt is not None:
-                        cons_tests += 1
-                        cons_str = f"{src_cons_cnt}/{tgt_cons_cnt}"
-                        if src_cons_cnt == tgt_cons_cnt:
-                            cons_res = "PASS"
-                            cons_pass += 1
-                        else:
-                            cons_res = "X"
-                            cons_fail += 1
+                    outcome = r[18]
 
-                    status = "PASS" if (row_cnt_res in ("PASS", "-") and tbl_hash_res in ("PASS", "-") and not (row_cnt_res == "-" and tbl_hash_res == "-")) else "X"
+                    ## The verdict of the validator, as it recorded it. It used to be
+                    ## worked out here by comparing the two numbers for **equality**, which
+                    ## is not what they mean: PostgreSQL creates an index for every primary
+                    ## key and the migrator adds one to the parent of a foreign key, so a
+                    ## table which arrived complete was reported as broken. What the numbers
+                    ## can say is a shortfall - see compare_counts() in validator.py.
+                    def structural(mark, source_count, target_count, tests, passes, failures):
+                        text = "-"
+                        if source_count is not None and target_count is not None:
+                            text = f"{source_count}/{target_count}"
+                        if mark is None:
+                            ## a row written by an older run, which has no verdict recorded
+                            mark = "-"
+                            if source_count is not None and target_count is not None:
+                                mark = "PASS" if source_count == target_count else "X"
+                        tests, passes, failures = tally(mark, tests, passes, failures)
+                        return mark, text, tests, passes, failures
+
+                    cols_res, cols_str, cols_tests, cols_pass, cols_fail = structural(
+                        r[19], src_cols_cnt, tgt_cols_cnt, cols_tests, cols_pass, cols_fail)
+                    idxs_res, idxs_str, idxs_tests, idxs_pass, idxs_fail = structural(
+                        r[20], src_idxs_cnt, tgt_idxs_cnt, idxs_tests, idxs_pass, idxs_fail)
+                    cons_res, cons_str, cons_tests, cons_pass, cons_fail = structural(
+                        r[21], src_cons_cnt, tgt_cons_cnt, cons_tests, cons_pass, cons_fail)
+
+                    ## the two numbers and what the comparison of them said: 5/6 alone does
+                    ## not say whether that is a shortfall or the target simply holding more
+                    def structural_cell(text, mark):
+                        if text == '-' and mark == '-':
+                            return '-'
+                        return f"{text} {mark}".strip()
+
+                    cols_cell = structural_cell(cols_str, cols_res)
+                    idxs_cell = structural_cell(idxs_str, idxs_res)
+                    cons_cell = structural_cell(cons_str, cons_res)
+
+                    ## The verdict of the validator, as the validator recorded it. It used to
+                    ## be worked out again here out of two of the four checks, so a table
+                    ## which failed the row sample or the LOB check - neither of which was
+                    ## written into any column - was shown as PASS, and a table which could
+                    ## not be measured at all was shown as PASS as well.
+                    status = MigratorConstants.get_validation_outcome_mark(outcome)
+                    if outcome is None:
+                        ## a row written by an older run, which has no outcome recorded
+                        status = "PASS" if (row_cnt_res in ("PASS", "-") and tbl_hash_res in ("PASS", "-") and not (row_cnt_res == "-" and tbl_hash_res == "-")) else "X"
 
                     # Ensure structural tests also pass for overall PASS
                     if status == "PASS" and any(res == "X" for res in (cols_res, idxs_res, cons_res)):
@@ -6463,6 +7021,8 @@ class MigratorTables:
 
                     if status == "PASS":
                         passed_count += 1
+                    elif status == "?":
+                        not_validated_count += 1
 
                     src_rows_str = "-" if src_rows is None else str(src_rows)
                     tgt_rows_str = "-" if tgt_rows is None else str(tgt_rows)
@@ -6480,9 +7040,9 @@ class MigratorTables:
                     else:
                         action_str = ""
 
-                    details_lines.append(f"| {idx:>{max_num_len}} | {source_table:<{max_source_len}} | {target_table:<{max_target_len}} |{action_str} {status:<6} | {row_cnt_res:<6} | {src_rows_str:>10} | {tgt_rows_str:>10} | {tbl_hash_res:<7} | {src_hash_str:<15} | {tgt_hash_str:<15} | {cols_str:<7} | {idxs_str:<7} | {cons_str:<7} |")
+                    details_lines.append(f"| {idx:>{max_num_len}} | {source_table:<{max_source_len}} | {target_table:<{max_target_len}} |{action_str} {status:<6} | {row_cnt_res:<6} | {src_rows_str:>10} | {tgt_rows_str:>10} | {tbl_hash_res:<7} | {src_hash_str:<15} | {tgt_hash_str:<15} | {row_hash_res:<7} | {lob_res:<7} | {cols_cell:<11} | {idxs_cell:<11} | {cons_cell:<11} |")
 
-            failed_count = total - passed_count
+            failed_count = total - passed_count - not_validated_count
 
             # Append column validation details
             col_query = f"""
@@ -6676,21 +7236,33 @@ class MigratorTables:
 
             lines.append("")
             lines.append("### Validation Totals")
-            header = f"| {'Test Category':<24} | {'Total':>7} | {'Passed':>7} | {'Failed':>6} |"
+            header = f"| {'Test Category':<24} | {'Total':>7} | {'Passed':>7} | {'Failed':>6} | {'Not measured':>13} |"
             sep = "|" + "|".join(['-' * len(c) for c in header.split('|')[1:-1]]) + "|"
             lines.append(header)
             lines.append(sep)
-            lines.append(f"| {'All Evaluated Tables':<24} | {total:>7} | {passed_count:>7} | {failed_count:>6} |")
+            lines.append(f"| {'All Evaluated Tables':<24} | {total:>7} | {passed_count:>7} | {failed_count:>6} | {not_validated_count:>13} |")
             if row_count_tests > 0:
-                lines.append(f"| {'Row Counts':<24} | {row_count_tests:>7} | {row_count_pass:>7} | {row_count_fail:>6} |")
+                lines.append(f"| {'Row Counts':<24} | {row_count_tests:>7} | {row_count_pass:>7} | {row_count_fail:>6} | {total - row_count_tests:>13} |")
             if table_hash_tests > 0:
-                lines.append(f"| {'Table Hashes':<24} | {table_hash_tests:>7} | {table_hash_pass:>7} | {table_hash_fail:>6} |")
+                lines.append(f"| {'Table Hashes':<24} | {table_hash_tests:>7} | {table_hash_pass:>7} | {table_hash_fail:>6} | {total - table_hash_tests:>13} |")
+            if row_hash_tests > 0:
+                lines.append(f"| {'Row Samples':<24} | {row_hash_tests:>7} | {row_hash_pass:>7} | {row_hash_fail:>6} | {total - row_hash_tests:>13} |")
+            if lob_tests > 0:
+                lines.append(f"| {'LOB Sizes':<24} | {lob_tests:>7} | {lob_pass:>7} | {lob_fail:>6} | {total - lob_tests:>13} |")
             if cols_tests > 0:
-                lines.append(f"| {'Column Counts':<24} | {cols_tests:>7} | {cols_pass:>7} | {cols_fail:>6} |")
+                lines.append(f"| {'Column Counts':<24} | {cols_tests:>7} | {cols_pass:>7} | {cols_fail:>6} | {total - cols_tests:>13} |")
             if idxs_tests > 0:
-                lines.append(f"| {'Index Counts':<24} | {idxs_tests:>7} | {idxs_pass:>7} | {idxs_fail:>6} |")
+                lines.append(f"| {'Index Counts':<24} | {idxs_tests:>7} | {idxs_pass:>7} | {idxs_fail:>6} | {total - idxs_tests:>13} |")
             if cons_tests > 0:
-                lines.append(f"| {'Constraint Counts':<24} | {cons_tests:>7} | {cons_pass:>7} | {cons_fail:>6} |")
+                lines.append(f"| {'Constraint Counts':<24} | {cons_tests:>7} | {cons_pass:>7} | {cons_fail:>6} | {total - cons_tests:>13} |")
+
+            if not_validated_count:
+                lines.append("")
+                lines.append(f"**{not_validated_count} of {total} table(s) could not be measured at all** - "
+                             f"marked `?` above. Not one check could be run against them, so this run says "
+                             f"nothing about whether they are correct; they are neither passed nor failed. "
+                             f"The reason per table is in the validation_message column of "
+                             f"{self.config_parser.get_validation_tables_name()} and in the log.")
 
             final_summary = "\n" + "\n".join(lines)
             if val_logger:

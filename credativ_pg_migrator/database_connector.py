@@ -14,7 +14,20 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import re
 from abc import ABC, abstractmethod
+
+def first_line(error):
+    """
+    The first line of an error, for a message which has to stay readable.
+
+    The parse errors of sqlglot carry the offending statement and terminal escape sequences
+    behind their first line, and those belong in the log at DEBUG level, not in the comment
+    block of a file a developer reads.
+    """
+    text = re.sub(r'\x1b\[[0-9;]*m', '', str(error)).strip()
+    return text.splitlines()[0].strip() if text else repr(error)
+
 
 class DatabaseConnector(ABC):
     """
@@ -522,6 +535,81 @@ class DatabaseConnector(ABC):
             else:
                 pos = open_paren_idx + 1
         return sql_str
+
+    def sql_without_literals_and_comments(self, code):
+        """
+        The converted statement with everything which is not SQL blanked out - the string
+        literals, the quoted identifiers and the comments. A function name written in the
+        comment above a statement, or in the text of a condition, is not a call.
+        """
+        if not code:
+            return code
+        masked = list(code)
+        index = 0
+        while index < len(code):
+            character = code[index]
+            if character in ("'", '"'):
+                end = index + 1
+                while end < len(code):
+                    if code[end] == character:
+                        if end + 1 < len(code) and code[end + 1] == character:
+                            end += 2
+                            continue
+                        end += 1
+                        break
+                    end += 1
+                for position in range(index, min(end, len(code))):
+                    masked[position] = ' '
+                index = end
+                continue
+            if code.startswith('/*', index):
+                end = code.find('*/', index + 2)
+                end = len(code) if end == -1 else end + 2
+                for position in range(index, end):
+                    masked[position] = ' '
+                index = end
+                continue
+            if code.startswith('--', index) or code.startswith('#', index):
+                end = code.find('\n', index)
+                end = len(code) if end == -1 else end
+                for position in range(index, end):
+                    masked[position] = ' '
+                index = end
+                continue
+            index += 1
+        return ''.join(masked)
+
+    def apply_remote_objects_substitution(self, code: str):
+        """
+        The names of `remote_objects_substitution` replaced by the names they stand for.
+
+        A statement of an application reaches the same database links and four part names the
+        query of a view does, so it is given the same substitution list from the same key of
+        the configuration. Returns (code, applied) - the second is what really fired, which the
+        query conversion writes into the block of the statement: a query which now reads
+        another object than the one its text names is something the developer has to be told.
+
+        It runs on the text of the source dialect, before anything parses it, which is where
+        the view path of sybase_ase and of the two Db2 flavours which have it run it as well.
+        The query conversion applies it first, so their own pass finds nothing left to do
+        rather than doing it twice.
+        """
+        applied = []
+        if not code:
+            return code, applied
+        substitutions = self.config_parser.get_remote_objects_substitution()
+        if not substitutions:
+            return code, applied
+        iterator = substitutions.items() if isinstance(substitutions, dict) else substitutions
+        for source_object, target_object in iterator:
+            if not source_object or not target_object:
+                continue
+            replaced, count = re.subn(re.escape(source_object), target_object, code,
+                                      flags=re.IGNORECASE)
+            if count:
+                code = replaced
+                applied.append(f"{source_object} -> {target_object}")
+        return code, applied
 
     def apply_sql_functions_mapping(self, code: str, settings: dict) -> str:
         """
@@ -1275,6 +1363,274 @@ class DatabaseConnector(ABC):
         """
         pass
 
+    def prepare_query_for_parsing(self, query_code):
+        """
+        The statement of the source rewritten into something a SQL parser can read, without
+        converting anything.
+
+        Most sources need nothing here and the statement is answered as it is. A source whose
+        dialect holds constructs no parser models - the '*=' outer join of Sybase ASE is the
+        example - rewrites them into something equivalent which parses, so that the statement
+        can be classified before it is converted. A statement which cannot be parsed is
+        reported as one the migrator does not understand, and that answer must not be given
+        to a statement its own connector can convert.
+        """
+        return query_code
+
+    def query_conversion_supported(self):
+        """
+        Whether this connector can convert a bare statement of its source for the target -
+        the entry point convert_query_code() below.
+
+        The query conversion asks this before it reads a single file and stops when the
+        answer is no. It does not fall back to passing the statements through: a statement
+        of another dialect handed over unchanged would look like a conversion without being
+        one, which is the failure mode this migrator treats as a bug.
+        """
+        return False
+
+    def convert_query_code(self, settings: dict):
+        """
+        One bare statement of the source, converted for the target.
+
+        settings:
+            query_code          - the statement, with its bind parameters already replaced
+                                  by $1..$n, so that what arrives here is valid SQL
+            source_schema_name  - schema the statement names its objects in
+            target_schema_name  - schema those objects live in after the migration
+            target_db_type      - type of the target database
+            statement_id        - where the statement stands, for the messages
+
+        Returns a dictionary, not a string:
+            {'code': str, 'converted': bool, 'warnings': [str], 'error': str | None}
+
+        A converter which could not do the work says so in 'error' with 'converted': False,
+        and the statement is reported as NOT CONVERTED. It never answers with the text it was
+        given as if that were the conversion.
+        """
+        return {
+            'code': '',
+            'converted': False,
+            'warnings': [],
+            'error': f"query conversion is not implemented for {type(self).__name__}",
+        }
+
+    ## ------------------------------------------------------------------ the source test
+
+    ## §8.1 of development/archive/APPLICATION_QUERIES_CONVERSION_STRATEGY.md, P3-5 of
+    ## development/OPEN_ISSUES.md.
+    ##
+    ## What it is for: it separates "the migrator broke this query" from "this query was
+    ## already broken, or it reads an object the application creates at run time". A statement
+    ## which does not compile against the source it came from is not a conversion failure, and
+    ## saying so saves the reader an investigation.
+    ##
+    ## It is COMPILE ONLY and never `execute`. The source is a production database in every
+    ## engagement this tool is used in: nothing here reads a row of it or changes a thing in
+    ## it, and a mechanism which cannot promise that is not offered.
+
+    ## The marker the mechanism of this connector accepts in the place of a bind parameter -
+    ## one of parameters.SOURCE_TEST_STYLES, or None. None says the mechanism submits the
+    ## statement as a batch, which has no place for a parameter at all; a statement which
+    ## takes parameters is then not tested, and the block of the statement says why.
+    SOURCE_TEST_PARAMETER_STYLE = None
+
+    def source_test_uses_jdbc(self):
+        """
+        Whether this connector reaches its source over JDBC.
+
+        §8.1 puts prepareStatement first of all the mechanisms, and it is the one which needs
+        nothing of the dialect: the driver compiles the statement, resolves its names and its
+        types and runs none of it, and it takes the '?' of the standard, so a statement with
+        bind parameters can be tested as well. Five connectors of this migrator can be
+        configured with `jdbc`, which is why the route is written here once.
+        """
+        try:
+            return str(self.config_parser.get_connectivity(self.source_or_target) or '').lower() == 'jdbc'
+        except Exception:
+            return False
+
+    def source_test_native_mechanism(self):
+        """
+        The mechanism of this source itself - what is used when the connection is not a JDBC
+        one. None says this connector has none, and the source test is then not run.
+        """
+        return None
+
+    def source_test_mechanism(self):
+        """
+        The name of the mechanism this connector compiles a statement with, or None.
+
+        The name is written into the output file next to the answer, because what a green
+        'OK' proves depends on which mechanism gave it: PREPARE resolves every name and every
+        type, EXPLAIN adds that a plan could be made, and a prepareStatement of JDBC may be
+        answered by the driver without reaching the server at all.
+        """
+        if self.source_test_uses_jdbc():
+            return 'JDBC prepareStatement'
+        return self.source_test_native_mechanism()
+
+    def source_test_parameter_style(self):
+        """
+        The marker the mechanism which will be used accepts, or None. JDBC takes the '?' of
+        the standard whatever the source is; everything else is the connector's own answer.
+        """
+        if self.source_test_uses_jdbc():
+            return 'qmark'
+        return self.SOURCE_TEST_PARAMETER_STYLE
+
+    def source_test_probe(self, sql, parameter_count=0):
+        """
+        The statements which compile `sql` on the source without running it, and the ones
+        which have to run afterwards whatever happened.
+
+        Returns (statements, cleanup). An entry of either list is the SQL as a string, or a
+        (sql, parameters) pair where the driver has to be given a value per marker. A
+        connector whose mechanism is not a statement at all - the parse call of a driver -
+        overrides test_query_on_source() instead.
+        """
+        return [], []
+
+    def test_query_on_source(self, settings):
+        """
+        Compile one statement against the source, and answer what the source said.
+
+        settings:
+            query_code       - the statement, its bind parameters already written in the style
+                               source_test_parameter_style() names
+            parameter_count  - how many bind parameters it takes
+
+        Returns (outcome, message). 'OK' is the source accepting the statement, 'FAILED' the
+        source refusing it - which is the answer worth having, because it says the statement
+        was already broken before the migrator saw it. 'ERROR' is this test not working, which
+        says nothing about the statement and must not be read as if it did. 'not run' is a
+        connector which has no such mechanism.
+        """
+        if self.source_test_uses_jdbc():
+            return self.source_test_over_jdbc(settings)
+
+        mechanism = self.source_test_mechanism()
+        if not mechanism:
+            return ('not run',
+                    f"{type(self).__name__} has no way of compiling a statement on the source "
+                    f"without running it")
+
+        statements, cleanup = self.source_test_probe(settings['query_code'],
+                                                     settings.get('parameter_count', 0))
+        if not statements:
+            return 'not run', f"{mechanism} was given nothing to send"
+
+        cursor = None
+        try:
+            cursor = self.source_test_connection().cursor()
+        except Exception as e:
+            ## the connection is not usable - it is dropped, so that the next statement opens
+            ## a fresh one instead of asking a dead one over and over
+            self.close_source_test_connection()
+            return 'ERROR', f"the source could not be asked: {first_line(e)}"
+
+        try:
+            try:
+                for statement in statements:
+                    self.run_source_test_statement(cursor, statement)
+                return 'OK', f"{mechanism} on the source"
+            except Exception as e:
+                return 'FAILED', first_line(e)
+            finally:
+                ## a mechanism which puts the session into a compile-only mode has to take it
+                ## out again whatever the statement did, or every statement behind it on the
+                ## same connection is silently answered with nothing
+                self.finish_source_test(cursor, cleanup)
+        finally:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+
+    @staticmethod
+    def run_source_test_statement(cursor, statement):
+        """One entry of a source test probe: SQL, or SQL with a value per bind marker."""
+        if isinstance(statement, tuple):
+            cursor.execute(statement[0], statement[1])
+        else:
+            cursor.execute(statement)
+
+    def finish_source_test(self, cursor, cleanup):
+        """
+        The statements which put the session back, run whatever happened before them. A
+        connection which cannot be put back is closed rather than being used again.
+        """
+        for statement in cleanup:
+            try:
+                self.run_source_test_statement(cursor, statement)
+            except Exception as e:
+                self.config_parser.print_log_message(
+                    'WARNING', f"{type(self).__name__}: test_query_on_source: the source "
+                               f"connection could not be put back with {statement!r}: "
+                               f"{first_line(e)}. It is closed instead, so that no statement "
+                               f"behind it runs in a session which is still compile-only.")
+                self.close_source_test_connection()
+                return
+
+    def source_test_connection(self):
+        """
+        The connection the source test uses: the one which is open, or a new one.
+
+        connect() opens a NEW connection in most connectors of this migrator and drops the
+        reference to the one it had, so calling it per statement would leave one connection
+        per statement standing on a production source. It is called only when there is none,
+        and the connection is dropped whenever it turns out not to be usable.
+        """
+        if getattr(self, 'connection', None) is None:
+            self.connect()
+        return self.connection
+
+    def close_source_test_connection(self):
+        """The connection dropped, so that the next statement opens a fresh one."""
+        try:
+            self.disconnect()
+        except Exception:
+            pass
+        self.connection = None
+
+    def jdbc_prepare_statement(self, sql):
+        """
+        `sql` compiled by the JDBC driver of this connection - §8.1 names this the first
+        choice wherever a connector holds one, because it resolves the names and the types
+        without running anything at all.
+
+        Raises when the statement does not compile, which is the answer the caller wants, and
+        raises AttributeError when this connection is not a JDBC one.
+        """
+        prepared = self.connection.jconn.prepareStatement(sql)
+        try:
+            return True
+        finally:
+            try:
+                prepared.close()
+            except Exception:
+                pass
+
+    def source_test_over_jdbc(self, settings):
+        """
+        test_query_on_source() for a connector whose connection is a JDBC one. It is written
+        once here because five connectors of this migrator can be configured with `jdbc`
+        connectivity and would otherwise each hold the same eight lines.
+        """
+        try:
+            self.source_test_connection()
+        except Exception as e:
+            self.close_source_test_connection()
+            return 'ERROR', f"the source could not be asked: {first_line(e)}"
+        try:
+            self.jdbc_prepare_statement(settings['query_code'])
+            return 'OK', 'JDBC prepareStatement on the source'
+        except AttributeError as e:
+            return 'ERROR', (f"this connection has no JDBC statement to prepare: "
+                             f"{first_line(e)}")
+        except Exception as e:
+            return 'FAILED', first_line(e)
+
     @abstractmethod
     def convert_view_code(self, settings: dict):
         """
@@ -1344,6 +1700,55 @@ class DatabaseConnector(ABC):
         Returns an integer if an identity is found, or None otherwise.
         """
         return None
+
+    ## ------------------------------------------------------------------------------------
+    ## What a connector cannot read, said apart from what a source does not have.
+    ##
+    ## A fetch which answers {} says "the source holds none of these", and five connectors
+    ## answered that for objects their sources certainly do hold - Db2 distinct types,
+    ## Informix DISTINCT and named ROW types, the user-defined data types of SQL Anywhere, the
+    ## rules of SQL Server which the Sybase ASE connector of this same migrator reads as
+    ## domains. The planner then wrote "No user defined types found" and the summary showed 0,
+    ## and a reader who takes the summary at its word migrates a schema which is missing the
+    ## objects nobody said were missing. P2-8 of development/OPEN_ISSUES.md.
+    ##
+    ## The two are separated by declaration, per connector and per kind of object:
+    ##
+    ##   OBJECT_KINDS_NOT_READ - the source has them and this connector does not read them,
+    ##                           with what is really there;
+    ##   OBJECT_KINDS_ABSENT   - the source does not have them at all, so {} is the truth.
+    ##
+    ## A kind which is in neither, and whose fetch is a stub, is refused by the tests: the
+    ## question has to be answered rather than left to the empty dictionary.
+    OBJECT_KINDS_NOT_READ = {}
+    OBJECT_KINDS_ABSENT = {}
+
+    ## ------------------------------------------------------------------------------------
+    ## What a routine of this source keeps of the names its body was written with.
+    ##
+    ## The statements inside a routine of the Transact-SQL family go through the connector's
+    ## statement converter one at a time, so every name in them is spelled the way the target
+    ## has it. The other sources hand the body over as text, and the names inside it are the
+    ## ones the routine of the source wrote - which works with `names_case_handling: lower`,
+    ## because PostgreSQL folds an undelimited name to lower case and that is what the
+    ## migration created, and fails with `upper` and with `keep`: the routine is created
+    ## without complaint and the first call answers `relation "orders" does not exist`.
+    ##
+    ## The sentence is empty for a connector whose bodies are converted. P3-2 of
+    ## development/OPEN_ISSUES.md, which asked for exactly this to be measured first.
+    ROUTINE_BODY_NAMES_NOT_CONVERTED = ''
+
+    def routine_body_names_not_converted(self):
+        """What the body of a routine of this source keeps of its own names, or '' if nothing."""
+        return self.ROUTINE_BODY_NAMES_NOT_CONVERTED
+
+    def object_kind_not_read(self, kind):
+        """What the source holds of this kind which this connector cannot read, or None."""
+        return self.OBJECT_KINDS_NOT_READ.get(kind)
+
+    def object_kind_is_absent(self, kind):
+        """Whether the source has no such objects at all, so an empty answer is the truth."""
+        return kind in self.OBJECT_KINDS_ABSENT
 
     @abstractmethod
     def fetch_user_defined_types(self, schema: str):
@@ -1555,15 +1960,25 @@ class DatabaseConnector(ABC):
         Fetch top foreign key dependencies in the specified schema.
         settings - dictionary with the following keys
             - source_schema_name: str - schema name of the tables to be checked
+
+        The ranking is by the number of foreign keys DEFINED ON a table - the tables at the
+        top are the ones which can only be loaded after everything they reference is there.
+        'dependencies' says what those keys point at, as text meant to be read in the log of
+        the pre-migration analysis; the entry does not carry the direction the other way
+        round, which get_top_n_tables() reports as 'ref_fk_count'.
+
         Returns a dictionary with the top foreign key dependencies.
         Each of these keys contains a dictionary with structure like this:
         { ordinary_number: {
             'owner': owner_name,
             'table_name': table_name,
-            'fk_count': foreign_key_count,
-            'dependencies: list of source tables that have foreign key references to this table
+            'fk_count': number of foreign keys defined on this table,
+            'dependencies': str - the keys of this table, one per '<table>.<column> ->
+                            <referenced table>.<column>' entry, separated by ', '
             }
         }
+        An empty dictionary means the source has no foreign keys, or that this connector
+        does not read them yet.
         """
         pass
 

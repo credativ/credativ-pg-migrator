@@ -1,6 +1,6 @@
 # credativ-pg-migrator Releases
 
-## 0.16.0 - 25.08.2026
+## 0.16.0rc2 - 26.08.2026
 
 - New step: conversion of the SELECT statements an application holds as text (`--convert-queries`), implemented for all twelve source databases. It reads files of statements, converts every SELECT with the same code which converts the views of the migration, tests the result against the migrated target and writes one output file per input file plus a machine readable sidecar. Only SELECT is ever converted, and a statement which cannot be converted is reported as such - nothing is handed back unchanged as if it had been converted
 - Query conversion: a converted statement names the objects the target really has - the schema, the table and column names `names_case_handling` and the aliases produced - and every object the statement names which the migration does not know is reported before the target answers with a bare `relation does not exist`

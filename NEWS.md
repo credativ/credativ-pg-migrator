@@ -20,7 +20,7 @@
 - Sybase ASE and MS SQL Server: procedure groups, cursors, the pseudo tables of a trigger, the `*=` outer joins of the old Transact-SQL, and a long round of repairs to the T-SQL parser
 - `names_case_handling` is applied to every name a migration creates - routines, triggers, the bodies of converted views and the statements of an application - and a run stops when the setting would make one target object out of two of the source
 - Data fidelity: a byte the assumed encoding cannot read is no longer deleted from the value (`migration.on_undecodable_bytes`), a functional index keeps its collation, and column defaults which used to be dropped without a word are carried over
-- The pre-migration analysis checks the PostgreSQL extensions the migrated objects need, the capabilities of the target and the foreign key dependencies of the source
+- The pre-migration analysis checks the PostgreSQL extensions the migrated objects need, the capabilities of the target, the foreign key dependencies of the source and the partitioning
 - The test suite is published with the repository - more than 2000 tests, none of which needs a database
 
 ## 0.15.0 - 03.07.2026

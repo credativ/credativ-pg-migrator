@@ -1,6 +1,6 @@
 # credativ-pg-migrator — test suite
 
-1010 test functions in 55 files. **No test in this directory needs a database, a driver
+1101 test functions in 59 files. **No test in this directory needs a database, a driver
 connection, or a network.** Everything that would talk to a server is either constructed
 with `Class.__new__(Class)` and fed a fake config, or replaced with `unittest.mock`. A
 full run touches nothing outside the repository and finishes in seconds.
@@ -37,7 +37,7 @@ tests, and no test depends on the order of the others.
 | configuration & logging | `pyyaml`, `jsonschema`, `pytest` | the 5 `test_config_*` / `test_logging_*` / `test_object_*` files, and `test_schema_names.py` |
 | query conversion | `sqlglot`, `pytest` | the 6 `test_query_*` files and the `test_*_query_conversion.py` of Db2, Oracle and SQL Anywhere |
 | anonymization, Db2 CSV | nothing beyond the standard library | 3 files |
-| everything else | the package's own dependencies — `psycopg2`, `tabulate`, `jaydebeapi`, `pyodbc` | 21 files, `test_informix_query_conversion.py`, `test_mysql_query_conversion.py`, `test_ms_sql_query_conversion.py` and `test_sybase_query_conversion.py`, `test_tsql_outer_joins.py` and `test_oracle_outer_joins.py` among them |
+| everything else | the package's own dependencies — `psycopg2`, `tabulate`, `jaydebeapi`, `pyodbc` | 25 files, `test_informix_query_conversion.py`, `test_mysql_query_conversion.py`, `test_ms_sql_query_conversion.py` and `test_sybase_query_conversion.py`, `test_tsql_outer_joins.py`, `test_oracle_outer_joins.py`, `test_oracle_fk_dependencies.py`, `test_sqlite_query_conversion.py`, `test_postgresql_query_conversion.py` and `test_query_source_test.py` among them |
 
 The third group imports the connectors, which import their drivers at module level, so
 those files fail to **collect** if the drivers are absent — the message is
@@ -56,7 +56,11 @@ python3 -m pytest tests/ -q \
   --ignore=tests/test_sybase_rowcount_return.py  --ignore=tests/test_pg_session_settings.py \
   --ignore=tests/test_data_migration_limitation.py --ignore=tests/test_varchar_to_text.py \
   --ignore=tests/test_default_value_substitution_patterns.py \
-  --ignore=tests/test_sequence_protocol_columns.py
+  --ignore=tests/test_sequence_protocol_columns.py \
+  --ignore=tests/test_oracle_fk_dependencies.py \
+  --ignore=tests/test_sqlite_query_conversion.py \
+  --ignore=tests/test_postgresql_query_conversion.py \
+  --ignore=tests/test_query_source_test.py
 ```
 
 **Expected result: `545 passed, 6 skipped`** (13 files; the count is higher than the number
@@ -311,6 +315,25 @@ for constraints.
 
 **Covers.** A `POINT` delivered as WKB bytes and as a WKT string both convert to
 `(9.6, 50.6)` / `(13.404954, 52.520008)`; a spatial index is created `USING gist`.
+
+### `test_oracle_fk_dependencies.py` — 10 tests
+
+**Purpose.** The foreign key ranking of the pre-migration analysis, for Oracle. P3-4 of
+`development/OPEN_ISSUES.md`: `get_top_fk_dependencies()` returned `{}`, so an Oracle schema
+was surveyed as if it held no foreign keys, whatever it held.
+
+**Covers.** The ranking is by the keys defined **on** each table, most first and then by name
+so two runs read the same; both ends of every key are named, a composite one as a list; a
+referenced table of another schema and one removed by the filters are marked `[not migrated]`;
+a key whose referenced constraint this account cannot read still counts, and says so, because
+dropping it would make the count short by exactly the keys which fail later; a table the
+filters removed is not ranked at all; a failed read is reported at ERROR and does not raise,
+so the empty ranking cannot be mistaken for "no foreign keys".
+
+**Note.** `oracledb` is not a dependency of this migrator — it is installed by whoever migrates
+an Oracle database — and the connector imports it at module level. The file stubs the module
+when it is absent rather than skipping itself, so these 10 tests run everywhere. Nothing here
+reaches the driver: the connector is built with `__new__` and its cursor is a `MagicMock`.
 
 ### `test_charset_collate_stripping.py` — 7 tests
 
@@ -1110,6 +1133,62 @@ objects and W1 all reach the result, and that a run without a map converts as be
 
 **Expected result.** Passes. Nothing connects to anything: the protocol tables and the source
 connector are stubs.
+
+### `test_sqlite_query_conversion.py` — 41 tests
+
+**Purpose.** The query conversion of SQLite, one of the two sources P3-5 added. sqlglot reads
+SQLite and writes PostgreSQL, so the transpilation is not what is asserted here.
+
+**Covers.** The line between the three answers a transpilation can give. What it writes
+correctly, left alone. What it writes as valid PostgreSQL which answers something **else** —
+`total()` becoming `sum()` (0.0 over no rows against NULL), `random()` keeping its name and
+answering another range, `printf()` becoming a `format()` PostgreSQL really has, `changes()`
+becoming the literal `0` — every one of which runs on the target and passes its test, so every
+one of which is refused with the reason. That the refusals are read on the statement of the
+**source**, because the function mapping renames several of them and leaves nothing to
+recognise. What has no counterpart at all: ROWID (bare and qualified), the SQLite catalogue,
+`GLOB`, `MATCH`, `REGEXP`, `COLLATE NOCASE`, the PRAGMA table functions. The four warnings which
+survive a green target test, including the NULL ordering — read on the CONVERTED statement,
+because sqlglot writes the `NULLS` clause itself and warning about something the conversion has
+already done is how a warning earns being ignored. And that the view path goes through the same
+converter, and still keeps the text of the source for a query no parser can read.
+
+### `test_postgresql_query_conversion.py` — 22 tests
+
+**Purpose.** PostgreSQL to PostgreSQL, the other source P3-5 added and the one §7.1 calls
+trivial. There is no dialect to convert; what there is, is a migration into another database.
+
+**Covers.** A statement of the source, answered as it stands, with the schema left to the name
+map of §7.3. The system columns — `ctid`, `xmin`, `xmax`, `cmin`, `cmax`, `tableoid` — refused,
+because the migration inserted the rows again in an order of its own and every one of those
+values is another one on the target, while the target accepts the statement without a word.
+There is no name clash to fear: PostgreSQL refuses to create a user column of any of those
+names, which is asserted as the reason. `currval()` / `lastval()` with them. The four warnings —
+the catalogue, the session functions, a name inside a string literal, an explicit `COLLATE` —
+and that a plain statement carries none, because a warning on every statement is a warning
+nobody reads.
+
+### `test_query_source_test.py` — 64 tests
+
+**Purpose.** §8.1, built by P3-5: the migrator asks the SOURCE whether a statement was broken
+before it read it. The rule the whole feature stands on is that it is compile only — the source
+of a migration is a production database — so most of what looks like a list of strings here is
+really the assertion that nothing else was sent.
+
+**Covers.** **SQLite against a real database file**, created by the test: EXPLAIN answers the
+byte code and none of the rows (asserted over a table which holds one), it still refuses a
+column which is not there, and a statement with markers is compiled with NULL bound to each.
+That is the one source whose driver is in the standard library, and therefore the one place the
+whole route to a server's answer is proven without an engagement's infrastructure. The others at
+their statements: `PREPARE` inside a read only transaction which is rolled back even when the
+PREPARE failed; `SET NOEXEC ON` with the session taken back out whatever the statement did, and
+the connection dropped when it cannot be — a connection left compile-only answers everything
+behind it with nothing at all; `EXPLAIN` and never `EXPLAIN ANALYZE`; `Cursor.parse()` with
+nothing executed; and the JDBC `prepareStatement`, preferred over the mechanism of the source
+where both exist. Then the promises: a statement with parameters is not compiled with literals
+in their place, `ERROR` is not `FAILED`, the connection is opened once and not per statement, a
+refusal does not cost it, the run decides once whether the test can happen at all, and a
+connector which declares neither a mechanism nor a reason for having none fails the suite.
 
 ### `test_query_conversion_workflow.py` — 27 functions, 31 tests
 

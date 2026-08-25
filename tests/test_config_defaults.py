@@ -108,6 +108,7 @@ DEFAULT_READERS = {
     'query_conversion.statement_separator': 'get_query_conversion_statement_separator',
     'query_conversion.parameter_style': 'get_query_conversion_parameter_style',
     'query_conversion.parameter_output': 'get_query_conversion_parameter_output',
+    'query_conversion.source_test': 'get_query_conversion_source_test',
     'query_conversion.target_test': 'get_query_conversion_target_test',
     'query_conversion.timeout': 'get_query_conversion_timeout',
     'query_conversion.workers': 'get_query_conversion_workers',

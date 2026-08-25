@@ -382,6 +382,9 @@ def converter_with(name_map):
     made.messages = []
     made.print_log_message = lambda level, message: made.messages.append((level, str(message)))
     made.source_connection = lambda: SourceConnector()
+    ## what check_prerequisites() decides for a whole run - here: no source test at all, so
+    ## that what is asserted below is the name map and nothing behind it
+    made.source_test = ('off', None, 'query_conversion.source_test is off')
     made.test_on_target = lambda sql, has_parameters: ('not run', 'off', None)
     return made
 

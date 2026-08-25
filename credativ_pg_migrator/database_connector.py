@@ -1415,6 +1415,222 @@ class DatabaseConnector(ABC):
             'error': f"query conversion is not implemented for {type(self).__name__}",
         }
 
+    ## ------------------------------------------------------------------ the source test
+
+    ## §8.1 of development/archive/APPLICATION_QUERIES_CONVERSION_STRATEGY.md, P3-5 of
+    ## development/OPEN_ISSUES.md.
+    ##
+    ## What it is for: it separates "the migrator broke this query" from "this query was
+    ## already broken, or it reads an object the application creates at run time". A statement
+    ## which does not compile against the source it came from is not a conversion failure, and
+    ## saying so saves the reader an investigation.
+    ##
+    ## It is COMPILE ONLY and never `execute`. The source is a production database in every
+    ## engagement this tool is used in: nothing here reads a row of it or changes a thing in
+    ## it, and a mechanism which cannot promise that is not offered.
+
+    ## The marker the mechanism of this connector accepts in the place of a bind parameter -
+    ## one of parameters.SOURCE_TEST_STYLES, or None. None says the mechanism submits the
+    ## statement as a batch, which has no place for a parameter at all; a statement which
+    ## takes parameters is then not tested, and the block of the statement says why.
+    SOURCE_TEST_PARAMETER_STYLE = None
+
+    def source_test_uses_jdbc(self):
+        """
+        Whether this connector reaches its source over JDBC.
+
+        §8.1 puts prepareStatement first of all the mechanisms, and it is the one which needs
+        nothing of the dialect: the driver compiles the statement, resolves its names and its
+        types and runs none of it, and it takes the '?' of the standard, so a statement with
+        bind parameters can be tested as well. Five connectors of this migrator can be
+        configured with `jdbc`, which is why the route is written here once.
+        """
+        try:
+            return str(self.config_parser.get_connectivity(self.source_or_target) or '').lower() == 'jdbc'
+        except Exception:
+            return False
+
+    def source_test_native_mechanism(self):
+        """
+        The mechanism of this source itself - what is used when the connection is not a JDBC
+        one. None says this connector has none, and the source test is then not run.
+        """
+        return None
+
+    def source_test_mechanism(self):
+        """
+        The name of the mechanism this connector compiles a statement with, or None.
+
+        The name is written into the output file next to the answer, because what a green
+        'OK' proves depends on which mechanism gave it: PREPARE resolves every name and every
+        type, EXPLAIN adds that a plan could be made, and a prepareStatement of JDBC may be
+        answered by the driver without reaching the server at all.
+        """
+        if self.source_test_uses_jdbc():
+            return 'JDBC prepareStatement'
+        return self.source_test_native_mechanism()
+
+    def source_test_parameter_style(self):
+        """
+        The marker the mechanism which will be used accepts, or None. JDBC takes the '?' of
+        the standard whatever the source is; everything else is the connector's own answer.
+        """
+        if self.source_test_uses_jdbc():
+            return 'qmark'
+        return self.SOURCE_TEST_PARAMETER_STYLE
+
+    def source_test_probe(self, sql, parameter_count=0):
+        """
+        The statements which compile `sql` on the source without running it, and the ones
+        which have to run afterwards whatever happened.
+
+        Returns (statements, cleanup). An entry of either list is the SQL as a string, or a
+        (sql, parameters) pair where the driver has to be given a value per marker. A
+        connector whose mechanism is not a statement at all - the parse call of a driver -
+        overrides test_query_on_source() instead.
+        """
+        return [], []
+
+    def test_query_on_source(self, settings):
+        """
+        Compile one statement against the source, and answer what the source said.
+
+        settings:
+            query_code       - the statement, its bind parameters already written in the style
+                               source_test_parameter_style() names
+            parameter_count  - how many bind parameters it takes
+
+        Returns (outcome, message). 'OK' is the source accepting the statement, 'FAILED' the
+        source refusing it - which is the answer worth having, because it says the statement
+        was already broken before the migrator saw it. 'ERROR' is this test not working, which
+        says nothing about the statement and must not be read as if it did. 'not run' is a
+        connector which has no such mechanism.
+        """
+        if self.source_test_uses_jdbc():
+            return self.source_test_over_jdbc(settings)
+
+        mechanism = self.source_test_mechanism()
+        if not mechanism:
+            return ('not run',
+                    f"{type(self).__name__} has no way of compiling a statement on the source "
+                    f"without running it")
+
+        statements, cleanup = self.source_test_probe(settings['query_code'],
+                                                     settings.get('parameter_count', 0))
+        if not statements:
+            return 'not run', f"{mechanism} was given nothing to send"
+
+        cursor = None
+        try:
+            cursor = self.source_test_connection().cursor()
+        except Exception as e:
+            ## the connection is not usable - it is dropped, so that the next statement opens
+            ## a fresh one instead of asking a dead one over and over
+            self.close_source_test_connection()
+            return 'ERROR', f"the source could not be asked: {first_line(e)}"
+
+        try:
+            try:
+                for statement in statements:
+                    self.run_source_test_statement(cursor, statement)
+                return 'OK', f"{mechanism} on the source"
+            except Exception as e:
+                return 'FAILED', first_line(e)
+            finally:
+                ## a mechanism which puts the session into a compile-only mode has to take it
+                ## out again whatever the statement did, or every statement behind it on the
+                ## same connection is silently answered with nothing
+                self.finish_source_test(cursor, cleanup)
+        finally:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+
+    @staticmethod
+    def run_source_test_statement(cursor, statement):
+        """One entry of a source test probe: SQL, or SQL with a value per bind marker."""
+        if isinstance(statement, tuple):
+            cursor.execute(statement[0], statement[1])
+        else:
+            cursor.execute(statement)
+
+    def finish_source_test(self, cursor, cleanup):
+        """
+        The statements which put the session back, run whatever happened before them. A
+        connection which cannot be put back is closed rather than being used again.
+        """
+        for statement in cleanup:
+            try:
+                self.run_source_test_statement(cursor, statement)
+            except Exception as e:
+                self.config_parser.print_log_message(
+                    'WARNING', f"{type(self).__name__}: test_query_on_source: the source "
+                               f"connection could not be put back with {statement!r}: "
+                               f"{first_line(e)}. It is closed instead, so that no statement "
+                               f"behind it runs in a session which is still compile-only.")
+                self.close_source_test_connection()
+                return
+
+    def source_test_connection(self):
+        """
+        The connection the source test uses: the one which is open, or a new one.
+
+        connect() opens a NEW connection in most connectors of this migrator and drops the
+        reference to the one it had, so calling it per statement would leave one connection
+        per statement standing on a production source. It is called only when there is none,
+        and the connection is dropped whenever it turns out not to be usable.
+        """
+        if getattr(self, 'connection', None) is None:
+            self.connect()
+        return self.connection
+
+    def close_source_test_connection(self):
+        """The connection dropped, so that the next statement opens a fresh one."""
+        try:
+            self.disconnect()
+        except Exception:
+            pass
+        self.connection = None
+
+    def jdbc_prepare_statement(self, sql):
+        """
+        `sql` compiled by the JDBC driver of this connection - §8.1 names this the first
+        choice wherever a connector holds one, because it resolves the names and the types
+        without running anything at all.
+
+        Raises when the statement does not compile, which is the answer the caller wants, and
+        raises AttributeError when this connection is not a JDBC one.
+        """
+        prepared = self.connection.jconn.prepareStatement(sql)
+        try:
+            return True
+        finally:
+            try:
+                prepared.close()
+            except Exception:
+                pass
+
+    def source_test_over_jdbc(self, settings):
+        """
+        test_query_on_source() for a connector whose connection is a JDBC one. It is written
+        once here because five connectors of this migrator can be configured with `jdbc`
+        connectivity and would otherwise each hold the same eight lines.
+        """
+        try:
+            self.source_test_connection()
+        except Exception as e:
+            self.close_source_test_connection()
+            return 'ERROR', f"the source could not be asked: {first_line(e)}"
+        try:
+            self.jdbc_prepare_statement(settings['query_code'])
+            return 'OK', 'JDBC prepareStatement on the source'
+        except AttributeError as e:
+            return 'ERROR', (f"this connection has no JDBC statement to prepare: "
+                             f"{first_line(e)}")
+        except Exception as e:
+            return 'FAILED', first_line(e)
+
     @abstractmethod
     def convert_view_code(self, settings: dict):
         """
@@ -1744,15 +1960,25 @@ class DatabaseConnector(ABC):
         Fetch top foreign key dependencies in the specified schema.
         settings - dictionary with the following keys
             - source_schema_name: str - schema name of the tables to be checked
+
+        The ranking is by the number of foreign keys DEFINED ON a table - the tables at the
+        top are the ones which can only be loaded after everything they reference is there.
+        'dependencies' says what those keys point at, as text meant to be read in the log of
+        the pre-migration analysis; the entry does not carry the direction the other way
+        round, which get_top_n_tables() reports as 'ref_fk_count'.
+
         Returns a dictionary with the top foreign key dependencies.
         Each of these keys contains a dictionary with structure like this:
         { ordinary_number: {
             'owner': owner_name,
             'table_name': table_name,
-            'fk_count': foreign_key_count,
-            'dependencies: list of source tables that have foreign key references to this table
+            'fk_count': number of foreign keys defined on this table,
+            'dependencies': str - the keys of this table, one per '<table>.<column> ->
+                            <referenced table>.<column>' entry, separated by ', '
             }
         }
+        An empty dictionary means the source has no foreign keys, or that this connector
+        does not read them yet.
         """
         pass
 

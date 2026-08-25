@@ -206,6 +206,25 @@ class MySqlQueryConversion:
     connectors cannot answer the same statement differently.
     """
 
+    ## The source test of §8.1. EXPLAIN of MySQL and MariaDB compiles the statement, resolves
+    ## every table and every column and produces a plan without running the query - it is
+    ## EXPLAIN ANALYZE which runs it, and that is never sent.
+    SOURCE_TEST_PARAMETER_STYLE = None
+
+    def source_test_native_mechanism(self):
+        return 'EXPLAIN'
+
+    def source_test_probe(self, sql, parameter_count=0):
+        body = (sql or '').rstrip().rstrip(';')
+        if not body:
+            return [], []
+        if parameter_count:
+            ## EXPLAIN takes the statement as text and a '?' in it is a syntax error; a
+            ## literal written in its place would compile another statement than the
+            ## application runs
+            return [], []
+        return [f"EXPLAIN {body}"], []
+
     def query_conversion_supported(self):
         return True
 

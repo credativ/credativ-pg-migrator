@@ -114,6 +114,10 @@ class QueryConverter:
         ## protocol tables of the migration which has already run, and shared by the workers:
         ## it is not written to after it is built.
         self.name_map = None
+        ## §8.1 - what the source test can do in this run, decided once in
+        ## check_prerequisites(): (level, mechanism, reason). A source which cannot be reached
+        ## or has no compile-only mechanism is said once and not per statement.
+        self.source_test = ('off', None, 'query_conversion.source_test is off')
 
     ## ------------------------------------------------------------------ connectors
 
@@ -232,7 +236,56 @@ class QueryConverter:
                 f"conversion tests every converted statement against the migrated objects, so it "
                 f"is run after a migration, not before one.")
         self.print_log_message('INFO', f"Target schema \"{self.target_schema}\" holds {objects} table(s) and view(s).")
+        self.check_source_test(source_connection)
         self.check_protocol_matches_config()
+
+    def check_source_test(self, source_connection):
+        """
+        §8.1 - whether every statement can be compiled against the source before it is
+        converted, decided once for the whole run.
+
+        Three things can stop it, and each of them is said here rather than per statement: it
+        was switched off, the connector of this source has no way of compiling a statement
+        without running it, or the source cannot be reached. None of them ends the run - the
+        conversion and the target test do not need the source - but a run whose source test
+        did not happen must not look like one whose source test passed, so the reason is
+        written into the header of every output file and into every block.
+        """
+        level = self.config_parser.get_query_conversion_source_test()
+        if level == 'off':
+            self.source_test = ('off', None, 'query_conversion.source_test is off')
+            self.print_log_message('INFO', 'query_conversion: the statements are not compiled '
+                                           'against the source - source_test is off.')
+            return
+
+        mechanism = source_connection.source_test_mechanism()
+        if not mechanism:
+            reason = (f"the connector of {self.source_db_type} has no way of compiling a "
+                      f"statement on the source without running it")
+            self.source_test = ('off', None, reason)
+            self.print_log_message('WARNING', f"query_conversion: source_test is on and {reason}. "
+                                              f"Every statement is reported as 'not run' - which "
+                                              f"is not the same as one the source accepted.")
+            return
+
+        ## the source is a production database: it is asked one harmless question here, so
+        ## that a source which cannot be reached is reported once instead of once per
+        ## statement, each of them reading like a broken query
+        try:
+            source_connection.connect()
+        except Exception as e:
+            reason = f"the source could not be reached: {first_line(e)}"
+            self.source_test = ('off', None, reason)
+            self.print_log_message('WARNING', f"query_conversion: source_test is on and {reason}. "
+                                              f"The conversion and the target test do not need "
+                                              f"the source, so the run goes on without it.")
+            return
+
+        self.source_test = (level, mechanism, '')
+        self.print_log_message(
+            'INFO', f"query_conversion: every statement is compiled against the source with "
+                    f"{mechanism} before it is converted. Nothing is executed there and nothing "
+                    f"is written.")
 
     def check_protocol_matches_config(self):
         """
@@ -381,11 +434,39 @@ class QueryConverter:
         if classification.verdict == 'unparsed':
             result.status = NOT_CONVERTED
             result.reason = classification.reason
+            ## §7 runs the source test behind the gates, which would leave this statement
+            ## without one - and this is the case where it answers the question the reader
+            ## really has. "The migrator cannot read it" and "the source cannot read it
+            ## either" send them after entirely different things, and the second answer costs
+            ## one compile of a statement which has already passed the gates on writing.
+            result.source_test = self.test_on_source(bind_parameters)
             self.print_log_message('WARNING', f"query_conversion: [{statement.ordinal}] {statement.location}: not converted - {classification.reason}")
+            if result.source_test[0] == 'FAILED':
+                self.print_log_message(
+                    'INFO', f"query_conversion: [{statement.ordinal}] {statement.location}: the "
+                            f"source does not accept this statement either - {result.source_test[1]}")
             return result
         result.warnings.extend(classification.warnings)
         result.warnings.extend(parameter_warnings)
         result.parameters_line = bind_parameters.describe()
+
+        ## §8.1 - the statement, compiled against the source it came from, before anything of
+        ## the migrator has touched it. It is the one answer nothing on the target side can
+        ## give: a statement which the source itself refuses was already broken, or reads an
+        ## object the application creates at run time, and reporting that as a conversion
+        ## failure sends the reader after the wrong thing.
+        result.source_test = self.test_on_source(bind_parameters)
+        if result.source_test[0] == 'FAILED':
+            ## The status of a statement says what became of the CONVERSION, and a statement
+            ## which converts cleanly is CONVERTED whatever the source thinks of it. So the
+            ## finding goes where the reader of the block looks: without it, a query the
+            ## source itself refuses reads as one this step is answering for.
+            result.warnings.append(
+                f"the SOURCE refuses this statement as well: {result.source_test[1]}. It was "
+                f"converted all the same, and what comes out is what the statement of the "
+                f"application says - but the defect is in the statement, and not something "
+                f"the conversion did to it. A statement which reads an object the application "
+                f"creates at run time answers this way too")
 
         ## §7.4 - the same substitution list the view path is given, from the same key of the
         ## configuration. It was applied by three connectors of the ten inside their own body
@@ -508,6 +589,45 @@ class QueryConverter:
             result.status = CONVERTED
         return result
 
+    def test_on_source(self, bind_parameters):
+        """
+        Ask the source whether the statement compiles there. Returns (outcome, message).
+
+        Nothing is executed and nothing is written: the mechanisms are PREPARE, EXPLAIN, SET
+        NOEXEC ON and the prepareStatement of a JDBC driver, and §8.1 forbids `execute`
+        outright - the source of a migration is a production database.
+
+        The statement is sent with the markers the mechanism accepts. A mechanism which
+        submits the statement as a batch has no place for a marker at all, and a statement
+        with bind parameters is then reported as one which was not tested rather than being
+        compiled with literals in their place - that would be a different statement.
+        """
+        level, mechanism, reason = self.source_test
+        if level == 'off':
+            return 'not run', reason
+
+        source_connection = self.source_connection()
+        style = source_connection.source_test_parameter_style()
+        if bind_parameters.count and style is None:
+            return ('not run',
+                    f"{mechanism} takes the statement as text, which has no place for a bind "
+                    f"parameter - this statement takes {bind_parameters.count}")
+
+        try:
+            sql = parameters_module.to_source_test_style(bind_parameters.statement, style or 'numbered')
+        except ValueError as e:
+            return 'ERROR', first_line(e)
+
+        try:
+            return source_connection.test_query_on_source({
+                'query_code': sql,
+                'parameter_count': bind_parameters.count,
+            })
+        except Exception as e:
+            ## a mechanism which throws where it was meant to answer says nothing about the
+            ## statement, and must not be recorded as if it had
+            return 'ERROR', f"the source test ended with an error: {first_line(e)}"
+
     def test_on_target(self, sql, has_parameters):
         """
         Ask the target whether the converted statement is valid there. Returns
@@ -608,7 +728,7 @@ class QueryConverter:
             'target_schema': self.target_schema,
             'notes': [
                 self.name_map.describe(),
-                'source test: not run - the statements are never sent to the source database',
+                self.describe_source_test(),
                 f"target test: {self.config_parser.get_query_conversion_target_test()} - inside a read only "
                 f"transaction which is rolled back",
             ],
@@ -769,6 +889,14 @@ class QueryConverter:
         except Exception as e:
             self.print_log_message('WARNING', f"query_conversion: the run could not be recorded in the "
                                               f"protocol table: {e}")
+
+    def describe_source_test(self):
+        """The line about the source test which stands in the header of every output file."""
+        level, mechanism, reason = self.source_test
+        if level == 'off':
+            return f"source test: not run - {reason}"
+        return (f"source test: {mechanism} - every statement is compiled on the source and "
+                f"none of them is executed there")
 
     def print_log_message(self, level, message):
         self.config_parser.print_log_message(level, message)

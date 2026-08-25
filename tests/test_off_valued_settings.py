@@ -3,10 +3,10 @@
 The settings whose values include the word 'off', written the way they read best.
 
 The configuration is read with PyYAML, which follows YAML 1.1: an unquoted off, on, yes and
-no are booleans there, not the words they were written as. Three settings take 'off' -
-migration.validate_objects, query_conversion.target_test and query_conversion.output.sidecar
-- so all three have to read False as 'off', or the documented value stops the run at the
-start with "False is not one of 'off', 'parse', 'explain'".
+no are booleans there, not the words they were written as. Four settings take 'off' -
+migration.validate_objects, query_conversion.source_test, query_conversion.target_test and
+query_conversion.output.sidecar - so all four have to read False as 'off', or the documented
+value stops the run at the start with "False is not one of 'off', 'parse', 'explain'".
 
 The configuration is written as text here, not dumped from a dict: yaml.safe_dump quotes
 'off' by itself, which is exactly the trap this file is about.
@@ -75,6 +75,47 @@ def test_yaml_really_does_read_an_unquoted_off_as_false():
     assert yaml.safe_load('a: off')['a'] is False
     assert yaml.safe_load('a: on')['a'] is True
     assert yaml.safe_load('a: "off"')['a'] == 'off'
+
+
+# --------------------------------------------------------------------------------------
+# query_conversion.source_test
+
+
+@pytest.mark.parametrize('written, read_as', [
+    ('off', 'off'),          # the boolean False after YAML 1.1
+    ('"off"', 'off'),
+    ('no', 'off'),
+    ('false', 'off'),
+    ('', 'off'),             # a key left empty asks for nothing
+    ('prepare', 'prepare'),
+    ('PREPARE', 'prepare'),
+    ('parse', 'prepare'),    # the verb the mechanisms are named after
+    ('on', 'prepare'),       # the boolean True: the value it has when it is on
+    ('true', 'prepare'),
+])
+def test_source_test_reads_the_word_that_was_written(tmp_path, written, read_as):
+    parser = parser_for(tmp_path, f"query_conversion:\n  enabled: true\n  source_test: {written}\n")
+    assert parser.get_query_conversion_source_test() == read_as
+
+
+def test_source_test_defaults_to_prepare_when_it_is_not_written(tmp_path):
+    """
+    §8.1 asks for it on by default: a statement which does not compile against the source it
+    came from is not a conversion failure, and a run which does not ask cannot say so. It
+    costs nothing where the connector of the source has no mechanism - the statement is
+    reported as 'not run' with the reason and nothing is sent anywhere.
+    """
+    parser = parser_for(tmp_path, "query_conversion:\n  enabled: true\n")
+    assert parser.get_query_conversion_source_test() == 'prepare'
+
+
+def test_execute_is_not_a_value_the_source_test_takes(tmp_path):
+    """
+    §8.1: never `execute`. The source is a production database in every engagement this tool
+    is used in, and the configuration must not offer a way of running a statement against it.
+    """
+    with pytest.raises(ValueError, match='source_test'):
+        parser_for(tmp_path, "query_conversion:\n  enabled: true\n  source_test: execute\n")
 
 
 # --------------------------------------------------------------------------------------
@@ -171,9 +212,11 @@ def test_an_unquoted_off_does_not_stop_the_run(tmp_path):
     was before the aliases were added."""
     parser = parser_for(tmp_path, "query_conversion:\n"
                                   "  enabled: true\n"
+                                  "  source_test: off\n"
                                   "  target_test: off\n"
                                   "  output:\n"
                                   "    sidecar: off\n")
+    assert parser.get_query_conversion_source_test() == 'off'
     assert parser.get_query_conversion_target_test() == 'off'
     assert parser.get_query_conversion_output_sidecar() == 'off'
 

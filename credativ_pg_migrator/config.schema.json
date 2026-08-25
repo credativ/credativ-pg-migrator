@@ -1416,6 +1416,51 @@
           "default": "original",
           "description": "How the markers are written back into the converted statement. 'original' gives back what the application holds today, 'numeric' writes $1..$n for an application which is being ported to a PostgreSQL driver at the same time."
         },
+        "source_test": {
+          "default": "prepare",
+          "description": "Whether every statement is compiled against the SOURCE database before it is converted. It separates a statement the migrator could not convert from one which was already broken, or which reads an object the application creates at run time - an answer nothing on the target side can give. It is COMPILE ONLY and never executes: PREPARE, EXPLAIN, SET NOEXEC ON or the prepareStatement of the JDBC driver, whichever the connector of the source has; a source whose connector has none reports 'not run' and the run goes on. 'off' does not connect to the source at all. Read case-insensitively; false and null are accepted as 'off', true as 'prepare'.",
+          "anyOf": [
+            {
+              "title": "standard values",
+              "description": "The values to use. 'off', 'prepare'.",
+              "enum": [
+                "off",
+                "prepare"
+              ]
+            },
+            {
+              "title": "accepted aliases",
+              "description": "Synonyms accepted for compatibility, each read as the standard value it stands for. Prefer the standard value. The configuration is read with PyYAML, which follows YAML 1.1, so an unquoted off is the boolean false and an unquoted on is true: false and null are read as 'off', true as 'prepare'.",
+              "enum": [
+                "false",
+                "no",
+                "none",
+                "on",
+                "parse",
+                "skip",
+                "true",
+                "yes",
+                true,
+                false,
+                null
+              ]
+            }
+          ],
+          "x-standard-values": [
+            "off",
+            "prepare"
+          ],
+          "x-aliases": {
+            "true": "prepare",
+            "yes": "prepare",
+            "on": "prepare",
+            "parse": "prepare",
+            "false": "off",
+            "no": "off",
+            "none": "off",
+            "skip": "off"
+          }
+        },
         "target_test": {
           "default": "explain",
           "description": "How much of the converted statement is proven against the target. 'parse' sends PREPARE - syntax, every table, column and function, and the types. 'explain' adds that a plan can be produced. Both run inside a read only transaction which is rolled back; neither reads any data. A statement with bind parameters is always tested with PREPARE, because EXPLAIN of one is refused by PostgreSQL as well. Read case-insensitively; false and null are accepted as 'off', true as 'explain'.",
@@ -1570,7 +1615,9 @@
         "mysql",
         "mariadb",
         "oracle",
-        "sql_anywhere"
+        "sql_anywhere",
+        "sqlite",
+        "postgresql"
       ]
     },
     "mapping": {

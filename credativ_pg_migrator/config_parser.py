@@ -61,6 +61,7 @@ class ConfigParser:
         ('migration', 'on_undecodable_bytes'),
         ('migration', 'packages_as'),
         ('migration', 'validate_objects'),
+        ('query_conversion', 'source_test'),
         ('query_conversion', 'target_test'),
         ('query_conversion', 'output', 'sidecar'),
     )
@@ -1183,6 +1184,15 @@ class ConfigParser:
     def get_query_conversion_parameter_output(self):
         return self.get_query_conversion_config().get('parameter_output', 'original')
 
+    def get_query_conversion_source_test(self):
+        # 'off', written unquoted, reaches this as False - see resolve_off_on_value().
+        settings = self.get_query_conversion_config()
+        if 'source_test' not in settings:
+            return 'prepare'
+        return self.resolve_off_on_value(settings.get('source_test'),
+                                         self.QUERY_CONVERSION_SOURCE_TEST_STANDARD,
+                                         self.QUERY_CONVERSION_SOURCE_TEST_ALIASES, 'prepare')
+
     def get_query_conversion_target_test(self):
         # 'off', written unquoted, reaches this as False - see resolve_off_on_value().
         settings = self.get_query_conversion_config()
@@ -1316,6 +1326,15 @@ class ConfigParser:
 
     ## Both of these take the word 'off', which PyYAML reads as the boolean False - see
     ## resolve_off_on_value() for why they need aliases at all.
+    QUERY_CONVERSION_SOURCE_TEST_STANDARD = ('off', 'prepare')
+    QUERY_CONVERSION_SOURCE_TEST_ALIASES = {
+        'true': 'prepare', 'yes': 'prepare', 'on': 'prepare',
+        ## the strategy calls the level 'prepare' and the mechanisms behind it parse - a
+        ## configuration which wrote the verb rather than the value means the same thing
+        'parse': 'prepare',
+        'false': 'off', 'no': 'off', 'none': 'off', 'skip': 'off',
+    }
+
     QUERY_CONVERSION_TARGET_TEST_STANDARD = ('off', 'parse', 'explain')
     QUERY_CONVERSION_TARGET_TEST_ALIASES = {
         'true': 'explain', 'yes': 'explain', 'on': 'explain',

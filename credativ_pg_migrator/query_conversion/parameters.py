@@ -232,6 +232,42 @@ def extract(text, parameter_style='auto'):
     return Parameters(style, markers, ''.join(numbered_pieces), ''.join(token_pieces)), warnings
 
 
+## The markers the mechanisms of the source test accept in the place of a bind parameter.
+## 'numbered' is $1..$n, which is what the statement already carries; 'qmark' is the '?' of
+## the SQL standard, which every driver of a prepared statement takes; 'oracle' is the :1..:n
+## python-oracledb binds by position. A mechanism which submits the statement as a batch -
+## SET NOEXEC ON, EXPLAIN - has no place for a marker at all and declares None.
+SOURCE_TEST_STYLES = ('numbered', 'qmark', 'oracle')
+
+
+def to_source_test_style(text, style):
+    """
+    The statement written with the markers one mechanism of the source test accepts.
+
+    It is given the statement as $1..$n and answers it in the style asked for. A $1 inside a
+    string literal or a comment is text and is left alone, which is what safe_regions() is
+    for - the same rule every other pass over a statement in this module follows.
+    """
+    if style == 'numbered':
+        return text
+    if style not in SOURCE_TEST_STYLES:
+        raise ValueError(
+            f"Unknown source test parameter style '{style}' - one of {', '.join(SOURCE_TEST_STYLES)}.")
+
+    def marker(match):
+        number = int(match.group(1))
+        return '?' if style == 'qmark' else f':{number}'
+
+    pieces = []
+    position = 0
+    for start, end in safe_regions(text):
+        pieces.append(text[position:start])
+        pieces.append(NUMBERED.sub(marker, text[start:end]))
+        position = end
+    pieces.append(text[position:])
+    return ''.join(pieces)
+
+
 def numbers_in_order(text):
     """The parameter numbers of a statement, in the order they stand in it, each once."""
     seen = []

@@ -2711,8 +2711,144 @@ class OracleConnector(OracleQueryConversion, DatabaseConnector):
 
         return top_tables
 
+    ## How many tables the foreign key ranking of the pre-migration analysis lists. The
+    ## report has no configuration key of its own - informix_connector, the only other
+    ## connector which produces it, fixes the same number, and the two reports are meant to
+    ## be the same size. Recorded in development/OPEN_ISSUES.md.
+    TOP_FK_DEPENDENCIES_COUNT = 10
+
+    ## Written on a dependency whose referenced table is not part of this migration: it
+    ## belongs to another schema, or a filter removed it. The foreign key cannot be created
+    ## on the target, and the load of the referencing table is what will say so.
+    FK_REFERENCE_NOT_MIGRATED = ' [not migrated]'
+
+    ## Written when the referenced constraint cannot be read from ALL_CONSTRAINTS. The
+    ## migrator reads foreign keys through the same join, so a key whose parent is invisible
+    ## to this account is not migrated either.
+    FK_REFERENCE_NOT_VISIBLE = '<not visible to this account>'
+
+    @staticmethod
+    def _fk_columns_text(columns):
+        """One column is written bare, several as a parenthesised list."""
+        if not columns:
+            return ''
+        return f"({columns})" if ',' in columns else f".{columns}"
+
     def get_top_fk_dependencies(self, settings):
+        """
+        The tables of the source schema which carry the most foreign keys, and what each of
+        those keys references.
+
+        The ranking counts the keys DEFINED ON a table, which is the direction the entry of
+        the CHANGELOG and informix_connector describe: the tables at the top are the ones
+        whose data can only be loaded once everything they reference is loaded, and the ones
+        whose load fails first when a referenced table was left out.
+
+        A referenced table which is not migrated - it lives in another schema, or
+        include_tables / exclude_tables removes it - is marked, because the key pointing at
+        it cannot be created on the target.
+        """
         top_fk_dependencies = {}
+        source_schema_name = settings.get('source_schema_name', None)
+        owner_bind = source_schema_name.upper() if source_schema_name else None
+        top_n = self.TOP_FK_DEPENDENCIES_COUNT
+        if top_n <= 0:
+            self.config_parser.print_log_message('DEBUG', "oracle_connector: get_top_fk_dependencies: The foreign key ranking is switched off, skipping this part.")
+            return top_fk_dependencies
+
+        ## One row per foreign key constraint, with the columns of both ends assembled. The
+        ## constraint name is selected although the report does not print it - it is what
+        ## makes the grain of the row visible, and it is in the GROUP BY for that reason.
+        ## The whole schema is read and ranked in Python: LISTAGG over every key of one table
+        ## raises ORA-01489 once the text passes 4000 characters, and the table filters live
+        ## in the configuration and not in the catalog.
+        ## The referenced constraint is joined OUTER on purpose - a key whose parent this
+        ## account cannot see still counts, and is named as such in the report, instead of
+        ## disappearing from a count the reader takes for the whole truth.
+        query = """
+            SELECT
+                fk_cons.owner AS fk_owner,
+                fk_cons.table_name AS fk_table_name,
+                fk_cons.constraint_name AS fk_constraint_name,
+                listagg(fk_col.column_name, ', ') WITHIN GROUP (ORDER BY fk_col.position) AS fk_columns,
+                pk_cons.owner AS pk_owner,
+                pk_cons.table_name AS pk_table_name,
+                listagg(pk_col.column_name, ', ') WITHIN GROUP (ORDER BY pk_col.position) AS pk_columns
+            FROM all_constraints fk_cons
+            JOIN all_cons_columns fk_col ON fk_cons.owner = fk_col.owner
+                                        AND fk_cons.constraint_name = fk_col.constraint_name
+                                        AND fk_cons.table_name = fk_col.table_name
+            LEFT JOIN all_constraints pk_cons ON fk_cons.r_owner = pk_cons.owner
+                                             AND fk_cons.r_constraint_name = pk_cons.constraint_name
+            LEFT JOIN all_cons_columns pk_col ON pk_cons.owner = pk_col.owner
+                                             AND pk_cons.constraint_name = pk_col.constraint_name
+                                             AND pk_cons.table_name = pk_col.table_name
+                                             AND fk_col.position = pk_col.position
+            WHERE fk_cons.constraint_type = 'R'
+              AND (:owner IS NULL OR fk_cons.owner = :owner)
+            GROUP BY fk_cons.owner, fk_cons.table_name, fk_cons.constraint_name,
+                     pk_cons.owner, pk_cons.table_name
+            ORDER BY fk_cons.owner, fk_cons.table_name, fk_cons.constraint_name
+        """
+        try:
+            self.config_parser.print_log_message('DEBUG2', f"oracle_connector: get_top_fk_dependencies: Reading the foreign keys of schema {source_schema_name} with query: {query}")
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query, {'owner': owner_bind})
+            constraints = cursor.fetchall()
+            cursor.close()
+            self.disconnect()
+        except Exception as e:
+            ## Reported and not raised: the pre-migration analysis is a read-only survey and
+            ## must not stop the migration. The message is what tells the reader that the
+            ## empty ranking below means "not read" and not "no foreign keys".
+            self.config_parser.print_log_message('ERROR', f"oracle_connector: get_top_fk_dependencies: The foreign keys of schema {source_schema_name} could not be read, the ranking is left out of the analysis: {e}")
+            return top_fk_dependencies
+
+        per_table = {}
+        for row in constraints:
+            fk_owner = (row[0] or '').strip()
+            fk_table_name = (row[1] or '').strip()
+            fk_columns = (row[3] or '').strip()
+            pk_owner = (row[4] or '').strip()
+            pk_table_name = (row[5] or '').strip()
+            pk_columns = (row[6] or '').strip()
+
+            if not self.config_parser.is_object_selected('table', fk_table_name)[0]:
+                continue
+
+            if not pk_table_name:
+                ## The text already says the key cannot be created, so it carries no
+                ## second marker.
+                referenced = self.FK_REFERENCE_NOT_VISIBLE
+                marker = ''
+            else:
+                referenced = pk_table_name if pk_owner == fk_owner else f"{pk_owner}.{pk_table_name}"
+                referenced += self._fk_columns_text(pk_columns)
+                migrated = (pk_owner == fk_owner
+                            and self.config_parser.is_object_selected('table', pk_table_name)[0])
+                marker = '' if migrated else self.FK_REFERENCE_NOT_MIGRATED
+
+            entry = per_table.setdefault((fk_owner, fk_table_name), {'fk_count': 0, 'dependencies': []})
+            entry['fk_count'] += 1
+            entry['dependencies'].append(
+                f"{fk_table_name}{self._fk_columns_text(fk_columns)} -> {referenced}{marker}")
+
+        ## Most keys first, and by name where the count is the same, so that two runs over
+        ## the same schema print the same order.
+        ranked = sorted(per_table.items(), key=lambda item: (-item[1]['fk_count'], item[0][0], item[0][1]))
+        for order_num, ((owner, table_name), entry) in enumerate(ranked[:top_n], start=1):
+            top_fk_dependencies[order_num] = {
+                'owner': owner,
+                'table_name': table_name,
+                'fk_count': entry['fk_count'],
+                'dependencies': ', '.join(entry['dependencies']),
+            }
+
+        if not top_fk_dependencies:
+            self.config_parser.print_log_message('DEBUG', f"oracle_connector: get_top_fk_dependencies: No foreign keys found in schema {source_schema_name}.")
+        else:
+            self.config_parser.print_log_message('DEBUG2', f"oracle_connector: get_top_fk_dependencies: Top {top_n} tables by foreign key count: {top_fk_dependencies}")
         return top_fk_dependencies
 
     def target_table_exists(self, target_schema_name, target_table_name):

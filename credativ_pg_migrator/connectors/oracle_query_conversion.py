@@ -133,6 +133,36 @@ class OracleQueryConversion:
     has - `config_parser` and `apply_sql_functions_mapping()` of the base class.
     """
 
+    ## The source test of §8.1. python-oracledb answers Cursor.parse(), which sends the
+    ## statement to the server to be parsed and does not execute it: the names are resolved
+    ## and the syntax is checked. EXPLAIN PLAN is deliberately not used - it WRITES a row
+    ## into PLAN_TABLE, and this step does not write to the source.
+    SOURCE_TEST_PARAMETER_STYLE = 'oracle'
+
+    def source_test_native_mechanism(self):
+        return 'Cursor.parse()'
+
+    def test_query_on_source(self, settings):
+        body = (settings.get('query_code') or '').rstrip().rstrip(';')
+        if not body:
+            return 'not run', 'Cursor.parse() was given nothing to send'
+        cursor = None
+        try:
+            cursor = self.source_test_connection().cursor()
+        except Exception as e:
+            self.close_source_test_connection()
+            return 'ERROR', f"the source could not be asked: {first_line(e)}"
+        try:
+            cursor.parse(body)
+            return 'OK', 'Cursor.parse() on the source'
+        except Exception as e:
+            return 'FAILED', first_line(e)
+        finally:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+
     def query_conversion_supported(self):
         return True
 

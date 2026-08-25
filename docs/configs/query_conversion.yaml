@@ -25,12 +25,12 @@
 # ONLY SELECT. A statement which writes is never converted and never sent to
 # either database. It stands in the output file as a comment, with the reason.
 #
-# SOURCES: implemented for MS SQL Server, Sybase ASE, Informix, DB2 (LUW, z/OS
-# and i), MySQL, MariaDB, Oracle and SQL Anywhere - every source the migrator
-# reads except PostgreSQL and SQLite. Those two stop the step at the start with
-# "query conversion is not implemented for ..." - the statements are not passed
-# through unconverted, because that would look like a conversion without being
-# one.
+# SOURCES: every source the migrator reads - MS SQL Server, Sybase ASE,
+# Informix, DB2 (LUW, z/OS and i), MySQL, MariaDB, Oracle, SQL Anywhere, SQLite
+# and PostgreSQL. A source whose connector could not convert a bare statement
+# would stop the step at the start with "query conversion is not implemented
+# for ..."; the statements are never passed through unconverted, because that
+# would look like a conversion without being one.
 # ============================================================================
 
 workflow: "standard"
@@ -115,6 +115,20 @@ query_conversion:
   # $1..$n instead, for an application being ported to a PostgreSQL driver at
   # the same time.
   parameter_output: "original"
+
+  # Whether every statement is first compiled against the SOURCE database.
+  # It is the one answer the target side cannot give: a statement the source
+  # itself refuses was already broken, or reads an object the application
+  # creates at run time, and that is not a failure of the conversion.
+  #   prepare - compile only, with whatever the connector of the source has:
+  #             PREPARE, EXPLAIN, SET NOEXEC ON, or the prepareStatement of a
+  #             JDBC driver. NOTHING is ever executed on the source and
+  #             nothing is written there.
+  #   off     - the source is not connected to at all
+  # A source whose connector has no such mechanism reports "not run" with the
+  # reason, and the run goes on: the conversion and the target test do not
+  # need the source.
+  source_test: "prepare"
 
   # How much of the converted statement is proven against the target. Write it
   # in quotes: YAML reads a bare off as the boolean false, and while the

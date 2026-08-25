@@ -427,6 +427,31 @@ def render_summary(all_results, context=None):
             lines.append(f"{count:>5} x {warning}")
         lines.append('')
 
+    ## ------------------------------------------------------------------ the source test
+    ## §8.1 - the statements the SOURCE refused are the ones which were broken before the
+    ## migrator read them, and they are counted apart from everything else here so that a
+    ## reader who sees "12 not converted" can see at once how many of the twelve are the
+    ## conversion's doing.
+    asked = [result for result in all_results if result.source_test[0] != 'not run']
+    refused_by_source = [result for result in all_results if result.source_test[0] == 'FAILED']
+    if asked:
+        outcomes = {}
+        for result in asked:
+            outcomes[result.source_test[0]] = outcomes.get(result.source_test[0], 0) + 1
+        lines.append('[ SOURCE TEST ]')
+        lines.append('-' * WIDTH)
+        lines.append(f"{len(asked)} statement(s) compiled against the source: "
+                     + ', '.join(f"{outcome} {count}" for outcome, count in sorted(outcomes.items())))
+        if refused_by_source:
+            lines.append(f"{len(refused_by_source)} of them the SOURCE itself refuses - those were "
+                         f"broken, or read an object the application makes at run time, before "
+                         f"this step saw them:")
+            for result in refused_by_source[:5]:
+                lines.append(f"  [{result.ordinal}] {shorten(result.source_test[1], WIDTH - 12)}")
+            if len(refused_by_source) > 5:
+                lines.append(f"  ... and {len(refused_by_source) - 5} more - the blocks name them all")
+        lines.append('')
+
     ## ------------------------------------------------------------------ the target test
     tested = [result for result in all_results if result.target_test_ms is not None]
     if tested:

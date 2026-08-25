@@ -1477,6 +1477,27 @@ class MsSQLConnector(DatabaseConnector):
         return query_outer_joins.mark_tsql_outer_joins(
             query_code, self.sql_without_literals_and_comments)
 
+    ## The source test of §8.1. SET NOEXEC ON makes the server compile every statement behind
+    ## it - the names are resolved and the plan is made - and run none of them. It is a
+    ## setting of the SESSION, so it is taken back in the cleanup whatever the statement did;
+    ## a connection which cannot be put back is closed instead of being used again, because
+    ## every statement of the migrator behind it would silently answer nothing.
+    SOURCE_TEST_PARAMETER_STYLE = None
+
+    def source_test_native_mechanism(self):
+        return 'SET NOEXEC ON'
+
+    def source_test_probe(self, sql, parameter_count=0):
+        body = (sql or '').rstrip().rstrip(';')
+        if not body:
+            return [], []
+        if parameter_count:
+            ## a bind marker has no place in a batch which is submitted as text, and putting
+            ## a literal in its place would compile another statement than the application
+            ## runs. Not tested, and the block of the statement says so.
+            return [], []
+        return ['SET NOEXEC ON', body], ['SET NOEXEC OFF']
+
     def query_conversion_supported(self):
         return True
 

@@ -533,6 +533,17 @@ class ConfigParser:
     def get_summary_config(self):
         return (self.config.get('summary') or {})
 
+    def get_summary_report_filename(self):
+        """
+        Where the detailed part of the closing summary is written, or None.
+
+        The `[ PARTITIONING ]` and `[ DETAILED MIGRATION REPORT ]` blocks name every object of
+        a migration rather than counting them, so they are as long as the schema is. Where a
+        file is named they go into it and the log says where; where none is, they are printed
+        with the rest of the summary. The same arrangement validation.report_filename has.
+        """
+        return self.get_summary_config().get('report_filename', None)
+
     def get_summary_top_migrated_tables(self):
         return self.get_summary_config().get('top_migrated_tables', 5)
 

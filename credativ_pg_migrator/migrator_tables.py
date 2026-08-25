@@ -21,6 +21,7 @@ import uuid
 import psycopg2
 import traceback
 from credativ_pg_migrator.constants import MigratorConstants
+from credativ_pg_migrator.database_connector import first_line
 from credativ_pg_migrator.protocol_comments import COMMON_COLUMN_COMMENTS, build_comments_catalog
 
 
@@ -2904,6 +2905,9 @@ class MigratorTables:
             target_table_sql TEXT,
             table_comment TEXT,
             create_partitions_sql TEXT,
+            partitioned BOOLEAN DEFAULT FALSE,
+            partitioned_by TEXT,
+            partitioning_columns TEXT,
             task_created TIMESTAMP DEFAULT clock_timestamp(),
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
@@ -2914,6 +2918,9 @@ class MigratorTables:
         self.config_parser.print_log_message('DEBUG', f"migrator_tables: create_table_for_tables: Created protocol table {table_name} for tables.")
 
     def create_table_for_source_table_partitioning(self):
+        ## source_root_table_name is the table at the top of the tree a level belongs to: a
+        ## scheme of more than one level is recorded one row per level, and without it the
+        ## rows of one table cannot be told from the rows of another.
         table_name = self.config_parser.get_protocol_name_source_table_partitioning()
         self.protocol_connection.execute_query(self.drop_table_sql.format(protocol_schema=self.protocol_schema, table_name=table_name))
         self.protocol_connection.execute_query(f"""
@@ -2923,6 +2930,8 @@ class MigratorTables:
             source_table_name TEXT,
             source_table_id INTEGER,
             source_table_partitioning_level INTEGER,
+            source_partitioning_method TEXT,
+            source_root_table_name TEXT,
             source_partition_columns TEXT,
             source_partition_ranges TEXT,
             task_created TIMESTAMP DEFAULT clock_timestamp(),
@@ -3479,6 +3488,17 @@ class MigratorTables:
             'target_table_sql': row[14],
             'table_comment': row[15],
             'create_partitions_sql': row[16],
+            ## what the target table is partitioned by, when it is - the planner has always
+            ## computed these three and insert_tables() dropped them, because the table had
+            ## no columns for them
+            'partitioned': row[17],
+            'partitioned_by': row[18],
+            'partitioning_columns': row[19],
+            'task_created': row[20],
+            'task_started': row[21],
+            'task_completed': row[22],
+            'success': row[23],
+            'message': row[24],
         }
 
     def decode_index_row(self, row):
@@ -3677,6 +3697,9 @@ class MigratorTables:
         target_table_sql = settings['target_table_sql']
         table_comment = settings['table_comment']
         create_partitions_sql = settings['create_partitions_sql']
+        partitioned = bool(settings.get('partitioned'))
+        partitioned_by = settings.get('partitioned_by') or ''
+        partitioning_columns = settings.get('partitioning_columns') or ''
 
         table_name = self.config_parser.get_protocol_name_tables()
         # NUL characters are cleaned before serializing - json.dumps() encodes them as an
@@ -3688,13 +3711,13 @@ class MigratorTables:
             INSERT INTO "{self.protocol_schema}"."{table_name}"
             (source_schema_name, source_table_name, source_table_id, source_columns, source_table_rows_all, source_table_rows_limited, source_table_description, source_table_sql,
             target_schema_name, target_table_name, target_alias_name, target_columns, target_table_rows, target_table_sql, table_comment,
-            create_partitions_sql)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            create_partitions_sql, partitioned, partitioned_by, partitioning_columns)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
         params = (source_schema_name, source_table_name, source_table_id, source_columns_str, source_table_rows_all, source_table_rows_limited, source_table_description, source_table_sql,
                   target_schema_name, target_table_name, target_alias_name, target_columns_str, target_table_rows, target_table_sql, table_comment,
-                  create_partitions_sql)
+                  create_partitions_sql, partitioned, partitioned_by, partitioning_columns)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -4796,6 +4819,272 @@ class MigratorTables:
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: generate_mapping_report: Failed to write report to {filename}: {e}")
 
+    ## The object kinds of the detailed report, in the order a migration creates them, with the
+    ## protocol table each is recorded in and how one of them is named in a report.
+    DETAILED_REPORT_KINDS = (
+        ('collation', 'get_protocol_name_collations', 'collation_name', None),
+        ('text search object', 'get_protocol_name_text_search', 'target_object_name', None),
+        ('user defined type', 'get_protocol_name_user_defined_types', 'target_type_name', None),
+        ('domain', 'get_protocol_name_domains', 'target_domain_name', None),
+        ('sequence', 'get_protocol_name_sequences', 'target_sequence_name', 'target_table_name'),
+        ('table', 'get_protocol_name_tables', 'target_table_name', None),
+        ('index', 'get_protocol_name_indexes', 'index_name', 'target_table_name'),
+        ('constraint', 'get_protocol_name_constraints', 'constraint_name', 'target_table_name'),
+        ('function / procedure', 'get_protocol_name_funcprocs', 'target_funcproc_name', None),
+        ('trigger', 'get_protocol_name_triggers', 'trigger_name', 'target_table_name'),
+        ('view', 'get_protocol_name_views', 'target_view_name', None),
+    )
+
+    def partitioning_summary_lines(self, cursor):
+        """
+        The `[ PARTITIONING ]` block - §5.6 of development/PARTITIONING_STRATEGY.md.
+
+        What each table was partitioned by on the source, what it is partitioned by on the
+        target, and how many partitions it was given. A table which is partitioned on the
+        source and NOT on the target is the line which matters most: something was dropped,
+        and the summary is where a reader looks for what a run changed.
+
+        Nothing is printed for a migration in which nothing is partitioned on either side -
+        an empty block is noise in a report which is read at the end of every run.
+        """
+        source_scheme = {}
+        try:
+            cursor.execute(f'''
+                SELECT coalesce(source_root_table_name, source_table_name), source_partitioning_method,
+                       source_partition_columns, source_partition_ranges,
+                       source_table_partitioning_level
+                FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_source_table_partitioning()}"
+                ORDER BY 1, source_table_partitioning_level, source_table_name
+            ''')
+            for root, method, columns, ranges, level in cursor.fetchall():
+                source_scheme.setdefault(root, []).append(
+                    {'method': method or '', 'columns': columns or '', 'ranges': ranges or '',
+                     'level': level})
+        except Exception:
+            self.protocol_connection.connection.rollback()
+
+        target_partitions = {}
+        try:
+            cursor.execute(f'''
+                SELECT target_table_name, target_partition_ranges
+                FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_target_table_partitioning()}"
+            ''')
+            for table_name, ranges in cursor.fetchall():
+                target_partitions[table_name] = len([part for part in (ranges or '').split(';') if part.strip()])
+        except Exception:
+            self.protocol_connection.connection.rollback()
+
+        rows = []
+        try:
+            cursor.execute(f'''
+                SELECT source_table_name, target_table_name, partitioned, partitioned_by,
+                       partitioning_columns, create_partitions_sql, success
+                FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_tables()}"
+                ORDER BY source_table_name
+            ''')
+            rows = cursor.fetchall()
+        except Exception:
+            self.protocol_connection.connection.rollback()
+            return []
+
+        report = []
+        for source_table, target_table, partitioned, method, columns, partitions_sql, success in rows:
+            levels = source_scheme.get(source_table) or []
+            if not levels and not partitioned:
+                continue
+            if levels:
+                ## a scheme of more than one level is written as the levels it has, in order -
+                ## RANGE (moved_at) / HASH (product_id) - because a reader who sees only the
+                ## first one does not know the table is two levels deep
+                seen, key_parts = set(), []
+                for level in levels:
+                    key = f"{level['method']} ({level['columns']})"
+                    if key not in seen:
+                        seen.add(key)
+                        key_parts.append(key)
+                source_text = ' / '.join(key_parts)
+                ## every partition of the tree, at every level - the same thing the target
+                ## column counts, so that the two can be compared
+                source_count = sum(len([part for part in (level['ranges'] or '').split(';')
+                                        if part.strip()]) for level in levels)
+            else:
+                source_text, source_count = '-', 0
+            target_text = f"{method or '?'} ({columns})" if partitioned else '-'
+            created = target_partitions.get(target_table)
+            if created is None:
+                created = len(json.loads(partitions_sql)) if partitions_sql else 0
+            report.append({
+                'table': source_table, 'source': source_text, 'source_count': source_count,
+                'target': target_text, 'created': created, 'partitioned': bool(partitioned),
+                'was_partitioned': bool(levels), 'success': success,
+            })
+
+        if not report:
+            return []
+
+        lines = ['', '[ PARTITIONING ]', '-' * 110]
+        width_table = max([len('Table')] + [len(str(item['table'])) for item in report])
+        width_source = max([len('Source scheme')] + [len(str(item['source'])) for item in report])
+        width_target = max([len('Target scheme')] + [len(str(item['target'])) for item in report])
+        lines.append(f"{'Table':<{width_table}} | {'Source scheme':<{width_source}} | {'Parts':>5} | "
+                     f"{'Target scheme':<{width_target}} | {'Parts':>5} | What happened")
+        lines.append('-' * 110)
+        for item in report:
+            if item['was_partitioned'] and item['partitioned']:
+                what = 'scheme of the source preserved'
+            elif item['was_partitioned']:
+                ## the line which matters most: the source partitioned this table and the
+                ## target does not, so something the source had is not there any more
+                what = 'FLATTENED into one table'
+            else:
+                what = 'partitioned by target_partitioning'
+            if item['success'] is False:
+                what += ' - the table FAILED'
+            lines.append(
+                f"{item['table']:<{width_table}} | {item['source']:<{width_source}} | "
+                f"{item['source_count'] or '-':>5} | {item['target']:<{width_target}} | "
+                f"{item['created'] or '-':>5} | {what}")
+
+        flattened = [item for item in report if item['was_partitioned'] and not item['partitioned']]
+        if flattened:
+            lines.append('')
+            lines.append(f"{len(flattened)} table(s) partitioned on the source arrive as one ordinary "
+                         f"table: {', '.join(item['table'] for item in flattened)}.")
+        lines.append('')
+        return lines
+
+    def detailed_report_lines(self, cursor):
+        """
+        The `[ DETAILED MIGRATION REPORT ]` block: what happened to every object, one by one.
+
+        The rest of the summary counts. This names. `Indexes 77 | 75 | 2` tells a reader that
+        two indexes are missing and nothing at all about which two - and the answer is in the
+        protocol tables, one query away, which is not where somebody reads a migration report
+        from. Three questions, in the order they are asked:
+
+          * which tables arrived, with how many rows, and how long each took;
+          * what did NOT arrive, and what the target said about it;
+          * what was never attempted - an object the configuration left out, or one whose turn
+            never came because the run stopped.
+
+        The last of the three is the one which is easy to get wrong: an object which was not
+        attempted is not an object which failed, and reporting the two alike is how a run is
+        read as worse or better than it was.
+        """
+        lines = ['', '[ DETAILED MIGRATION REPORT ]', '-' * 110]
+
+        ## ---------------------------------------------------------------- the tables
+        ## The rows which really arrived are recorded by the DATA migration, one row per table
+        ## - `tables.target_table_rows` is what the target held when the plan was made, which
+        ## is zero for every table of a fresh migration and would report every one of them as
+        ## a table which lost all its rows.
+        tables = []
+        try:
+            cursor.execute(f'''
+                SELECT t.source_table_name, t.target_table_name, t.source_table_rows_all,
+                       t.source_table_rows_limited, d.target_table_rows,
+                       coalesce(d.success, t.success), coalesce(d.message, t.message),
+                       coalesce(d.task_started, t.task_started),
+                       coalesce(d.task_completed, t.task_completed),
+                       d.id IS NOT NULL AS data_was_migrated
+                FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_tables()}" t
+                LEFT JOIN "{self.protocol_schema}"."{self.config_parser.get_protocol_name_data_migration()}" d
+                       ON d.source_table_name = t.source_table_name
+                      AND d.source_schema_name = t.source_schema_name
+                ORDER BY t.source_table_name
+            ''')
+            tables = cursor.fetchall()
+        except Exception:
+            self.protocol_connection.connection.rollback()
+
+        if tables:
+            width = max([len('Table')] + [len(str(row[1] or row[0])) for row in tables])
+            lines.append('')
+            lines.append('### Tables')
+            lines.append(f"{'Table':<{width}} | {'Source rows':>12} | {'Target rows':>12} | "
+                         f"{'Duration':>10} | Result")
+            lines.append('-' * 110)
+            for row in tables:
+                name = row[1] or row[0]
+                source_rows = row[3] if row[3] is not None else row[2]
+                target_rows = row[4]
+                duration = '-'
+                if row[7] and row[8]:
+                    duration = f"{(row[8] - row[7]).total_seconds():.1f} s"
+                if row[5] is False:
+                    result = f"FAILED - {first_line(row[6] or '')}"
+                elif not row[9]:
+                    ## no row in the data migration protocol: the table was created and its
+                    ## data was never copied - migrate_data is off for it, or the run ended
+                    ## before its turn. That is not a table which lost its rows.
+                    result = 'structure only - no data was migrated'
+                    target_rows = None
+                elif row[5] is None:
+                    result = 'not attempted'
+                elif target_rows is not None and source_rows is not None and target_rows != source_rows:
+                    ## the row counts are the one thing this report must not smooth over
+                    result = f"MISMATCH - {source_rows - target_rows} row(s) missing"
+                else:
+                    result = 'OK'
+                lines.append(f"{name:<{width}} | {self.thousands(source_rows):>12} | "
+                             f"{self.thousands(target_rows):>12} | {duration:>10} | {result}")
+
+        ## ---------------------------------------------------------------- what did not arrive
+        failed, not_attempted = [], []
+        for kind, accessor, name_column, table_column in self.DETAILED_REPORT_KINDS:
+            table_name = getattr(self.config_parser, accessor)()
+            columns = f"{name_column}, " + (table_column if table_column else "''")
+            try:
+                cursor.execute(f'''
+                    SELECT {columns}, success, message
+                    FROM "{self.protocol_schema}"."{table_name}"
+                    WHERE success IS NOT TRUE
+                    ORDER BY 1
+                ''')
+                for object_name, on_table, success, message in cursor.fetchall():
+                    entry = (kind, object_name or '-', on_table or '-', first_line(message or ''))
+                    (failed if success is False else not_attempted).append(entry)
+            except Exception:
+                self.protocol_connection.connection.rollback()
+
+        if failed:
+            lines.append('')
+            lines.append('### What did not arrive')
+            width_kind = max([len('Kind')] + [len(item[0]) for item in failed])
+            width_name = max([len('Object')] + [len(str(item[1])) for item in failed])
+            width_table = max([len('On table')] + [len(str(item[2])) for item in failed])
+            lines.append(f"{'Kind':<{width_kind}} | {'Object':<{width_name}} | "
+                         f"{'On table':<{width_table}} | What the target said")
+            lines.append('-' * 110)
+            for kind, object_name, on_table, message in failed:
+                lines.append(f"{kind:<{width_kind}} | {object_name:<{width_name}} | "
+                             f"{on_table:<{width_table}} | {message}")
+        else:
+            lines.append('')
+            lines.append('### What did not arrive: nothing - every object of the plan was created')
+
+        if not_attempted:
+            lines.append('')
+            lines.append('### What was not attempted')
+            lines.append('An object with no result at all: left out by the configuration, or the run '
+                         'ended before its turn. It is not an object which failed.')
+            width_kind = max([len('Kind')] + [len(item[0]) for item in not_attempted])
+            width_name = max([len('Object')] + [len(str(item[1])) for item in not_attempted])
+            lines.append(f"{'Kind':<{width_kind}} | {'Object':<{width_name}} | On table")
+            lines.append('-' * 110)
+            for kind, object_name, on_table, _message in not_attempted[:200]:
+                lines.append(f"{kind:<{width_kind}} | {object_name:<{width_name}} | {on_table}")
+            if len(not_attempted) > 200:
+                lines.append(f"... and {len(not_attempted) - 200} more - the protocol tables hold all of them")
+
+        lines.append('')
+        return lines
+
+    @staticmethod
+    def thousands(value):
+        """A row count with thousands separators, and a dash where there is no number."""
+        return '-' if value is None else f"{int(value):,}"
+
     def print_migration_summary(self):
         lines = []
         lines.append("=" * 80)
@@ -5516,6 +5805,34 @@ class MigratorTables:
             except Exception as e:
                 lines.append(f"Error computing anonymization stats: {e}")
 
+        ## The two sections which name rather than count. They stand behind everything else,
+        ## because the blocks above are what a reader looks at first and these are what they
+        ## look at when one of those blocks is not what they hoped. Where
+        ## summary.report_filename is set they go into that file instead of into the log, and
+        ## the log says where they went - the same arrangement the validation report has.
+        detailed = []
+        try:
+            detailed.extend(self.partitioning_summary_lines(cursor))
+            detailed.extend(self.detailed_report_lines(cursor))
+        except Exception as e:
+            lines.append("")
+            lines.append(f"[ ERROR: the detailed report could not be built: {e} ]")
+
+        report_filename = self.config_parser.get_summary_report_filename()
+        if detailed and report_filename:
+            try:
+                with open(report_filename, 'w', encoding='utf-8') as handle:
+                    handle.write("\n".join(lines + detailed))
+                    handle.write("\n")
+                lines.append("")
+                lines.append(f"[ INFO: the detailed migration report was written to {report_filename} ]")
+            except Exception as e:
+                lines.append("")
+                lines.append(f"[ ERROR: the detailed migration report could not be written to {report_filename}: {e} ]")
+                lines.extend(detailed)
+        else:
+            lines.extend(detailed)
+
         lines.append("")
         lines.append(f"TOTAL ERRORS IN MIGRATION: {total_errors}")
         lines.append("=" * 80)
@@ -5784,13 +6101,15 @@ class MigratorTables:
             'source_table_name': row[2],
             'source_table_id': row[3],
             'source_table_partitioning_level': row[4],
-            'source_partition_columns': row[5],
-            'source_partition_ranges': row[6],
-            'task_created': row[7],
-            'task_started': row[8],
-            'task_completed': row[9],
-            'success': row[10],
-            'message': row[11]
+            'source_partitioning_method': row[5],
+            'source_root_table_name': row[6],
+            'source_partition_columns': row[7],
+            'source_partition_ranges': row[8],
+            'task_created': row[9],
+            'task_started': row[10],
+            'task_completed': row[11],
+            'success': row[12],
+            'message': row[13]
         }
 
     def insert_source_table_partitioning(self, settings):
@@ -5798,11 +6117,15 @@ class MigratorTables:
         table_name = self.config_parser.get_protocol_name_source_table_partitioning()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema_name, source_table_name, source_table_id, source_table_partitioning_level, source_partition_columns, source_partition_ranges)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            (source_schema_name, source_table_name, source_table_id, source_table_partitioning_level,
+            source_partitioning_method, source_root_table_name, source_partition_columns, source_partition_ranges)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_table_id'), settings.get('source_table_partitioning_level'), settings.get('source_partition_columns'), settings.get('source_partition_ranges'))
+        params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_table_id'),
+                  settings.get('source_table_partitioning_level'), settings.get('source_partitioning_method'),
+                  settings.get('source_root_table_name'), settings.get('source_partition_columns'),
+                  settings.get('source_partition_ranges'))
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)

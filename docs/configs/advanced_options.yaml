@@ -249,6 +249,15 @@ validation:
   #   schema: "public"
 
 summary:
+  # Where the detailed part of the closing summary is written: the
+  # [ PARTITIONING ] and [ DETAILED MIGRATION REPORT ] blocks, which name every
+  # object of the migration instead of counting it - every table with its row
+  # counts and its duration, everything which did not arrive with what the
+  # target said about it, and everything which was never attempted. Without
+  # this key they are printed with the rest of the summary, which is as long as
+  # your schema is.
+  # report_filename: "migration_report.md"      # >>> ADJUST
+
   top_migrated_tables: 10
   top_mismatched_tables: 10
   top_longest_batches: 15

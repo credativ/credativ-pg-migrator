@@ -1997,9 +1997,13 @@
     },
     "summary": {
       "type": "object",
-      "description": "How many rows each ranking of the closing summary shows.",
+      "description": "The closing summary of a migration: how many rows each ranking shows, and where the detailed part of it is written.",
       "additionalProperties": false,
       "properties": {
+        "report_filename": {
+          "type": "string",
+          "description": "Where the detailed part of the summary is written - the [ PARTITIONING ] and [ DETAILED MIGRATION REPORT ] blocks, which name every object of the migration rather than counting it. Without it they are printed with the rest of the summary, which is as long as the schema is."
+        },
         "top_migrated_tables": {
           "type": "integer",
           "minimum": 0,

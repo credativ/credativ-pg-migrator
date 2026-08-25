@@ -4,6 +4,14 @@
 
 - 2026.08.25
 
+  - New - **The closing summary has two blocks which name rather than count.** The rest of it counts - `Indexes 77 | 75 | 2` says two indexes are missing and nothing at all about which two, and the answer is in the protocol tables, one query away, which is not where somebody reads a migration report from. **`[ DETAILED MIGRATION REPORT ]`** names every table with its row counts and how long it took, every object which did not arrive with what the target said about it, and every object which was never attempted - which is not the same thing and is not reported as if it were. **`[ PARTITIONING ]`** says what each table was partitioned by on the source, what it is partitioned by on the target and how many partitions each side has; a table which the source partitions and the target does not is named as flattened, because the summary is where a reader looks for what a run changed.
+
+  - New - **`summary.report_filename`** writes the whole summary, with those two blocks, into a file and leaves the log with the short version and a line saying where the rest went. The same arrangement `validation.report_filename` already has. Without it everything is printed as before.
+
+  - Fix - **The tables protocol records what the target table is partitioned by.** `insert_tables()` has been given `partitioned`, `partitioned_by` and `partitioning_columns` since the setting existed and dropped all three, because the table had no columns for them. The scheme of the source is recorded with its method and with the table at the top of its tree, so a scheme of more than one level can be read back as one scheme rather than as one row per level with nothing joining them.
+
+  - Fix - The partition names of a `target_partitioning` entry were checked against the objects the target holds **now**, so a re-run of a configuration which had worked was refused by its own partitions from the run before. A run which drops what it is about to create has nothing to collide with.
+
   - New - **Partitioning, PostgreSQL to PostgreSQL.** `migration.source_partitioning: preserve | flatten`, global and per table: `preserve` builds the same scheme on the target, sub-partitions included, and `flatten` builds one ordinary table out of it and says so. `target_partitioning` builds a scheme the source never had and wins over both. A partition is never migrated as a table of its own - it is created with its parent.
 
   - Fix - Partitioning: a partitioned PostgreSQL table had **its rows migrated twice** - the parent answers all of them and each partition answers its own - and its partitions were created against a parent nothing had partitioned, which the target refuses.

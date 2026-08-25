@@ -230,6 +230,9 @@ def build_comments_catalog(config_parser):
             'target_table_sql': 'The CREATE TABLE statement which was sent to the target.',
             'table_comment': 'Comment of the table, carried over from the source to the target.',
             'create_partitions_sql': 'The statements which create the partitions of the target table. Empty for a table which is not partitioned.',
+            'partitioned': 'Whether the target table is created partitioned - because the source partitions it and migration.source_partitioning keeps the scheme, or because target_partitioning asks for one.',
+            'partitioned_by': 'The partitioning method of the target table: RANGE, LIST or HASH.',
+            'partitioning_columns': 'The columns the target table is partitioned by.',
         },
     }
 
@@ -240,6 +243,8 @@ def build_comments_catalog(config_parser):
         ),
         'columns': {
             'source_table_partitioning_level': 'The level of the partitioning this row describes - 1 for the partitioning of the table, 2 for the partitioning of its partitions, and so on.',
+            'source_partitioning_method': 'How the source partitions the table on this level - RANGE, LIST, HASH, or what the engine calls it.',
+            'source_root_table_name': 'The table at the top of the partitioning tree this level belongs to. A scheme of more than one level is recorded one row per level, and this is what says which rows belong together.',
             'source_partition_columns': 'The columns the source partitions the table by on this level.',
             'source_partition_ranges': 'The bounds of the partitions of the source on this level.',
         },

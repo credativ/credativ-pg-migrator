@@ -958,7 +958,18 @@ class Planner:
         """
         What the target schema already holds, so that a generated partition name which would
         collide with it is refused before anything is created rather than in the middle of it.
+
+        A run which drops what it is about to create has nothing to collide with: the objects
+        in the target now are the ones the previous run of this same migration left there, and
+        they are dropped before the first one is created. Checking against them would refuse
+        every re-run of a configuration which worked the first time.
         """
+        if self.config_parser.should_drop_schema() or self.config_parser.should_drop_tables():
+            self.config_parser.print_log_message(
+                'DEBUG', "planner: target_schema_object_names: the run drops the target objects "
+                         "before it creates them, so a generated partition name is not checked "
+                         "against what the schema holds now.")
+            return set()
         try:
             self.target_connection.connect()
             cursor = self.target_connection.connection.cursor()
@@ -1034,6 +1045,12 @@ class Planner:
                         'source_table_name': decision.table_name,
                         'source_table_id': (self.partitioning_table_ids or {}).get(decision.table_name),
                         'source_table_partitioning_level': scheme.get('level', 1),
+                        'source_partitioning_method': scheme.get('method', ''),
+                        ## the table at the top of the tree, so that the rows of a scheme of
+                        ## more than one level can be read back as one scheme. A parent is its
+                        ## own root; a partition which is itself partitioned carries the root
+                        ## the plan resolved for it.
+                        'source_root_table_name': decision.root_table or decision.table_name,
                         'source_partition_columns': ', '.join(scheme.get('columns') or []),
                         'source_partition_ranges': '; '.join(
                             f"{partition.get('name')}: {partition.get('bound')}"

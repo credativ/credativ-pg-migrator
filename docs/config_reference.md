@@ -49,7 +49,7 @@ The following top-level keys must be present: `migrator`, `source`, `target`.
 | [`query_conversion`](#query_conversion) | block |  |  | only for `mssql`, `sybase_ase`, `informix`, `ibm_db2_luw`, `ibm_db2_zos`, `ibm_db2_i`, `mysql`, `mariadb`, `oracle`, `sql_anywhere`, `sqlite`, `postgresql`. Conversion of the SELECT statements an application holds as text. A separate step over a finished migration - it creates nothing and moves no data: it reads files of statements, converts every SELECT for the migrated PostgreSQL schema, tests the result against the target and writes the answer into new files. Started by --convert-queries, or as the closing step of a migration when run_after_migration is true. |
 | [`mapping`](#mapping) | block |  |  | Settings of the 'mapping' workflow, which matches existing target objects onto existing source objects and copies only data. |
 | [`anonymization`](#anonymization) | block |  |  | Settings of the 'anonymization' workflow, which copies the data while masking the columns named here. A method name that is not registered stops the run before any data is read. |
-| [`summary`](#summary) | block |  |  | How many rows each ranking of the closing summary shows. |
+| [`summary`](#summary) | block |  |  | The closing summary of a migration: how many rows each ranking shows, and where the detailed part of it is written. |
 
 ---
 
@@ -391,10 +391,11 @@ Settings of the 'anonymization' workflow, which copies the data while masking th
 
 ## `summary`
 
-How many rows each ranking of the closing summary shows.
+The closing summary of a migration: how many rows each ranking shows, and where the detailed part of it is written.
 
 | Key | Type | Allowed values | Default | Notes |
 |---|---|---|---|---|
+| `report_filename` | string |  |  | Where the detailed part of the summary is written - the [ PARTITIONING ] and [ DETAILED MIGRATION REPORT ] blocks, which name every object of the migration rather than counting it. Without it they are printed with the rest of the summary, which is as long as the schema is. |
 | `top_migrated_tables` | integer | >= 0 | `5` | Largest migrated tables. |
 | `top_mismatched_tables` | integer | >= 0 | `5` | Tables whose source and target row counts differ. |
 | `top_longest_batches` | integer | >= 0 | `10` | Slowest batches. |

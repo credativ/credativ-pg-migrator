@@ -1,6 +1,6 @@
 # credativ-pg-migrator — test suite
 
-1224 test functions in 62 files. **No test in this directory needs a database, a driver
+1241 test functions in 63 files. **No test in this directory needs a database, a driver
 connection, or a network.** Everything that would talk to a server is either constructed
 with `Class.__new__(Class)` and fed a fake config, or replaced with `unittest.mock`. A
 full run touches nothing outside the repository and finishes in seconds.
@@ -37,7 +37,7 @@ tests, and no test depends on the order of the others.
 | configuration & logging | `pyyaml`, `jsonschema`, `pytest` | the 5 `test_config_*` / `test_logging_*` / `test_object_*` files, and `test_schema_names.py` |
 | query conversion | `sqlglot`, `pytest` | the 6 `test_query_*` files and the `test_*_query_conversion.py` of Db2, Oracle and SQL Anywhere |
 | anonymization, Db2 CSV | nothing beyond the standard library | 3 files |
-| everything else | the package's own dependencies — `psycopg2`, `tabulate`, `jaydebeapi`, `pyodbc` | 28 files, `test_informix_query_conversion.py`, `test_mysql_query_conversion.py`, `test_ms_sql_query_conversion.py` and `test_sybase_query_conversion.py`, `test_tsql_outer_joins.py`, `test_oracle_outer_joins.py`, `test_oracle_fk_dependencies.py`, `test_sqlite_query_conversion.py`, `test_postgresql_query_conversion.py` and `test_query_source_test.py` among them |
+| everything else | the package's own dependencies — `psycopg2`, `tabulate`, `jaydebeapi`, `pyodbc` | 29 files, `test_informix_query_conversion.py`, `test_mysql_query_conversion.py`, `test_ms_sql_query_conversion.py` and `test_sybase_query_conversion.py`, `test_tsql_outer_joins.py`, `test_oracle_outer_joins.py`, `test_oracle_fk_dependencies.py`, `test_sqlite_query_conversion.py`, `test_postgresql_query_conversion.py` and `test_query_source_test.py` among them |
 
 The third group imports the connectors, which import their drivers at module level, so
 those files fail to **collect** if the drivers are absent — the message is
@@ -63,7 +63,8 @@ python3 -m pytest tests/ -q \
   --ignore=tests/test_query_source_test.py \
   --ignore=tests/test_partitioning.py \
   --ignore=tests/test_comments_migration.py \
-  --ignore=tests/test_constraint_order.py
+  --ignore=tests/test_constraint_order.py \
+  --ignore=tests/test_migration_report.py
 ```
 
 **Expected result: `545 passed, 6 skipped`** (13 files; the count is higher than the number
@@ -585,6 +586,24 @@ the durable half: every key the phase reads out of a decoded protocol row has to
 decoder it came from, and every decoder it uses has to be able to say whether its object was
 created. The second one found `decode_index_row()`, which had the same gap as the view decoder
 and which nobody had noticed.
+
+### `test_migration_report.py` — 19 tests
+
+**Purpose.** The two blocks of the closing summary which **name** rather than count.
+`Indexes 77 | 75 | 2` says two indexes are missing and nothing about which two — the answer sits
+in the protocol tables, one query away, which is not where somebody reads a migration report
+from.
+
+**Covers.** `[ DETAILED MIGRATION REPORT ]`: every table with its row counts and its duration; a
+row count which does not match is not smoothed over; a table whose data was never copied is not a
+table which lost its rows — reading the counts from `tables.target_table_rows`, which is what the
+target held when the plan was made, reported every table of a fresh migration as having lost all
+of them, which is how that was found; a row limit from `data_migration_limitation` is what the
+table is measured against; an object which did not arrive is named with what the target said, and
+an object which was never **attempted** is told apart from one which failed. And
+`[ PARTITIONING ]`: a scheme shown on both sides, a scheme of more than one level written as the
+levels it has with both `Parts` columns counting the same thing, and the flattened table — the
+line which matters most, because something the source had is not there any more.
 
 ### `test_phase_status.py` — 17 functions, 17 tests
 

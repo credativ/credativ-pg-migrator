@@ -4,6 +4,7 @@
 
 - Partitioning for PostgreSQL to PostgreSQL migrations: the scheme of the source is carried over as it is, flattened into one ordinary table, or replaced by a scheme the source never had - globally and per table
 - The pre-migration analysis reports what the source partitions and stops the run for a partitioning configuration which cannot be built
+- The closing summary names rather than counts: every table with its row counts and its duration, every object which did not arrive with what the target said about it, what was never attempted, and what each table is partitioned by on both sides. `summary.report_filename` writes it into a file
 
 ## 0.16.0 - 25.08.2026
 

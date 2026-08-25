@@ -1,6 +1,6 @@
 # credativ-pg-migrator — test suite
 
-1216 test functions in 61 files. **No test in this directory needs a database, a driver
+1224 test functions in 62 files. **No test in this directory needs a database, a driver
 connection, or a network.** Everything that would talk to a server is either constructed
 with `Class.__new__(Class)` and fed a fake config, or replaced with `unittest.mock`. A
 full run touches nothing outside the repository and finishes in seconds.
@@ -37,7 +37,7 @@ tests, and no test depends on the order of the others.
 | configuration & logging | `pyyaml`, `jsonschema`, `pytest` | the 5 `test_config_*` / `test_logging_*` / `test_object_*` files, and `test_schema_names.py` |
 | query conversion | `sqlglot`, `pytest` | the 6 `test_query_*` files and the `test_*_query_conversion.py` of Db2, Oracle and SQL Anywhere |
 | anonymization, Db2 CSV | nothing beyond the standard library | 3 files |
-| everything else | the package's own dependencies — `psycopg2`, `tabulate`, `jaydebeapi`, `pyodbc` | 27 files, `test_informix_query_conversion.py`, `test_mysql_query_conversion.py`, `test_ms_sql_query_conversion.py` and `test_sybase_query_conversion.py`, `test_tsql_outer_joins.py`, `test_oracle_outer_joins.py`, `test_oracle_fk_dependencies.py`, `test_sqlite_query_conversion.py`, `test_postgresql_query_conversion.py` and `test_query_source_test.py` among them |
+| everything else | the package's own dependencies — `psycopg2`, `tabulate`, `jaydebeapi`, `pyodbc` | 28 files, `test_informix_query_conversion.py`, `test_mysql_query_conversion.py`, `test_ms_sql_query_conversion.py` and `test_sybase_query_conversion.py`, `test_tsql_outer_joins.py`, `test_oracle_outer_joins.py`, `test_oracle_fk_dependencies.py`, `test_sqlite_query_conversion.py`, `test_postgresql_query_conversion.py` and `test_query_source_test.py` among them |
 
 The third group imports the connectors, which import their drivers at module level, so
 those files fail to **collect** if the drivers are absent — the message is
@@ -62,7 +62,8 @@ python3 -m pytest tests/ -q \
   --ignore=tests/test_postgresql_query_conversion.py \
   --ignore=tests/test_query_source_test.py \
   --ignore=tests/test_partitioning.py \
-  --ignore=tests/test_comments_migration.py
+  --ignore=tests/test_comments_migration.py \
+  --ignore=tests/test_constraint_order.py
 ```
 
 **Expected result: `545 passed, 6 skipped`** (13 files; the count is higher than the number
@@ -547,6 +548,23 @@ the warning with it, and that the summary shows `?` rather than `0` for such a k
 
 **Expected result.** Passes. Connectors whose driver is not installed are skipped, which is why
 the count differs between a bare environment and one with everything installed.
+
+### `test_constraint_order.py` — 8 tests
+
+**Purpose.** The order the constraints of a migration are created in. A foreign key needs the
+UNIQUE constraint it references to exist already, and the two belong to **different tables** — so
+the order the protocol holds them in, which is the order the planner read the tables in, decided
+whether the key could be created at all. `fk_children` sorts in front of `fk_parent`, so the key
+referencing it failed with *there is no unique constraint matching given keys for referenced
+table*. The eight parallel workers made it worse rather than better: a key which happened to
+stand behind its unique constraint failed too, in some runs and not in others.
+
+**Covers.** That every foreign key is created after every other constraint, in the order the
+migtest example really holds them; that the first wave is finished before the second starts —
+parallel inside a wave is what makes the phase fast, parallel across the two is what made the key
+fail intermittently; that the case of the type name is not what decides; that a constraint the
+configuration excludes is not created, and that a constraint which failed is not recorded as
+migrated OK and does not stop the wave behind it.
 
 ### `test_comments_migration.py` — 24 tests
 

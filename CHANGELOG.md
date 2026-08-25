@@ -1,12 +1,8 @@
 # Changelog
 
-## 0.16.0 - 2026.08.25
+## 0.17.0 - 2026.08.25
 
 - 2026.08.25
-
-  - New - Query conversion: implemented for **SQLite** and **PostgreSQL**, which completes all twelve sources. A construct the target would accept and answer differently with - `total()` as `sum()`, `random()` under the same name and another range, a system column of PostgreSQL after the rows have been written again - is refused with the reason instead of being converted.
-
-  - New - Query conversion: an optional **source test**. Every statement is compiled against the source before it is converted - `PREPARE`, `EXPLAIN`, `SET NOEXEC ON`, `Cursor.parse()` or the `prepareStatement` of a JDBC driver, compile only and never executed - so a statement which was already broken is told apart from one the migrator broke. `query_conversion.source_test: prepare | off`.
 
   - New - **Partitioning, PostgreSQL to PostgreSQL.** `migration.source_partitioning: preserve | flatten`, global and per table: `preserve` builds the same scheme on the target, sub-partitions included, and `flatten` builds one ordinary table out of it and says so. `target_partitioning` builds a scheme the source never had and wins over both. A partition is never migrated as a table of its own - it is created with its parent.
 
@@ -15,6 +11,16 @@
   - Fix - Partitioning: the generator of a `date_range` scheme. `day` created no partitions at all, the end of every interval was written one day short of the next so the rows of the last day fell between two partitions, and the min/max query was built with PostgreSQL quoting and sent to whatever the source was. The calendar is computed in the migrator now, and `quarter` is offered as well.
 
   - New - **The pre-migration analysis reports the partitioning of the source and refuses a configuration which cannot be built** - a primary key or unique constraint which does not contain the partitioning columns, a column whose type cannot carry the key, a nullable key column whose statistics hold NULLs with no `DEFAULT` partition, an inheritance parent, an exclusion constraint, a partition count past what a scheme can carry, a generated name which collides with the target. What it could not check is reported as not checked.
+
+## 0.16.0 - 2026.08.25
+
+- 2026.08.25
+
+  - Fix - **A foreign key was created before the unique constraint it references.** The two belong to different tables, so the order the protocol holds them in - which is the order the planner read the tables in - decided whether the key could be created at all, and the parallel workers made it worse rather than better: a key which happened to stand behind its unique constraint failed in some runs and not in others. The phase runs in two waves now, everything which is not a foreign key and then the foreign keys, each of them still parallel. The comment of such a constraint failed one phase later in its turn, which is how it was found.
+
+  - New - Query conversion: implemented for **SQLite** and **PostgreSQL**, which completes all twelve sources. A construct the target would accept and answer differently with - `total()` as `sum()`, `random()` under the same name and another range, a system column of PostgreSQL after the rows have been written again - is refused with the reason instead of being converted.
+
+  - New - Query conversion: an optional **source test**. Every statement is compiled against the source before it is converted - `PREPARE`, `EXPLAIN`, `SET NOEXEC ON`, `Cursor.parse()` or the `prepareStatement` of a JDBC driver, compile only and never executed - so a statement which was already broken is told apart from one the migrator broke. `query_conversion.source_test: prepare | off`.
 
   - Fix - Oracle: the pre-migration analysis reports the foreign keys of the source. `get_top_fk_dependencies()` answered nothing, so an Oracle schema was surveyed as if it had none.
 

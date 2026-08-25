@@ -1,5 +1,10 @@
 # credativ-pg-migrator Releases
 
+## 0.17.0 - 25.08.2026
+
+- Partitioning for PostgreSQL to PostgreSQL migrations: the scheme of the source is carried over as it is, flattened into one ordinary table, or replaced by a scheme the source never had - globally and per table
+- The pre-migration analysis reports what the source partitions and stops the run for a partitioning configuration which cannot be built
+
 ## 0.16.0 - 25.08.2026
 
 - New step: conversion of the SELECT statements an application holds as text (`--convert-queries`), implemented for all twelve source databases. It reads files of statements, converts every SELECT with the same code which converts the views of the migration, tests the result against the migrated target and writes one output file per input file plus a machine readable sidecar. Only SELECT is ever converted, and a statement which cannot be converted is reported as such - nothing is handed back unchanged as if it had been converted
@@ -14,7 +19,7 @@
 - Sybase ASE and MS SQL Server: procedure groups, cursors, the pseudo tables of a trigger, the `*=` outer joins of the old Transact-SQL, and a long round of repairs to the T-SQL parser
 - `names_case_handling` is applied to every name a migration creates - routines, triggers, the bodies of converted views and the statements of an application - and a run stops when the setting would make one target object out of two of the source
 - Data fidelity: a byte the assumed encoding cannot read is no longer deleted from the value (`migration.on_undecodable_bytes`), a functional index keeps its collation, and column defaults which used to be dropped without a word are carried over
-- The pre-migration analysis checks the PostgreSQL extensions the migrated objects need, the capabilities of the target, the foreign key dependencies of the source and the partitioning
+- The pre-migration analysis checks the PostgreSQL extensions the migrated objects need, the capabilities of the target and the foreign key dependencies of the source
 - The test suite is published with the repository - more than 2000 tests, none of which needs a database
 
 ## 0.15.0 - 03.07.2026

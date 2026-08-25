@@ -883,6 +883,11 @@ class Orchestrator:
 
         self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'indexes migration', 'success': True, 'message': 'finished OK'})
 
+    ## A foreign key needs the unique constraint it references to exist already, and a
+    ## constraint which is not a foreign key never needs one which is. So the phase runs in two
+    ## waves and the foreign keys are the second - see stdwf_migrate_constraints().
+    CONSTRAINTS_CREATED_LAST = ('FOREIGN KEY',)
+
     def stdwf_migrate_constraints(self):
         self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'constraints migration'})
         workers_requested = self.config_parser.get_parallel_workers_count()
@@ -891,45 +896,79 @@ class Orchestrator:
         self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_constraints: Starting {workers_requested} parallel workers to create constraints in target database.")
         migrate_constraints = self.migrator_tables.fetch_all_constraints()
         if len(migrate_constraints) > 0:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=workers_requested) as executor:
-                futures = {}
-                for constraint_row in migrate_constraints:
-                    constraint_data = self.migrator_tables.decode_constraint_row(constraint_row)
-                    self.config_parser.print_log_message('DEBUG3', f"orchestrator: run_migrate_constraints: futures running count: {len(futures)}")
+            ## A FOREIGN KEY can only be created once the UNIQUE constraint it references is
+            ## there, and the two belong to different tables - so the order the protocol holds
+            ## them in, which is the order the planner read the tables in, decides whether the
+            ## key can be created at all. `fk_children` sorts in front of `fk_parent`, so the
+            ## key referencing `fk_parent (alt_key_a, alt_key_b)` was created before the
+            ## constraint which makes those columns unique, and failed with *there is no unique
+            ## constraint matching given keys for referenced table*. The workers made it worse
+            ## rather than better: eight constraints in flight at once, so a key which happened
+            ## to stand behind its unique constraint failed too, in some runs and not in others.
+            ##
+            ## The primary keys are not part of this - they are created with the indexes, in the
+            ## phase before this one.
+            first_wave, foreign_keys = [], []
+            for constraint_row in migrate_constraints:
+                constraint_data = self.migrator_tables.decode_constraint_row(constraint_row)
+                if not self.config_parser.should_migrate_constraints(constraint_data['source_table_name']):
+                    self.config_parser.print_log_message('DEBUG3', f"orchestrator: run_migrate_constraints: Skipping constraint {constraint_data['constraint_name']} as it is not configured for migration.")
+                    continue
+                if str(constraint_data.get('constraint_type') or '').upper() in self.CONSTRAINTS_CREATED_LAST:
+                    foreign_keys.append(constraint_data)
+                else:
+                    first_wave.append(constraint_data)
 
-                    if not self.config_parser.should_migrate_constraints(constraint_data['source_table_name']):
-                        self.config_parser.print_log_message('DEBUG3', f"orchestrator: run_migrate_constraints: Skipping constraint {constraint_data['constraint_name']} as it is not configured for migration.")
-                        continue
-
-                    while len(futures) >= workers_requested:
-                        done, _ = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
-                        for future in done:
-                            constraint_done = futures.pop(future)
-                            if future.result() == False:
-                                if self.on_error_action == 'stop':
-                                    self.config_parser.print_log_message('ERROR', "orchestrator: run_migrate_constraints: Stopping execution due to error.")
-                                    exit(1)
-                            else:
-                                self.migrator_tables.update_constraint_status({'row_id': constraint_done['id'], 'success': True, 'message': 'migrated OK'})
-                    # Submit the next task
-                    future = executor.submit(self.constraint_worker, constraint_data, target_db_type)
-                    futures[future] = constraint_data
-
-                # Process remaining futures
-                for future in concurrent.futures.as_completed(futures):
-                    constraint_done = futures[future]
-                    if future.result() == False:
-                        if self.on_error_action == 'stop':
-                            self.config_parser.print_log_message('ERROR', "orchestrator: run_migrate_constraints: Stopping execution due to error.")
-                            exit(1)
-                    else:
-                        self.migrator_tables.update_constraint_status({'row_id': constraint_done['id'], 'success': True, 'message': 'migrated OK'})
+            self.config_parser.print_log_message(
+                'INFO', f"orchestrator: run_migrate_constraints: {len(first_wave)} constraint(s) "
+                        f"first, then {len(foreign_keys)} foreign key(s) - a foreign key needs "
+                        f"the unique constraint it references to exist already.")
+            self.run_constraints_wave(first_wave, target_db_type, workers_requested)
+            self.run_constraints_wave(foreign_keys, target_db_type, workers_requested)
 
             self.config_parser.print_log_message('INFO', "orchestrator: run_migrate_constraints: Constraints processed successfully.")
         else:
             self.config_parser.print_log_message('INFO', "orchestrator: run_migrate_constraints: No constraints to create.")
 
         self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'constraints migration', 'success': True, 'message': 'finished OK'})
+
+    def run_constraints_wave(self, constraints, target_db_type, workers_requested):
+        """
+        One wave of the constraints phase, in parallel, and finished before the caller goes on.
+
+        The waves are what orders the phase: everything inside one of them is independent of
+        everything else in it, and the next one may depend on the whole of the one before.
+        """
+        if not constraints:
+            return
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers_requested) as executor:
+            futures = {}
+            for constraint_data in constraints:
+                self.config_parser.print_log_message('DEBUG3', f"orchestrator: run_migrate_constraints: futures running count: {len(futures)}")
+
+                while len(futures) >= workers_requested:
+                    done, _ = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
+                    for future in done:
+                        constraint_done = futures.pop(future)
+                        if future.result() == False:
+                            if self.on_error_action == 'stop':
+                                self.config_parser.print_log_message('ERROR', "orchestrator: run_migrate_constraints: Stopping execution due to error.")
+                                exit(1)
+                        else:
+                            self.migrator_tables.update_constraint_status({'row_id': constraint_done['id'], 'success': True, 'message': 'migrated OK'})
+                # Submit the next task
+                future = executor.submit(self.constraint_worker, constraint_data, target_db_type)
+                futures[future] = constraint_data
+
+            # Process remaining futures
+            for future in concurrent.futures.as_completed(futures):
+                constraint_done = futures[future]
+                if future.result() == False:
+                    if self.on_error_action == 'stop':
+                        self.config_parser.print_log_message('ERROR', "orchestrator: run_migrate_constraints: Stopping execution due to error.")
+                        exit(1)
+                else:
+                    self.migrator_tables.update_constraint_status({'row_id': constraint_done['id'], 'success': True, 'message': 'migrated OK'})
 
     def find_source_column(self, table_data, target_column_name):
         """

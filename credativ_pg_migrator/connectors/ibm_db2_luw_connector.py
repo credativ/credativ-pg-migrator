@@ -29,6 +29,10 @@ class IbmDb2LuwConnector(Db2QueryConversion, DatabaseConnector):
     ## What this connector does not read out of Db2 for LUW - see
     ## DatabaseConnector.OBJECT_KINDS_NOT_READ.
     OBJECT_KINDS_NOT_READ = {
+        'table_partitioning': (
+            'Db2 for LUW has table partitioning by range (SYSCAT.DATAPARTITIONS), database '
+            'partitioning across nodes (DPF) and multi-dimensional clustering, which all say '
+            'partition and are three different things. This connector reads none of them.'),
         'user_defined_types': ('Db2 has distinct types (CREATE DISTINCT TYPE), and also '
                                'structured, array, row and cursor types, all in SYSCAT.DATATYPES '
                                'with METATYPE telling them apart. This connector reads none of '

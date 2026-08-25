@@ -108,6 +108,8 @@ DEFAULT_READERS = {
     'query_conversion.statement_separator': 'get_query_conversion_statement_separator',
     'query_conversion.parameter_style': 'get_query_conversion_parameter_style',
     'query_conversion.parameter_output': 'get_query_conversion_parameter_output',
+    'migration.source_partitioning': 'get_source_partitioning',
+
     'query_conversion.source_test': 'get_query_conversion_source_test',
     'query_conversion.target_test': 'get_query_conversion_target_test',
     'query_conversion.timeout': 'get_query_conversion_timeout',
@@ -191,6 +193,13 @@ UNMAPPED_DEFAULTS = {
     '$defs.dataExport.character_set': 'applied by planner.py where the data source is read',
     '$defs.tableDataExport.header': 'per table, applied where the table data source is read',
     '$defs.targetLobStorage.storage': 'the block is not implemented',
+    'target_partitioning[].default_partition': 'per entry, read by partitioning.'
+                                               'generate_range_partitions()',
+    'target_partitioning[].partition_name': 'per entry, read by partitioning.'
+                                            'generate_range_partitions()',
+    'table_settings[].source_partitioning': 'the per-table override of '
+                                            'migration.source_partitioning, read through '
+                                            'the same accessor with a table name',
 }
 
 

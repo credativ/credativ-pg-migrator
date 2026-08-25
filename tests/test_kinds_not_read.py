@@ -38,7 +38,11 @@ sys.path.insert(0, REPO)
 
 from credativ_pg_migrator.constants import MigratorConstants
 
-KINDS = ('user_defined_types', 'domains')
+KINDS = ('user_defined_types', 'domains', 'table_partitioning')
+
+## 'table_partitioning' was added on 2026-08-25 with the partitioning of PostgreSQL: a source
+## whose scheme this migrator does not read has its partitioned tables migrated as ordinary
+## ones, which is exactly the shape of silence this file exists to refuse.
 
 
 def connector_classes():
@@ -183,16 +187,44 @@ def test_the_connectors_the_issue_names_are_the_ones_which_declare_it():
         assert 'domains' in not_read.get('sql_anywhere', [])
 
 
-def test_an_engine_which_really_has_none_says_so_rather_than_being_left_out():
+## Which engines really have none of a kind, per kind. It is not the same list for all three:
+## MySQL and MariaDB have no types and no domains and they DO partition tables, so
+## table_partitioning is something this migrator does not read there rather than something the
+## engine does not have. Getting that wrong in either direction is the defect P2-8 is about.
+ENGINES_WITHOUT = {
+    'user_defined_types': ('mysql', 'mariadb', 'sqlite'),
+    'domains': ('mysql', 'mariadb', 'sqlite'),
+    'table_partitioning': ('sqlite', 'sql_anywhere'),
+}
+
+
+@pytest.mark.parametrize('kind', KINDS)
+def test_an_engine_which_really_has_none_says_so_rather_than_being_left_out(kind):
     """
-    MySQL, MariaDB and SQLite have neither kind. `{}` is the truth for them - and it is written
-    down, so that "nobody looked" and "there is nothing to look at" stay apart.
+    `{}` is the truth for these - and it is written down, so that "nobody looked" and "there is
+    nothing to look at" stay apart.
     """
-    for db_type in ('mysql', 'mariadb', 'sqlite'):
+    for db_type in ENGINES_WITHOUT[kind]:
         if db_type not in CONNECTORS:
             continue
-        absent = CONNECTORS[db_type].OBJECT_KINDS_ABSENT
-        assert set(KINDS) <= set(absent), db_type
+        assert kind in CONNECTORS[db_type].OBJECT_KINDS_ABSENT, f'{db_type}: {kind}'
+
+
+def test_an_engine_which_partitions_tables_never_says_it_has_none():
+    """
+    The other direction, and the one which was nearly got wrong when table_partitioning was
+    added: MySQL and MariaDB partition tables, and so does every other source here except
+    SQLite and SQL Anywhere. Declaring it ABSENT for one of them would say *this source has no
+    partitioned table*, which is the sentence this whole rule exists to prevent - and the
+    engine list of §2.4 of development/PARTITIONING_STRATEGY.md is what it is checked against.
+    """
+    for db_type, connector_class in CONNECTORS.items():
+        if db_type in ENGINES_WITHOUT['table_partitioning']:
+            continue
+        assert 'table_partitioning' not in connector_class.OBJECT_KINDS_ABSENT, (
+            f'{db_type} says its source has no partitioning at all. It has - see §2.4 of '
+            f'development/PARTITIONING_STRATEGY.md. Declare it in OBJECT_KINDS_NOT_READ, or '
+            f'read it')
 
 
 # --------------------------------------------------------------------------------------

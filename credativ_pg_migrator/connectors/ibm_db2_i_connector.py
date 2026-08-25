@@ -31,6 +31,10 @@ class IbmDb2IConnector(Db2QueryConversion, DatabaseConnector):
     ## What this connector does not read out of Db2 for i - see
     ## DatabaseConnector.OBJECT_KINDS_NOT_READ.
     OBJECT_KINDS_NOT_READ = {
+        'table_partitioning': (
+            'Db2 for i partitions a table with PARTITION BY RANGE / HASH. The DDL parser of this '
+            'connector already matches the clause out of the CREATE TABLE text, and it is written '
+            'into the table comment instead of being reported as a scheme.'),
         'user_defined_types': ('Db2 for i has distinct types (CREATE DISTINCT TYPE), kept in '
                                'QSYS2.SYSTYPES. This connector does not read them.'),
     }

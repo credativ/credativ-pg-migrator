@@ -90,6 +90,19 @@ migration:
   # chunk_size: 250000        # rows per worker chunk; -1 (default) = no chunking
   names_case_handling: keep   # keep | lower | upper
 
+  # What becomes of a table which the SOURCE partitions.
+  #   preserve - the same scheme on the target: the parent is created
+  #              PARTITION BY ..., every partition of the source becomes a
+  #              partition of the target (sub-partitions included), and the rows
+  #              go in through the parent so PostgreSQL routes each one.
+  #   flatten  - one ordinary table, and the run says so per table.
+  # A partition is never migrated as a table of its own either way: it is
+  # created with its parent. This is NOT target_partitioning, which builds a
+  # scheme the source never had - a table named there is re-partitioned
+  # whatever this says.
+  source_partitioning: preserve   # preserve | flatten
+
+
   # Final pass over views, functions and triggers: an object that failed
   # because a dependency did not exist yet is retried once the whole schema is
   # there, and the result is recorded in the summary.

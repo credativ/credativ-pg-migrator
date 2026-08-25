@@ -224,6 +224,10 @@ table_settings:
   #   migrate_data: false         # create the table, do not copy the rows
   # - table_name: "reference_.*"
   #   data_conflict_action: "replace"
+  # - table_name: "audit_log"
+  #   source_partitioning: "flatten"  # this one table arrives as one ordinary
+  #                                   # table, whatever migration.source_partitioning
+  #                                   # says. preserve | flatten
 
 validation:
   workers: 4

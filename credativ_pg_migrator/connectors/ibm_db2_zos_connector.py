@@ -38,6 +38,11 @@ class IbmDb2ZosConnector(Db2QueryConversion, DatabaseConnector):
     ## What this connector does not read out of Db2 for z/OS - see
     ## DatabaseConnector.OBJECT_KINDS_NOT_READ.
     OBJECT_KINDS_NOT_READ = {
+        'table_partitioning': (
+            'Db2 for z/OS has partitioned table spaces, partition-by-range and partition-by-growth. '
+            'The DDL parser of this connector already matches the PARTITION BY clause out of the '
+            'CREATE TABLE text, and it is written into the table comment instead of being reported '
+            'as a scheme.'),
         'user_defined_types': ('Db2 for z/OS has distinct types (CREATE DISTINCT TYPE), kept in '
                                'SYSIBM.SYSDATATYPES. This connector does not read them.'),
     }

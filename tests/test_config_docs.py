@@ -54,6 +54,10 @@ READ_ELSEWHERE = {
     'regex_mappings',         # anonymization/routing.py
     'on_value_too_long',      # anonymization/routing.py
     'find_fitting_value_attempts',
+    # read through get_table_migration_switch(), which is given the name as an argument so
+    # that the global setting and the per-table override go through one lookup - the scan
+    # below sees a variable there and not a literal
+    'source_partitioning',
 }
 
 

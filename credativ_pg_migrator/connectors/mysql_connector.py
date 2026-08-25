@@ -38,6 +38,19 @@ class MySQLConnector(MySqlQueryConversion, DatabaseConnector):
         'user_defined_types': 'MySQL has no CREATE TYPE: a column takes a built-in type or an ENUM/SET declared on the column itself.',
         'domains': 'MySQL has no CREATE DOMAIN. A CHECK constraint on the column is the nearest thing it has, and that is migrated with the table it stands on.',
     }
+    ## What this connector does not read out of its source / what the source does
+    ## not have - see DatabaseConnector.OBJECT_KINDS_NOT_READ.
+    OBJECT_KINDS_NOT_READ = {
+        'table_partitioning': (
+            'MySQL partitions by RANGE, LIST, HASH and KEY, with subpartitions of the first two, '
+            'and keeps the whole scheme in information_schema.PARTITIONS. This connector does not '
+            'read it.'),
+    }
+
+    ## MySQL delimits an identifier with a backtick - a double quote there is a string
+    ## literal unless ANSI_QUOTES is set, so min("col") would answer the constant.
+    IDENTIFIER_QUOTES = ('`', '`')
+
     def __init__(self, config_parser, source_or_target):
         if source_or_target not in ['source', 'target']:
             raise ValueError("MySQL/MariaDB must be either source or target database")

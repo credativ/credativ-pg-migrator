@@ -18,6 +18,7 @@ import os
 import importlib
 from credativ_pg_migrator.migrator_logging import MigratorLogger
 from credativ_pg_migrator import identifier_case
+from credativ_pg_migrator import partitioning
 from credativ_pg_migrator.migrator_tables import MigratorTables
 from credativ_pg_migrator.constants import MigratorConstants
 import fnmatch
@@ -46,6 +47,14 @@ class Planner:
         # source text search object name -> object recreated in the target schema,
         # filled by stdwf_prepare_text_search and used when the DDL is generated
         self.migrated_text_search = {}
+        # What happens to every partitioned table of this migration - read once, by the
+        # pre-migration analysis or by stdwf_prepare_tables, whichever asks first. The two
+        # must not read the source twice: a report and a run which disagree are worse than
+        # neither.
+        self.partitioning_plan = None
+        self.partitioning_table_ids = {}
+        # why the partitioning of this source is not reported, when it is not
+        self.partitioning_note = ''
         self.sql_functions_mapping = self.source_connection.get_sql_functions_mapping({
             'target_db_type': self.config_parser.get_target_db_type()
         })
@@ -490,6 +499,16 @@ class Planner:
         # configured list covers what the migrated objects really need.
         blocking_issues.extend(self.check_extensions())
 
+        # §4 of development/PARTITIONING_STRATEGY.md - what the source partitions, what this
+        # run will do with each of them, and whether what was asked for can be built at all.
+        try:
+            blocking_issues.extend(self.check_partitioning())
+        except Exception as e:
+            self.config_parser.print_log_message(
+                'WARNING', f"planner: check_target_capabilities: the partitioning of the source "
+                           f"could not be analysed ({e}) - it is reported as NOT checked, which "
+                           f"is not the same as a schema with nothing partitioned in it.")
+
         # Check and attempt creation of required PostgreSQL extensions
         required_extensions = self.config_parser.get_required_extensions()
         if required_extensions:
@@ -657,6 +676,354 @@ class Planner:
 
         self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_sequences: Sequences processed successfully.")
 
+    ## ------------------------------------------------------------------ partitioning
+
+    def get_partitioning_plan(self):
+        """
+        What happens to every partitioned table of this migration, decided once.
+
+        The pre-migration analysis asks for it to report and to check it, and
+        stdwf_prepare_tables() asks for it to build the tables. It is read once and kept: a
+        second read would ask the source the same questions again and could answer them
+        differently, which is how a report and a run stop agreeing.
+        """
+        if self.partitioning_plan is None:
+            self.partitioning_plan = self.build_partitioning_plan()
+        return self.partitioning_plan
+
+    def build_partitioning_plan(self):
+        """
+        The partitioning of the source, read, and the decision taken for every selected table.
+
+        A source whose connector does not read partitioning says so once and the plan is empty
+        - which is not the same as a source with no partitioned table, and the report says
+        which of the two it is.
+        """
+        self.partitioning_note = ''
+        source_tables = self.source_connection.fetch_table_names(self.source_schema_name)
+        selected = []
+        table_ids = {}
+        for _, table_info in (source_tables or {}).items():
+            table_name = table_info['table_name']
+            included, _reason = self.config_parser.is_object_selected('table', table_name)
+            if included:
+                selected.append(table_name)
+                table_ids[table_name] = table_info.get('id')
+        self.partitioning_table_ids = table_ids
+
+        absent = self.source_connection.object_kind_is_absent('table_partitioning')
+        not_read = self.source_connection.object_kind_not_read('table_partitioning')
+        if absent:
+            self.partitioning_note = self.source_connection.OBJECT_KINDS_ABSENT.get(
+                'table_partitioning', 'this source has no partitioning')
+            return {}
+        if not_read:
+            self.partitioning_note = not_read
+            return {}
+
+        ## the tables which are worth asking about. A connector which can answer it in one
+        ## query answers it; one which cannot says so, and every table is asked.
+        candidates = self.source_connection.fetch_partitioning_candidates(self.source_schema_name)
+        schemes = {}
+        for table_name in selected if candidates is None else [
+                name for name in selected if name in candidates]:
+            scheme = self.source_connection.fetch_table_partitioning({
+                'source_schema_name': self.source_schema_name,
+                'source_table_name': table_name,
+            })
+            if scheme:
+                schemes[table_name] = scheme
+
+        ## a partition of a selected table which the filters left out is still part of the
+        ## scheme, so its own partitioning has to be read as well - otherwise a sub-partitioned
+        ## partition comes out with no children
+        pending = [name for scheme in schemes.values()
+                   for name in (partition.get('name') for partition in scheme.get('partitions') or [])]
+        while pending:
+            table_name = pending.pop()
+            if not table_name or table_name in schemes:
+                continue
+            scheme = self.source_connection.fetch_table_partitioning({
+                'source_schema_name': self.source_schema_name,
+                'source_table_name': table_name,
+            })
+            if not scheme:
+                continue
+            schemes[table_name] = scheme
+            pending.extend(partition.get('name') for partition in scheme.get('partitions') or [])
+
+        repartitioned = {entry.get('table_name') for entry in self.config_parser.get_target_partitioning()
+                         if entry.get('table_name')}
+        return partitioning.build_plan(
+            schemes, selected,
+            mode_of=self.config_parser.get_source_partitioning,
+            repartitioned_tables=repartitioned,
+            target_version_num=self.target_connection.get_server_version_num())
+
+    def check_partitioning(self):
+        """
+        The partitioning block of the pre-migration analysis - §4 of
+        development/PARTITIONING_STRATEGY.md.
+
+        Two halves. The inventory says what the source partitions and what this run will do
+        with each of them, and is printed whether or not anything is configured. The
+        feasibility check answers whether what was asked for can be built, and what it finds
+        is blocking: every one of those is a run which fails somewhere in the middle
+        otherwise, and here nothing has been created yet.
+        """
+        blocking_issues = []
+        plan = self.get_partitioning_plan()
+
+        self.config_parser.print_log_message('INFO', "planner: check_partitioning: ***** Partitioning *****")
+        if self.partitioning_note:
+            self.config_parser.print_log_message(
+                'INFO', f"planner: check_partitioning: the partitioning of this source is not "
+                        f"reported: {self.partitioning_note}")
+
+        partitioned = [decision for decision in plan.values()
+                       if decision.action in (partitioning.PRESERVE, partitioning.FLATTEN)]
+        parts = [decision for decision in plan.values()
+                 if decision.action == partitioning.PART_OF_PARENT]
+        orphans = [decision for decision in plan.values()
+                   if decision.action == partitioning.ORPHAN_PARTITION]
+        repartitioned = [decision for decision in plan.values()
+                         if decision.action == partitioning.REPARTITION]
+
+        if not plan and not self.partitioning_note:
+            self.config_parser.print_log_message(
+                'INFO', "planner: check_partitioning: no table of the source schema is partitioned.")
+        elif partitioned or parts or orphans or repartitioned:
+            self.config_parser.print_log_message(
+                'INFO', f"planner: check_partitioning: {len(partitioned)} partitioned table(s) of "
+                        f"the source, holding {len(parts)} partition(s); "
+                        f"{len(repartitioned)} table(s) are partitioned by target_partitioning.")
+            rows = [["Table", "Source scheme", "Partitions", "What happens"]]
+            for decision in sorted(partitioned + repartitioned + orphans,
+                                   key=lambda item: item.table_name):
+                rows.append([
+                    decision.table_name,
+                    decision.key_definition or '-',
+                    str(decision.scheme.get('partition_count', 0) or 0),
+                    decision.describe(),
+                ])
+            widths = [max(len(str(row[index])) for row in rows) for index in range(len(rows[0]))]
+            for row in rows:
+                self.config_parser.print_log_message(
+                    'INFO', "planner: check_partitioning: " + " | ".join(
+                        str(cell).ljust(widths[index]) for index, cell in enumerate(row)))
+        else:
+            self.config_parser.print_log_message(
+                'INFO', "planner: check_partitioning: no table of the source schema is partitioned.")
+
+        for decision in sorted(plan.values(), key=lambda item: item.table_name):
+            for warning in decision.warnings:
+                self.config_parser.print_log_message('WARNING', f"planner: check_partitioning: {warning}.")
+            blocking_issues.extend(decision.issues)
+
+        blocking_issues.extend(self.check_repartitioning(plan))
+        self.record_partitioning(plan)
+        return blocking_issues
+
+    def check_repartitioning(self, plan):
+        """
+        Every `target_partitioning` entry, against the table it names - §4.4 of the design.
+
+        The columns and the unique keys are read from the SOURCE: the protocol tables are
+        still empty at this point in the run, which is what makes this the early copy of the
+        check the planner makes again when it prepares the table.
+        """
+        blocking_issues = []
+        entries = self.config_parser.get_target_partitioning()
+        if not entries:
+            return blocking_issues
+
+        for entry in entries:
+            table_name = entry.get('table_name')
+            decision = plan.get(table_name)
+            columns = []
+            unique_keys = None
+            table_exists = decision is not None
+            if table_exists:
+                try:
+                    source_columns = self.source_connection.fetch_table_columns({
+                        'table_schema': self.source_schema_name,
+                        'table_name': table_name,
+                        'target_db_type': self.config_parser.get_target_db_type(),
+                    })
+                    columns = [column['column_name'] for column in (source_columns or {}).values()]
+                except Exception as e:
+                    self.config_parser.print_log_message(
+                        'WARNING', f"planner: check_repartitioning: the columns of {table_name} "
+                                   f"could not be read ({e}) - the entry is not checked against them.")
+                unique_keys = self.read_unique_keys(table_name)
+
+            issues, warnings = partitioning.check_repartitioning(
+                entry, columns, unique_keys,
+                target_version_num=self.target_connection.get_server_version_num(),
+                table_exists=table_exists,
+                table_is_partition=bool(decision and decision.scheme.get('is_partition')))
+            for warning in warnings:
+                self.config_parser.print_log_message('WARNING', f"planner: check_repartitioning: {warning}.")
+            blocking_issues.extend(issues)
+        return blocking_issues
+
+    def read_unique_keys(self, table_name):
+        """
+        The primary key and the unique constraints of one source table, as
+        partitioning.check_repartitioning() wants them - or None where they could not be read,
+        which is reported as a check which was NOT made rather than as one which passed.
+        """
+        table_id = (self.partitioning_table_ids or {}).get(table_name)
+        try:
+            indexes = self.source_connection.fetch_indexes({
+                'source_table_id': table_id,
+                'source_table_name': table_name,
+                'source_table_schema': self.source_schema_name,
+                'source_db_type': self.config_parser.get_source_db_type(),
+                'source_db_version': self.config_parser.get_source_db_version(),
+                'target_table_schema': self.target_schema_name,
+                'target_table_name': table_name,
+                'target_columns': {},
+            })
+        except Exception as e:
+            self.config_parser.print_log_message(
+                'DEBUG', f"planner: read_unique_keys: the indexes of {table_name} could not be "
+                         f"read ({e}) - the unique keys are reported as not checked.")
+            return None
+
+        keys = []
+        for _, index in (indexes or {}).items():
+            index_type = str(index.get('index_type') or '').upper()
+            if index_type not in ('PRIMARY KEY', 'UNIQUE'):
+                continue
+            raw_columns = index.get('index_columns') or ''
+            if isinstance(raw_columns, (list, tuple)):
+                columns = [str(name).strip().strip('"') for name in raw_columns]
+            else:
+                columns = [name.strip().strip('"') for name in str(raw_columns).split(',')]
+            keys.append({
+                'name': index.get('index_name'),
+                'columns': [name for name in columns if name],
+                'is_primary': index_type == 'PRIMARY KEY',
+            })
+        return keys
+
+    def record_partitioning(self, plan):
+        """
+        The scheme of the source and the scheme of the target, written into the two protocol
+        tables which have existed - and been created empty at the start of every run - since
+        before this was built.
+        """
+        if self.migrator_tables is None:
+            return
+        for decision in sorted(plan.values(), key=lambda item: item.table_name):
+            scheme = decision.scheme
+            if scheme.get('is_partitioned'):
+                try:
+                    self.migrator_tables.insert_source_table_partitioning({
+                        'source_schema_name': self.source_schema_name,
+                        'source_table_name': decision.table_name,
+                        'source_table_id': (self.partitioning_table_ids or {}).get(decision.table_name),
+                        'source_table_partitioning_level': scheme.get('level', 1),
+                        'source_partition_columns': ', '.join(scheme.get('columns') or []),
+                        'source_partition_ranges': '; '.join(
+                            f"{partition.get('name')}: {partition.get('bound')}"
+                            for partition in scheme.get('partitions') or []),
+                    })
+                except Exception as e:
+                    self.config_parser.print_log_message(
+                        'WARNING', f"planner: record_partitioning: the scheme of {decision.table_name} "
+                                   f"could not be recorded: {e}")
+            if decision.action != partitioning.PRESERVE:
+                continue
+            try:
+                self.migrator_tables.insert_target_table_partitioning({
+                    'target_schema_name': self.target_schema_name,
+                    'target_table_name': decision.table_name,
+                    'target_table_id': (self.partitioning_table_ids or {}).get(decision.table_name),
+                    'target_table_partitioning_level': 1,
+                    'target_partition_columns': ', '.join(scheme.get('columns') or []),
+                    'target_partition_ranges': '; '.join(
+                        f"{partition.name}: {partition.bound}" for partition in decision.partitions),
+                })
+            except Exception as e:
+                self.config_parser.print_log_message(
+                    'WARNING', f"planner: record_partitioning: the target scheme of "
+                               f"{decision.table_name} could not be recorded: {e}")
+
+    def repartitioning_entry(self, source_table_name):
+        """The `target_partitioning` entry which names one table, or None."""
+        for entry in self.config_parser.get_target_partitioning():
+            if entry.get('table_name') == source_table_name:
+                return entry
+        return None
+
+    def repartitioning_sql_for(self, entry, source_table_name, target_table_name):
+        """
+        The PARTITION BY clause and the partitions of one `target_partitioning` entry.
+
+        Returns (clause, [statements], [columns]). An entry which asks for no partitions to be
+        generated - no `date_range` - answers the clause and an empty list, and the table is
+        created partitioned with nothing under it. That is a table which refuses every INSERT
+        with `no partition of relation … found for row`, so it is said out loud here.
+        """
+        columns = partitioning.partitioning_columns_of(entry)
+        quoted = ', '.join(f'"{column}"' for column in columns)
+        clause = f" PARTITION BY {str(entry.get('partition_by') or '').upper()} ({quoted})"
+
+        date_range = entry.get('date_range')
+        if not date_range:
+            self.config_parser.print_log_message(
+                'WARNING', f"planner: repartitioning_sql_for: target_partitioning for "
+                           f"{source_table_name} names no date_range, so no partition is created "
+                           f"for it. The table is created partitioned and EVERY row is refused "
+                           f"with 'no partition of relation ... found for row' - write a "
+                           f"date_range, or take the entry out.")
+            return clause, [], columns
+
+        first_value, last_value = self.source_connection.probe_column_bounds({
+            'source_schema_name': self.source_schema_name,
+            'source_table_name': source_table_name,
+            'column_name': columns[0],
+        })
+        self.config_parser.print_log_message(
+            'INFO', f"planner: repartitioning_sql_for: {source_table_name}.{columns[0]} holds "
+                    f"{first_value} .. {last_value}; the partitions are generated by {date_range}.")
+        partitions = partitioning.generate_range_partitions(
+            entry, target_table_name, first_value, last_value)
+        statements = [self.target_connection.get_create_partition_sql({
+            'target_schema_name': self.target_schema_name,
+            'target_table_name': partition.name,
+            'parent_table_name': target_table_name,
+            'partition_bound': partition.bound,
+        }) for partition in partitions]
+        if not statements:
+            self.config_parser.print_log_message(
+                'WARNING', f"planner: repartitioning_sql_for: {source_table_name} holds no row in "
+                           f"{columns[0]}, so no partition could be generated from its values. The "
+                           f"table is created partitioned and empty.")
+        return clause, statements, columns
+
+    def partitioning_clause_for(self, decision, target_table_name):
+        """
+        What has to be appended to the CREATE TABLE of a preserved parent, and the statements
+        which create its partitions. Returns (partition_by_clause, [statements]).
+        """
+        if decision is None or decision.action != partitioning.PRESERVE:
+            return '', []
+        statements = []
+        for partition in decision.partitions:
+            parent_name = (target_table_name if partition.parent == decision.table_name
+                           else partition.parent)
+            statements.append(self.target_connection.get_create_partition_sql({
+                'target_schema_name': self.target_schema_name,
+                'target_table_name': partition.name,
+                'parent_table_name': parent_name,
+                'partition_bound': partition.bound,
+                'key_definition': partition.key_definition,
+            }))
+        return f" PARTITION BY {decision.key_definition}", statements
+
     def stdwf_prepare_tables(self):
         self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_tables: Preparing tables...")
         # if self.source_db_config.get('connectivity') == 'ddl':
@@ -665,6 +1032,9 @@ class Planner:
         source_tables = self.source_connection.fetch_table_names(self.source_schema_name)
         include_tables = self.config_parser.get_include_tables()
         exclude_tables = self.config_parser.get_exclude_tables() or []
+        ## what happens to every partitioned table - read once, and the same answer the
+        ## pre-migration analysis reported
+        table_partitioning_plan = self.get_partitioning_plan()
 
         self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Source schema: {self.source_schema_name}")
         self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Source tables: {source_tables}")
@@ -692,6 +1062,17 @@ class Planner:
                         })
             if not self.config_parser.report_object_selection(
                     'table', table_info['table_name'], 'planner: stdwf_prepare_tables'):
+                continue
+
+            ## A partition of a table which is being migrated is not a table of its own: it is
+            ## created with its parent and its rows arrive through it. Migrating it separately
+            ## wrote every row twice - the parent answers all of them - and tried to attach a
+            ## partition to a parent nothing had partitioned.
+            partitioning_decision = table_partitioning_plan.get(table_info['table_name'])
+            if partitioning_decision is not None and not partitioning_decision.migrated_as_table:
+                self.config_parser.print_log_message(
+                    'INFO', f"planner: stdwf_prepare_tables: {table_info['table_name']} is not "
+                            f"migrated as a table of its own - {partitioning_decision.reason}.")
                 continue
 
             source_columns = []
@@ -779,64 +1160,46 @@ class Planner:
                 target_table_sql = self.target_connection.get_create_table_sql(settings)
                 self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Target table SQL: {target_table_sql}")
 
-                target_partitioning = self.config_parser.get_target_partitioning()
-                if target_partitioning:
-                    for partitioning_case in target_partitioning:
-                        if partitioning_case['table_name'] == table_info['table_name']:
-                            table_partitioning_columns = ', '.join(
-                                f'"{col.strip()}"' if not col.strip().startswith('"') and not col.strip().endswith('"') else col.strip()
-                                for col in partitioning_case['partitioning_columns'].split(',')
-                            )
-                            target_table_sql += f" PARTITION BY {partitioning_case['partition_by']} ({table_partitioning_columns})"
-                            table_partitioned = True
-                            table_partitioned_by = partitioning_case['partition_by']
-                            self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Adding partitioning to table {table_info['table_name']}: {target_table_sql}")
-                            if 'date_range' in partitioning_case:
-                                if partitioning_case['date_range'] in ('year', 'month', 'week', 'day'):
-                                    query = f"""
-                                        SELECT min({table_partitioning_columns}) as min_value,
-                                        max({table_partitioning_columns}) as max_value
-                                        FROM "{self.source_schema_name}"."{table_info['table_name']}"
-                                        """
-                                    self.source_connection.connect()
-                                    self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Query to get min/max values for partitioning: {query}")
-                                    cursor = self.source_connection.connection.cursor()
-                                    cursor.execute(query)
-                                    min_max = cursor.fetchall()
-                                    cursor.close()
-                                    self.source_connection.disconnect()
-                                    if min_max and len(min_max) > 0:
-                                        min_value = min_max[0][0]
-                                        max_value = min_max[0][1]
-                                        self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Min/Max values for partitioning: {min_value}, {max_value}")
-                                        if partitioning_case['date_range'] in ('year', 'month', 'week'):
-                                            query = f"""
-                                                SELECT
-                                                    'CREATE TABLE IF NOT EXISTS "{self.target_schema_name}"."{table_info['table_name']}_{partitioning_case['date_range']}_' ||
-                                                    to_char(gs.start_date, 'YYYYMMDD') || '" ' ||
-                                                    ' PARTITION OF "{self.target_schema_name}"."{table_info['table_name']}" ' ||
-                                                    ' FOR VALUES FROM (''' || to_char(gs.start_date, 'YYYY-MM-DD') ||
-                                                    ''') TO (''' || to_char(gs.end_date, 'YYYY-MM-DD') || ''')' AS create_partition_sql
-                                                FROM (
-                                                    SELECT
-                                                        date_trunc('{partitioning_case['date_range']}', generate_series)::date AS start_date,
-                                                        (date_trunc('{partitioning_case['date_range']}', generate_series) + interval '1 {partitioning_case['date_range']} - 1 day')::date AS end_date
-                                                    FROM generate_series(
-                                                        date_trunc('{partitioning_case['date_range']}', '{min_value}'::date), -- Replace '2023-01-15' with your start date
-                                                        date_trunc('{partitioning_case['date_range']}', '{max_value}0'::date), -- Replace '2023-05-10' with your end date
-                                                        '1 {partitioning_case['date_range']}'::interval)
-                                                ) gs
-                                            """
-                                            self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Create partitions SQL: {query}")
-                                            self.target_connection.connect()
-                                            cursor = self.target_connection.connection.cursor()
-                                            cursor.execute(query)
-                                            create_partitions_sql = cursor.fetchall()
-                                            # Convert create_partitions_sql into a JSON-encoded string for easy storage and decoding later
+                ## the scheme of the source, kept as it stands - the partitions are created
+                ## in the same worker which creates the parent, through the create_partitions_sql
+                ## the orchestrator already executes right behind the CREATE TABLE
+                partition_by_clause, partition_statements = self.partitioning_clause_for(
+                    partitioning_decision, target_table_name)
+                if partition_by_clause:
+                    target_table_sql += partition_by_clause
+                    create_partitions_sql = json.dumps(partition_statements)
+                    table_partitioned = True
+                    table_partitioned_by = partitioning_decision.method
+                    table_partitioning_columns = ', '.join(partitioning_decision.scheme.get('columns') or [])
+                    self.config_parser.print_log_message(
+                        'INFO', f"planner: stdwf_prepare_tables: {table_info['table_name']} keeps the "
+                                f"partitioning of the source: {partitioning_decision.key_definition}, "
+                                f"{len(partition_statements)} partition(s).")
+                elif partitioning_decision is not None and partitioning_decision.action == partitioning.FLATTEN:
+                    self.config_parser.print_log_message(
+                        'INFO', f"planner: stdwf_prepare_tables: {table_info['table_name']} is "
+                                f"partitioned on the source ({partitioning_decision.key_definition}) "
+                                f"and is created as ONE ordinary table - source_partitioning: flatten.")
 
-                                            create_partitions_sql = json.dumps([row[0] for row in create_partitions_sql])
-                                            cursor.close()
-                                            self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Create partitions SQL: {create_partitions_sql}")
+                ## §5.3 - a scheme the source never had. The bounds are computed from the
+                ## smallest and the largest value of the column, which the connector of the
+                ## SOURCE reads in its own quoting, and the calendar is arithmetic done here
+                ## rather than a generate_series() the target is asked to run over values read
+                ## from the source.
+                if partitioning_decision is not None and partitioning_decision.action == partitioning.REPARTITION:
+                    entry = self.repartitioning_entry(table_info['table_name'])
+                    if entry:
+                        clause, statements, columns = self.repartitioning_sql_for(
+                            entry, table_info['table_name'], target_table_name)
+                        target_table_sql += clause
+                        create_partitions_sql = json.dumps(statements)
+                        table_partitioned = True
+                        table_partitioned_by = str(entry.get('partition_by') or '').upper()
+                        table_partitioning_columns = ', '.join(columns)
+                        self.config_parser.print_log_message(
+                            'INFO', f"planner: stdwf_prepare_tables: {table_info['table_name']} is "
+                                    f"partitioned by target_partitioning:{clause}, "
+                                    f"{len(statements)} partition(s).")
 
                 self.config_parser.print_log_message( 'INFO', f"planner: stdwf_prepare_tables: Counting rows in source table {table_info['table_name']}...")
                 self.source_connection.connect()

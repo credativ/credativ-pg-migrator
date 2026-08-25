@@ -38,6 +38,11 @@ class InformixConnector(DatabaseConnector):
     ## What this connector does not read out of Informix, and what Informix really has - see
     ## DatabaseConnector.OBJECT_KINDS_NOT_READ. An empty answer would say the source has none.
     OBJECT_KINDS_NOT_READ = {
+        'table_partitioning': (
+            'Informix fragments a table by ROUND ROBIN, by EXPRESSION or by a fragment list over '
+            'dbspaces, and keeps it in sysfragments. This connector does not read it - and a round '
+            'robin fragmentation has no partitioning key at all, so there is nothing PostgreSQL '
+            'could be given.'),
         'user_defined_types': ('Informix has DISTINCT types (CREATE DISTINCT TYPE) and named '
                                'ROW types (CREATE ROW TYPE), both in informix.sysxtdtypes. '
                                'This connector does not read either of them.'),

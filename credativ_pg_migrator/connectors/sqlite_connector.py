@@ -173,6 +173,9 @@ class SQLiteConnector(DatabaseConnector):
 
     ## SQLite has neither kind of object - see DatabaseConnector.OBJECT_KINDS_ABSENT.
     OBJECT_KINDS_ABSENT = {
+        'table_partitioning': (
+            'SQLite has no table partitioning at all. A large table is one table there, so an empty '
+            'answer is the truth and not a gap.'),
         'user_defined_types': 'SQLite has no CREATE TYPE - a column carries a type affinity and nothing is declared apart from the table.',
         'domains': 'SQLite has no CREATE DOMAIN. A CHECK constraint on the column is the nearest thing it has, and that is migrated with the table it stands on.',
     }

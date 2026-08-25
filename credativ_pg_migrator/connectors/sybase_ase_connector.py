@@ -193,6 +193,19 @@ class CustomTSQL(TSQL):
         TRANSFORMS[Block] = _block_handler
 
 class SybaseASEConnector(DatabaseConnector):
+    ## What this connector does not read out of its source / what the source does
+    ## not have - see DatabaseConnector.OBJECT_KINDS_NOT_READ.
+    OBJECT_KINDS_NOT_READ = {
+        'table_partitioning': (
+            'Sybase ASE has semantic partitioning since ASE 15 - RANGE, HASH, LIST and ROUND ROBIN '
+            'over segments, kept in syspartitions and syspartitionkeys. This connector does not '
+            'read it.'),
+    }
+
+    ## Sybase ASE delimits an identifier with square brackets, which are accepted whatever
+    ## quoted_identifier is set to.
+    IDENTIFIER_QUOTES = ('[', ']')
+
     def __init__(self, config_parser, source_or_target):
         if source_or_target != 'source':
             raise ValueError(f"Sybase ASE is only supported as a source database")

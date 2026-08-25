@@ -1,6 +1,6 @@
 # credativ-pg-migrator — test suite
 
-1101 test functions in 59 files. **No test in this directory needs a database, a driver
+1180 test functions in 60 files. **No test in this directory needs a database, a driver
 connection, or a network.** Everything that would talk to a server is either constructed
 with `Class.__new__(Class)` and fed a fake config, or replaced with `unittest.mock`. A
 full run touches nothing outside the repository and finishes in seconds.
@@ -37,7 +37,7 @@ tests, and no test depends on the order of the others.
 | configuration & logging | `pyyaml`, `jsonschema`, `pytest` | the 5 `test_config_*` / `test_logging_*` / `test_object_*` files, and `test_schema_names.py` |
 | query conversion | `sqlglot`, `pytest` | the 6 `test_query_*` files and the `test_*_query_conversion.py` of Db2, Oracle and SQL Anywhere |
 | anonymization, Db2 CSV | nothing beyond the standard library | 3 files |
-| everything else | the package's own dependencies — `psycopg2`, `tabulate`, `jaydebeapi`, `pyodbc` | 25 files, `test_informix_query_conversion.py`, `test_mysql_query_conversion.py`, `test_ms_sql_query_conversion.py` and `test_sybase_query_conversion.py`, `test_tsql_outer_joins.py`, `test_oracle_outer_joins.py`, `test_oracle_fk_dependencies.py`, `test_sqlite_query_conversion.py`, `test_postgresql_query_conversion.py` and `test_query_source_test.py` among them |
+| everything else | the package's own dependencies — `psycopg2`, `tabulate`, `jaydebeapi`, `pyodbc` | 26 files, `test_informix_query_conversion.py`, `test_mysql_query_conversion.py`, `test_ms_sql_query_conversion.py` and `test_sybase_query_conversion.py`, `test_tsql_outer_joins.py`, `test_oracle_outer_joins.py`, `test_oracle_fk_dependencies.py`, `test_sqlite_query_conversion.py`, `test_postgresql_query_conversion.py` and `test_query_source_test.py` among them |
 
 The third group imports the connectors, which import their drivers at module level, so
 those files fail to **collect** if the drivers are absent — the message is
@@ -60,7 +60,8 @@ python3 -m pytest tests/ -q \
   --ignore=tests/test_oracle_fk_dependencies.py \
   --ignore=tests/test_sqlite_query_conversion.py \
   --ignore=tests/test_postgresql_query_conversion.py \
-  --ignore=tests/test_query_source_test.py
+  --ignore=tests/test_query_source_test.py \
+  --ignore=tests/test_partitioning.py
 ```
 
 **Expected result: `545 passed, 6 skipped`** (13 files; the count is higher than the number
@@ -691,6 +692,43 @@ the index migration, and that the index type is read from `pg_constraint` rather
 from `information_schema`.
 
 **Expected result.** All 60 pass.
+
+### `test_partitioning.py` — 111 tests
+
+**Purpose.** What becomes of a table which is partitioned, PostgreSQL to PostgreSQL.
+`development/PARTITIONING_STRATEGY.md` §0.4. Three answers — the scheme of the source
+**preserved**, **flattened** into one ordinary table, or replaced by the `target_partitioning`
+somebody wrote by hand — and one which is not an answer: a **partition** is never a table of its
+own. That last one is the defect it was built on. `fetch_table_names()` answers the parent and
+every partition of it, so every row was migrated twice — the parent answers all of them — and
+each partition was answered with `CREATE TABLE … PARTITION OF` against a parent nothing had
+partitioned.
+
+**Covers.** The decision, which is a pure function of what the catalogue said and therefore needs
+no database: a partition of a partition belongs to the table at the top; the statements come out
+parents-before-children so they can be executed in order; a sub-partitioned partition carries its
+own key; a `DEFAULT` partition is carried over with a word about what attaching a partition
+later will cost; the mode can be set globally and per table, and a table listed in
+`table_settings` for another reason keeps the global one. Then the feasibility, which runs before
+anything is created: `HASH` and `DEFAULT` need PostgreSQL 11, a scheme whose key could not be
+read is refused with the alternative named, a target whose version is unknown is reported as
+**not checked** rather than as checked, and — the rule which breaks migrations — a primary key or
+unique constraint which does not contain every partitioning column stops the run instead of
+failing after the data is loaded. And the connector: what it reads out of `pg_partitioned_table`
+and `pg_inherits`, that `reltuples = -1` is *unknown* and not zero, that an expression key
+(`RANGE (date_trunc('month'::text, created_at))`) is one column and not two, and that
+`get_create_table_sql()` no longer writes a `PARTITION BY` of its own — asserted against the
+parsed code, because the comments there explain what used to be.
+
+Then the **generator** of a scheme the source never had, which is where the defects of §0.3 of
+the design lived: the end of a partition is the start of the next one (the old one wrote
+`start + 1 interval - 1 day`, so the last day of every month fell between two partitions), all
+five ranges including `day` and `quarter`, one interval of headroom at each end, and a name
+which does not fit into an identifier or which two partitions would share is refused rather than
+silently truncated into its neighbour. And that the min/max of the column is asked in the quoting
+of the SOURCE, one column at a time, with MySQL's backtick and the Transact-SQL bracket asserted
+per connector: a double quote is a string literal in MySQL, so `min("col")` there answers the
+constant.
 
 ### `test_pg_udt_ordering.py` — 16 tests
 

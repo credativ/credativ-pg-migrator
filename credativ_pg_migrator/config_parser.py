@@ -61,6 +61,7 @@ class ConfigParser:
         ('migration', 'on_undecodable_bytes'),
         ('migration', 'packages_as'),
         ('migration', 'validate_objects'),
+        ('migration', 'source_partitioning'),
         ('query_conversion', 'source_test'),
         ('query_conversion', 'target_test'),
         ('query_conversion', 'output', 'sidecar'),
@@ -921,15 +922,19 @@ class ConfigParser:
     def should_create_tables(self):
         return (self.config.get('migration') or {}).get('create_tables', False)
 
-    def get_table_migration_switch(self, switch_name: str, table_name=None):
+    def get_table_migration_switch(self, switch_name: str, table_name=None, default=False):
         """
         Returns the value of one of the migrate_* switches for a single table. A table_settings
         entry overrides the global migration setting only when it really contains the switch -
         a table listed in table_settings for a completely different reason (character set,
         delimiter, header, ...) keeps the global setting instead of silently losing its data,
         indexes, constraints or triggers.
+
+        `default` is what a setting which is written nowhere answers. It is False for the
+        migrate_* switches, which is what they have always answered; a setting whose values are
+        words rather than booleans - source_partitioning - passes its own.
         """
-        global_value = (self.config.get('migration') or {}).get(switch_name, False)
+        global_value = (self.config.get('migration') or {}).get(switch_name, default)
         if table_name:
             table_settings = (self.config.get('table_settings') or {})
             # table_settings is expected to be a list of dicts with 'table_name' and settings
@@ -961,6 +966,30 @@ class ConfigParser:
 
     def should_migrate_views(self):
         return (self.config.get('migration') or {}).get('migrate_views', False)
+
+    def get_source_partitioning(self, table_name=None):
+        """
+        What becomes of a table the SOURCE partitions - 'preserve' or 'flatten'.
+
+        Global in `migration.source_partitioning` and overridable per table through a
+        `table_settings` entry, exactly as the migrate_* switches are. The default is
+        'preserve': a migration which is not asked to change the shape of a table should not
+        change it, and a partitioned table arriving as one ordinary table is a change nobody
+        asked for.
+
+        A value which is neither a standard value nor an alias is reported and read as
+        'preserve' - the answer which keeps what the source has.
+        """
+        value = self.get_table_migration_switch('source_partitioning', table_name, default='preserve')
+        resolved = self.resolve_standard_value(value, self.SOURCE_PARTITIONING_STANDARD,
+                                               self.SOURCE_PARTITIONING_ALIASES)
+        if resolved:
+            return resolved
+        self.print_log_message('WARNING',
+            f"config_parser: get_source_partitioning: unknown source_partitioning '{value}' - "
+            f"the scheme of the source is preserved. The values are "
+            f"{', '.join(self.SOURCE_PARTITIONING_STANDARD)}.")
+        return 'preserve'
 
     def get_packages_migration_style(self):
         # How source packages (Oracle) are represented on the target, which has no packages.
@@ -1347,6 +1376,19 @@ class ConfigParser:
         'false': 'off', 'no': 'off', 'none': 'off', 'skip': 'off',
     }
 
+    ## What becomes of a table which the SOURCE partitions. 'preserve' builds the same scheme
+    ## on the target, 'flatten' builds one ordinary table out of it. It is not the same
+    ## question as target_partitioning, which builds a scheme the source never had - a table
+    ## named there is re-partitioned whatever this says, and the run reports it.
+    SOURCE_PARTITIONING_STANDARD = ('preserve', 'flatten')
+    SOURCE_PARTITIONING_ALIASES = {
+        'as_is': 'preserve', 'as-is': 'preserve', 'keep': 'preserve', 'copy': 'preserve',
+        'same': 'preserve', 'true': 'preserve', 'yes': 'preserve', 'on': 'preserve',
+        'monolith': 'flatten', 'monolithic': 'flatten', 'merge': 'flatten',
+        'single': 'flatten', 'single_table': 'flatten', 'none': 'flatten', 'off': 'flatten',
+        'false': 'flatten', 'no': 'flatten',
+    }
+
     PACKAGES_AS_STANDARD = ('functions', 'schemas')
     PACKAGES_AS_ALIASES = {
         'function': 'functions', 'prefixed_functions': 'functions', 'prefix': 'functions',
@@ -1668,7 +1710,21 @@ class ConfigParser:
         return self.get_db_session_settings('target')
 
     def get_target_partitioning(self):
-        return (self.config.get('target_partitioning') or {})
+        """
+        The entries of target_partitioning, as a list.
+
+        It used to default a LIST setting to an empty dict, which is harmless while it is
+        empty and is a `TypeError: string indices must be integers` for a configuration which
+        writes the block as a mapping - §0.3 of development/PARTITIONING_STRATEGY.md. A value
+        which is not a list is reported and ignored rather than being iterated.
+        """
+        value = self.config.get('target_partitioning') or []
+        if isinstance(value, (list, tuple)):
+            return [entry for entry in value if isinstance(entry, dict)]
+        self.print_log_message('WARNING',
+            f"config_parser: get_target_partitioning: target_partitioning must be a list of "
+            f"entries, found {type(value).__name__} - it is ignored.")
+        return []
 
     def get_source_data_export(self):
         source_config = self.get_source_config()

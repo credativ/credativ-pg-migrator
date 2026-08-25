@@ -941,23 +941,14 @@ class PostgreSQLConnector(DatabaseConnector):
         create_table_sql = ""
         create_table_sql_parts = []
 
-        if self.config_parser.get_source_db_type() == 'postgresql':
-           table_info_list = self.fetch_table_names(source_schema_name)
-           # Find key for current table
-           current_table_info = None
-           for key, val in table_info_list.items():
-               if val['table_name'] == source_table_name:
-                   current_table_info = val
-                   break
-
-           if current_table_info:
-               if current_table_info.get('relispartition'):
-                   # It is a partition. Generate CREATE TABLE ... PARTITION OF ...
-                   parent_table = current_table_info.get('parent_table')
-                   partition_bound = current_table_info.get('partition_bound')
-                   # For partition, we don't list columns as they are inherited
-                   create_table_sql = f"""CREATE TABLE "{target_schema_name}"."{target_table_name}" PARTITION OF "{target_schema_name}"."{parent_table}" {partition_bound}"""
-                   return create_table_sql
+        ## A partition of the source used to be answered here with
+        ## `CREATE TABLE … PARTITION OF <parent>`, which produced a statement the target
+        ## refused: the parent was created WITHOUT a PARTITION BY clause, because nothing
+        ## added one, and its rows were migrated twice - once through the parent, which
+        ## answers all of them, and once through the partition. The whole decision is the
+        ## planner's now (`partitioning.build_plan()`): a partition of a table which is being
+        ## migrated is not a table of its own, and the parent carries both its PARTITION BY
+        ## clause and the statements which create its partitions.
 
         self.config_parser.print_log_message('DEBUG', f"postgresql_connector: get_create_table_sql: Creating DDL for table {target_schema_name}.{target_table_name}, case handling: {self.config_parser.get_names_case_handling()}")
 
@@ -1249,11 +1240,13 @@ class PostgreSQLConnector(DatabaseConnector):
 
         create_table_sql = ", ".join(create_table_sql_parts)
 
-        if self.config_parser.get_source_db_type() == 'postgresql' and current_table_info and current_table_info.get('relkind') == 'p':
-            partition_key_def = current_table_info.get('partition_key_def')
-            create_table_sql = f"""CREATE TABLE "{target_schema_name}"."{target_table_name}" ({create_table_sql}) PARTITION BY {partition_key_def}"""
-        else:
-            create_table_sql = f"""CREATE TABLE "{target_schema_name}"."{target_table_name}" ({create_table_sql})"""
+        ## The PARTITION BY clause of a partitioned parent used to be appended here, out of a
+        ## fetch_table_names() of the whole schema run once per table. It is the planner's now,
+        ## from the decision `partitioning.build_plan()` took - which is the only place where
+        ## preserving the scheme of the source, flattening it and re-partitioning by
+        ## target_partitioning can be told apart, and the only place which also knows what to do
+        ## with the partitions themselves.
+        create_table_sql = f"""CREATE TABLE "{target_schema_name}"."{target_table_name}" ({create_table_sql})"""
         return create_table_sql
 
     def is_string_type(self, column_type: str) -> bool:
@@ -1705,6 +1698,13 @@ class PostgreSQLConnector(DatabaseConnector):
             FROM pg_constraint
             WHERE conrelid = '{source_table_id}'::regclass
             AND contype NOT IN ('n')
+            -- A constraint with a parent is one PostgreSQL maintains ITSELF for a partition
+            -- tree: a foreign key referencing a partitioned table gets one child per partition
+            -- of the referenced side, and a constraint on a partitioned parent gets one child
+            -- per partition. Migrating them is wrong twice over - the target creates them
+            -- again by itself from the parent constraint, under the same generated names, and
+            -- each of them names a partition which is not a table of this migration at all.
+            AND conparentid = 0
         """
         try:
             self.connect()
@@ -3511,6 +3511,223 @@ class PostgreSQLConnector(DatabaseConnector):
             f'PREPARE {name} AS {body};',
             f'DEALLOCATE {name};',
         ], ['ROLLBACK;'])
+
+    ## ---------------------------------------------------------------- partitioning
+
+    ## The methods PostgreSQL writes in front of the key of a partitioned table, and the
+    ## server version each of them needs. Hash partitioning and the DEFAULT partition arrived
+    ## together in 11; declarative partitioning itself in 10.
+    PARTITIONING_METHOD_VERSIONS = {'RANGE': 100000, 'LIST': 100000, 'HASH': 110000}
+
+    ## The key as pg_get_partkeydef() writes it: 'RANGE (created_at)', 'LIST (region)',
+    ## 'HASH (customer_id)', 'RANGE (created_at, region)', and expressions as well -
+    ## 'RANGE (date_trunc(''month''::text, created_at))'.
+    PARTITION_KEY_DEFINITION = re.compile(r'(?is)^\s*(RANGE|LIST|HASH)\s*\((.*)\)\s*$')
+
+    def fetch_partitioning_candidates(self, schema):
+        """
+        The tables of one schema which are partitioned or are partitions, in one query - so
+        that a schema of three hundred ordinary tables costs one round trip rather than three
+        hundred.
+        """
+        query = """
+            SELECT c.relname
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = %s
+              AND c.relkind IN ('r', 'p')
+              AND (c.relkind = 'p' OR c.relispartition)
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query, (schema,))
+            names = {row[0] for row in cursor.fetchall()}
+            cursor.close()
+            return names
+        except Exception as e:
+            self.config_parser.print_log_message(
+                'WARNING', f"postgresql_connector: fetch_partitioning_candidates: the partitioned "
+                           f"tables of {schema} could not be listed ({first_line(e)}) - every table "
+                           f"is asked instead.")
+            return None
+
+    def fetch_table_partitioning(self, settings):
+        """
+        The partitioning of one table, read out of pg_class / pg_partitioned_table /
+        pg_inherits. See the contract in DatabaseConnector.fetch_table_partitioning().
+
+        Only the partitions of the level below this table are listed. A partition which is
+        itself partitioned says so with `is_partitioned`, and the caller asks it in turn -
+        which is how a scheme of more than one level is read without this method recursing
+        into a table the configuration may not even have selected.
+        """
+        source_schema_name = settings['source_schema_name']
+        source_table_name = settings['source_table_name']
+
+        query = """
+            SELECT c.oid,
+                   c.relkind,
+                   c.relispartition,
+                   pg_get_partkeydef(c.oid)                       AS key_definition,
+                   pg_get_expr(c.relpartbound, c.oid)             AS partition_bound,
+                   parent.relname                                 AS parent_table,
+                   parent_ns.nspname                              AS parent_schema
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            LEFT JOIN pg_inherits i ON i.inhrelid = c.oid
+            LEFT JOIN pg_class parent ON parent.oid = i.inhparent
+            LEFT JOIN pg_namespace parent_ns ON parent_ns.oid = parent.relnamespace
+            WHERE n.nspname = %s AND c.relname = %s AND c.relkind IN ('r', 'p')
+        """
+        partitions_query = """
+            SELECT child.relname,
+                   pg_get_expr(child.relpartbound, child.oid)     AS partition_bound,
+                   child.relkind = 'p'                            AS is_partitioned,
+                   child.reltuples::bigint                        AS estimated_rows
+            FROM pg_inherits i
+            JOIN pg_class child ON child.oid = i.inhrelid
+            JOIN pg_class parent ON parent.oid = i.inhparent
+            JOIN pg_namespace n ON n.oid = parent.relnamespace
+            WHERE n.nspname = %s AND parent.relname = %s
+            ORDER BY child.relname
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query, (source_schema_name, source_table_name))
+            row = cursor.fetchone()
+            if row is None:
+                cursor.close()
+                return {}
+
+            is_partitioned = row[1] == 'p'
+            is_partition = bool(row[2])
+            if not is_partitioned and not is_partition:
+                cursor.close()
+                return {}
+
+            method, columns = self.parse_partition_key_definition(row[3])
+            partitions = []
+            if is_partitioned:
+                cursor.execute(partitions_query, (source_schema_name, source_table_name))
+                for partition in cursor.fetchall():
+                    bound = partition[1] or ''
+                    partitions.append({
+                        'name': partition[0],
+                        'bound': bound,
+                        ## a DEFAULT partition takes every row no other partition takes, and
+                        ## it is what makes ATTACH of a new partition expensive - the reader of
+                        ## the report has to be told which one it is
+                        'is_default': bound.strip().upper() == 'DEFAULT',
+                        'is_partitioned': bool(partition[2]),
+                        ## reltuples is the planner's estimate and is -1 on a relation which
+                        ## was never analysed; it is reported as unknown rather than as 0
+                        'rows': int(partition[3]) if partition[3] is not None and partition[3] >= 0 else None,
+                    })
+            cursor.close()
+        except Exception as e:
+            self.config_parser.print_log_message(
+                'ERROR', f"postgresql_connector: fetch_table_partitioning: the partitioning of "
+                         f"{source_schema_name}.{source_table_name} could not be read: {first_line(e)}")
+            return {}
+
+        return {
+            'is_partitioned': is_partitioned,
+            'is_partition': is_partition,
+            'parent_table': row[5] or '',
+            'parent_schema': row[6] or '',
+            'partition_bound': row[4] or '',
+            'method': method,
+            'columns': columns,
+            'key_definition': row[3] or '',
+            ## the level is what the caller knows and this method does not: a partition of a
+            ## partition is level 3, and only the walk which found it can say so
+            'level': 1,
+            'partitions': partitions,
+            'partition_count': len(partitions),
+            'engine_specific': {},
+        }
+
+    @classmethod
+    def parse_partition_key_definition(cls, key_definition):
+        """
+        The method and the columns out of what pg_get_partkeydef() wrote.
+
+        The columns are answered as they stand, so an expression key - which PostgreSQL allows
+        and this migrator's target_partitioning does not offer - comes back as the expression
+        rather than as a name which does not exist.
+        """
+        if not key_definition:
+            return '', []
+        match = cls.PARTITION_KEY_DEFINITION.match(key_definition)
+        if not match:
+            return '', []
+        method = match.group(1).upper()
+        columns = [part.strip() for part in cls.split_top_level_commas(match.group(2)) if part.strip()]
+        return method, columns
+
+    @staticmethod
+    def split_top_level_commas(text):
+        """Split on the commas which are not inside brackets or a string literal."""
+        parts = []
+        depth = 0
+        in_literal = False
+        current = []
+        index = 0
+        while index < len(text):
+            char = text[index]
+            if in_literal:
+                current.append(char)
+                if char == "'":
+                    if index + 1 < len(text) and text[index + 1] == "'":
+                        current.append(text[index + 1])
+                        index += 2
+                        continue
+                    in_literal = False
+                index += 1
+                continue
+            if char == "'":
+                in_literal = True
+                current.append(char)
+            elif char in '([':
+                depth += 1
+                current.append(char)
+            elif char in ')]':
+                depth -= 1
+                current.append(char)
+            elif char == ',' and depth == 0:
+                parts.append(''.join(current))
+                current = []
+            else:
+                current.append(char)
+            index += 1
+        parts.append(''.join(current))
+        return parts
+
+    def get_create_partition_sql(self, settings):
+        """
+        `CREATE TABLE … PARTITION OF …` for one partition of a scheme which is carried over
+        from the source as it stands.
+
+        The bound is the text `pg_get_expr(relpartbound)` answered on the source - it is
+        already PostgreSQL and is not rewritten. Only the names are: the schema is the target
+        schema, and the table names go through names_case_handling like every other name.
+        """
+        target_schema_name = settings['target_schema_name']
+        target_table_name = self.config_parser.convert_names_case(settings['target_table_name'])
+        parent_table_name = self.config_parser.convert_names_case(settings['parent_table_name'])
+        bound = (settings.get('partition_bound') or '').strip()
+        if not bound:
+            raise ValueError(f"the partition {target_table_name} of {parent_table_name} has no "
+                             f"bound - it cannot be created without one")
+        sql = (f'CREATE TABLE "{target_schema_name}"."{target_table_name}" '
+               f'PARTITION OF "{target_schema_name}"."{parent_table_name}" {bound}')
+        key_definition = (settings.get('key_definition') or '').strip()
+        if key_definition:
+            ## a partition which is itself partitioned - the scheme has more than one level
+            sql += f' PARTITION BY {key_definition}'
+        return sql
 
     ## ---------------------------------------------------------------- application queries
 

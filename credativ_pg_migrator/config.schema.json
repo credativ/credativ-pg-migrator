@@ -546,6 +546,68 @@
           "default": false,
           "description": "Migrate the views. Global only."
         },
+        "source_partitioning": {
+          "default": "preserve",
+          "description": "What becomes of a table which the SOURCE partitions. 'preserve' (the default) builds the same scheme on the target - every partition of the source becomes a partition of the target, sub-partitions included, and the rows go in through the parent so that PostgreSQL routes each one. 'flatten' builds one ordinary table out of it and says so, per table, in the log and in the pre-migration analysis. A partition is never migrated as a table of its own: it is created with its parent. This is not the same setting as target_partitioning, which builds a scheme the source never had - a table named there is re-partitioned whatever this says. Read case-insensitively. A source whose connector does not read partitioning reports that instead, and its partitioned tables arrive flattened.",
+          "anyOf": [
+            {
+              "title": "standard values",
+              "description": "The values to use. 'preserve', 'flatten'.",
+              "enum": [
+                "preserve",
+                "flatten"
+              ]
+            },
+            {
+              "title": "accepted aliases",
+              "description": "Synonyms accepted for compatibility, each read as the standard value it stands for. Prefer the standard value. The configuration is read with PyYAML, which follows YAML 1.1, so an unquoted no is the boolean false and an unquoted on is true: false, no and none are read as 'flatten' - no partitioning on the target - and true, yes and on as 'preserve'.",
+              "enum": [
+                "as_is",
+                "as-is",
+                "copy",
+                "false",
+                "keep",
+                "merge",
+                "monolith",
+                "monolithic",
+                "no",
+                "none",
+                "off",
+                "on",
+                "same",
+                "single",
+                "single_table",
+                "true",
+                "yes",
+                true,
+                false
+              ]
+            }
+          ],
+          "x-standard-values": [
+            "preserve",
+            "flatten"
+          ],
+          "x-aliases": {
+            "as_is": "preserve",
+            "as-is": "preserve",
+            "keep": "preserve",
+            "copy": "preserve",
+            "same": "preserve",
+            "true": "preserve",
+            "yes": "preserve",
+            "on": "preserve",
+            "monolith": "flatten",
+            "monolithic": "flatten",
+            "merge": "flatten",
+            "single": "flatten",
+            "single_table": "flatten",
+            "none": "flatten",
+            "off": "flatten",
+            "false": "flatten",
+            "no": "flatten"
+          }
+        },
         "set_sequences": {
           "type": "boolean",
           "default": false,
@@ -957,6 +1019,68 @@
           "target_lob_storage": {
             "$ref": "#/$defs/targetLobStorage",
             "x-implemented": false
+          },
+          "source_partitioning": {
+            "default": "preserve",
+            "description": "Per-table override of migration.source_partitioning: 'preserve' or 'flatten'. What becomes of a table which the SOURCE partitions. 'preserve' (the default) builds the same scheme on the target - every partition of the source becomes a partition of the target, sub-partitions included, and the rows go in through the parent so that PostgreSQL routes each one. 'flatten' builds one ordinary table out of it and says so, per table, in the log and in the pre-migration analysis. A partition is never migrated as a table of its own: it is created with its parent. This is not the same setting as target_partitioning, which builds a scheme the source never had - a table named there is re-partitioned whatever this says. Read case-insensitively. A source whose connector does not read partitioning reports that instead, and its partitioned tables arrive flattened.",
+            "anyOf": [
+              {
+                "title": "standard values",
+                "description": "The values to use. 'preserve', 'flatten'.",
+                "enum": [
+                  "preserve",
+                  "flatten"
+                ]
+              },
+              {
+                "title": "accepted aliases",
+                "description": "Synonyms accepted for compatibility, each read as the standard value it stands for. Prefer the standard value. The configuration is read with PyYAML, which follows YAML 1.1, so an unquoted no is the boolean false and an unquoted on is true: false, no and none are read as 'flatten' - no partitioning on the target - and true, yes and on as 'preserve'.",
+                "enum": [
+                  "as_is",
+                  "as-is",
+                  "copy",
+                  "false",
+                  "keep",
+                  "merge",
+                  "monolith",
+                  "monolithic",
+                  "no",
+                  "none",
+                  "off",
+                  "on",
+                  "same",
+                  "single",
+                  "single_table",
+                  "true",
+                  "yes",
+                  true,
+                  false
+                ]
+              }
+            ],
+            "x-standard-values": [
+              "preserve",
+              "flatten"
+            ],
+            "x-aliases": {
+              "as_is": "preserve",
+              "as-is": "preserve",
+              "keep": "preserve",
+              "copy": "preserve",
+              "same": "preserve",
+              "true": "preserve",
+              "yes": "preserve",
+              "on": "preserve",
+              "monolith": "flatten",
+              "monolithic": "flatten",
+              "merge": "flatten",
+              "single": "flatten",
+              "single_table": "flatten",
+              "none": "flatten",
+              "off": "flatten",
+              "false": "flatten",
+              "no": "flatten"
+            }
           }
         }
       }
@@ -1238,11 +1362,22 @@
             "type": "string",
             "enum": [
               "year",
+              "quarter",
               "month",
               "week",
               "day"
             ],
-            "description": "For a RANGE partitioning over a date column: the migrator also creates the partitions covering the range of values found in the source column. Only year, month and week actually create partitions - 'day' is accepted but creates none (planner.py:807)."
+            "description": "For a RANGE partitioning over one date or timestamp column: the migrator reads the smallest and the largest value the column holds in the source and creates one partition per interval covering them, with one interval of headroom at each end. The bounds are inclusive at the start and exclusive at the end, so no value falls between two partitions."
+          },
+          "default_partition": {
+            "type": "boolean",
+            "default": false,
+            "description": "Also create a DEFAULT partition, which takes every row no other partition takes. It is a safety net and not a plan: attaching a partition later makes PostgreSQL scan the default partition to prove that no row in it belongs in the new one."
+          },
+          "partition_name": {
+            "type": "string",
+            "default": "{table}_{range}_{start:%Y%m%d}",
+            "description": "How a generated partition is named. {table}, {range}, {start} and {end} are substituted, and {start} and {end} take a date format ({start:%Y%m}). A name longer than the 63 characters of an identifier, or one which two partitions would share, stops the run - PostgreSQL truncates silently and the two would collide."
           }
         }
       }

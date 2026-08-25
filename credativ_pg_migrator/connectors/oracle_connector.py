@@ -34,6 +34,16 @@ class OracleConnector(OracleQueryConversion, DatabaseConnector):
         'the tables and the columns inside the body are named as the routine of the source '
         'named them - only the schema in front of them is re-pointed. They are written '
         'without quotes, so PostgreSQL folds them to lower case')
+    ## What this connector does not read out of its source / what the source does
+    ## not have - see DatabaseConnector.OBJECT_KINDS_NOT_READ.
+    OBJECT_KINDS_NOT_READ = {
+        'table_partitioning': (
+            'Oracle partitions by RANGE, LIST, HASH, INTERVAL, REFERENCE and SYSTEM, composite '
+            'schemes included, and keeps the scheme in ALL_PART_TABLES, ALL_PART_KEY_COLUMNS and '
+            'ALL_TAB_PARTITIONS. This connector does not read it, so a partitioned table is '
+            'migrated as one ordinary table.'),
+    }
+
     def __init__(self, config_parser, source_or_target):
         if source_or_target != 'source':
             raise ValueError("Oracle is only supported as a source database")

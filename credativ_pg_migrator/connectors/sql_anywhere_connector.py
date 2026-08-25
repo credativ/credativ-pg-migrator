@@ -43,6 +43,14 @@ class SQLAnywhereConnector(SqlAnywhereQueryConversion, DatabaseConnector):
                     'DOMAIN and CREATE DATATYPE make one and the same kind of object, and a '
                     'CHECK or a DEFAULT on such a type is carried with it.'),
     }
+    ## What this connector does not read out of its source / what the source does
+    ## not have - see DatabaseConnector.OBJECT_KINDS_ABSENT.
+    OBJECT_KINDS_ABSENT = {
+        'table_partitioning': (
+            'SQL Anywhere has no table partitioning at all - there is nothing of the kind to read, '
+            'so an empty answer is the truth and not a gap.'),
+    }
+
     def __init__(self, config_parser, source_or_target):
         if source_or_target != 'source':
             raise ValueError("SQL Anywhere is only supported as a source database")

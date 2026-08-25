@@ -240,6 +240,10 @@ class MsSQLConnector(DatabaseConnector):
     ## What this connector does not read out of SQL Server - see
     ## DatabaseConnector.OBJECT_KINDS_NOT_READ. The user defined types ARE read, above.
     OBJECT_KINDS_NOT_READ = {
+        'table_partitioning': (
+            'SQL Server partitions a table with a partition function and a partition scheme over '
+            'filegroups, kept in sys.partition_functions, sys.partition_range_values and '
+            'sys.partition_schemes. This connector does not read them.'),
         'domains': ('SQL Server has rules (CREATE RULE) bound to a type or a column, which are '
                     'the closest thing it has to a domain constraint - the Sybase ASE connector '
                     'of this same migrator reads exactly those as domains. This connector does '
@@ -257,6 +261,10 @@ class MsSQLConnector(DatabaseConnector):
         -151: 'udt',
         -150: 'sql_variant',
     }
+
+    ## SQL Server delimits an identifier with square brackets, which are accepted whatever
+    ## QUOTED_IDENTIFIER is set to.
+    IDENTIFIER_QUOTES = ('[', ']')
 
     def __init__(self, config_parser, source_or_target):
         if source_or_target not in ['source']:

@@ -1750,6 +1750,106 @@ class DatabaseConnector(ABC):
         """Whether the source has no such objects at all, so an empty answer is the truth."""
         return kind in self.OBJECT_KINDS_ABSENT
 
+    ## How this source delimits an identifier. The standard - and Oracle, Db2, Informix,
+    ## SQL Anywhere and PostgreSQL - is the double quote; MySQL and MariaDB use the backtick
+    ## and the Transact-SQL family the square bracket. A connector whose source is one of the
+    ## latter overrides this.
+    IDENTIFIER_QUOTES = ('"', '"')
+
+    def quote_source_identifier(self, name):
+        """One identifier, delimited the way THIS source delimits it."""
+        opening, closing = self.IDENTIFIER_QUOTES
+        return f"{opening}{str(name).replace(closing, closing + closing)}{closing}"
+
+    def probe_column_bounds(self, settings):
+        """
+        The smallest and the largest value of one column of the source - what a range of
+        partitions has to cover.
+
+        settings:
+            source_schema_name, source_table_name, column_name
+
+        Returns (minimum, maximum), or (None, None) for a table with no rows.
+
+        It is built and asked HERE, by the connector of the source, in the quoting of the
+        source. The planner used to assemble it with the double quotes of PostgreSQL and send
+        it to whatever the source was - `SELECT min("created_at") FROM "SCOTT"."ORDERS"` is
+        ORA-00904 against Oracle - and it interpolated the whole column list into `min(...)`,
+        so two partitioning columns produced `min("a", "b")`, which is not a function call in
+        any dialect. §0.3 of development/PARTITIONING_STRATEGY.md.
+        """
+        column_name = settings['column_name']
+        if ',' in str(column_name):
+            raise ValueError(
+                f"the bounds of a range of partitions are read from ONE column, and "
+                f"'{column_name}' names several. A RANGE over more than one column needs its "
+                f"partitions written out rather than generated")
+        table = (f"{self.quote_source_identifier(settings['source_schema_name'])}."
+                 f"{self.quote_source_identifier(settings['source_table_name'])}")
+        query = (f"SELECT min({self.quote_source_identifier(column_name)}), "
+                 f"max({self.quote_source_identifier(column_name)}) FROM {table}")
+        self.config_parser.print_log_message(
+            'DEBUG', f"{type(self).__name__}: probe_column_bounds: {query}")
+        self.connect()
+        cursor = self.connection.cursor()
+        try:
+            cursor.execute(query)
+            row = cursor.fetchone()
+            return (row[0], row[1]) if row else (None, None)
+        finally:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+
+    def fetch_partitioning_candidates(self, schema):
+        """
+        The names of the tables of one schema which are partitioned or are partitions - the
+        only ones fetch_table_partitioning() has to be asked about.
+
+        None says this connector cannot answer it in one query, and every table is asked
+        instead. A connector whose source has no partitioning at all answers an empty set
+        rather than None, and nothing is asked.
+        """
+        return None
+
+    def fetch_table_partitioning(self, settings):
+        """
+        The partitioning of one table of the source.
+
+        settings:
+            source_schema_name - schema the table lives in
+            source_table_name  - the table
+
+        Returns {} for a table which is neither partitioned nor a partition, and otherwise:
+
+        {
+            'is_partitioned': bool,   # the table is a partitioned parent
+            'is_partition':   bool,   # the table is a partition of another table
+            'parent_table':   str,    # the parent, when it is a partition
+            'partition_bound': str,   # its bound, as the source writes it
+            'method':         str,    # RANGE | LIST | HASH
+            'columns':        [str],  # the partitioning columns, in order
+            'key_definition': str,    # the whole key as the source writes it
+            'level':          int,    # 1 for the top level, 2 for a sub-partitioned partition
+            'partitions': [{'name': str, 'bound': str, 'is_default': bool,
+                            'is_partitioned': bool, 'rows': int|None}],
+            'partition_count': int,   # the partitions of THIS level
+            'engine_specific': {},    # what only this source has - reported, never read back
+        }
+
+        It is a report and not a conversion: what the migrator does with it is decided by
+        `migration.source_partitioning` and by `target_partitioning`, and nothing of the source
+        scheme is carried over by this method answering.
+
+        A connector which does not read the partitioning of its source declares it in
+        OBJECT_KINDS_NOT_READ under 'table_partitioning'; a source which has no partitioning at
+        all declares it in OBJECT_KINDS_ABSENT. An empty answer from a connector which declares
+        neither is refused by the test suite - "not read" and "there is none" must not look
+        alike. See development/PARTITIONING_STRATEGY.md §2.4 and §5.1.
+        """
+        return {}
+
     @abstractmethod
     def fetch_user_defined_types(self, schema: str):
         """

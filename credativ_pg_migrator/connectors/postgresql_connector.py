@@ -3705,6 +3705,149 @@ class PostgreSQLConnector(DatabaseConnector):
         parts.append(''.join(current))
         return parts
 
+    ## The types a `date_range` can be counted in. Everything else - a text column holding
+    ## something which looks like a date, a number - has no calendar, and asking for monthly
+    ## partitions over it is a configuration which cannot be carried out.
+    DATE_RANGE_TYPES = ('date', 'timestamp without time zone', 'timestamp with time zone')
+
+    def fetch_partitioning_facts(self, settings):
+        """
+        Everything about one table which decides whether it can be partitioned - read before
+        anything is created, which is the moment the answer is still free.
+
+        See DatabaseConnector.fetch_partitioning_facts() for the shape. Every number here
+        comes from the catalogue or from the statistics the server has already gathered:
+        nothing in this method reads a row of the table.
+        """
+        source_schema_name = settings['source_schema_name']
+        source_table_name = settings['source_table_name']
+
+        columns_query = """
+            SELECT a.attname,
+                   format_type(a.atttypid, a.atttypmod)                     AS type_name,
+                   a.attnotnull,
+                   a.attgenerated <> ''                                     AS is_generated,
+                   EXISTS (SELECT 1 FROM pg_opclass o JOIN pg_am m ON m.oid = o.opcmethod
+                            WHERE o.opcdefault AND m.amname = 'btree'
+                              AND o.opcintype = base.oid)                   AS has_btree,
+                   EXISTS (SELECT 1 FROM pg_opclass o JOIN pg_am m ON m.oid = o.opcmethod
+                            WHERE o.opcdefault AND m.amname = 'hash'
+                              AND o.opcintype = base.oid)                   AS has_hash,
+                   s.null_frac
+            FROM pg_attribute a
+            JOIN pg_class c ON c.oid = a.attrelid
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            -- a domain is partitioned by the operator classes of the type it is built on
+            JOIN LATERAL (
+                WITH RECURSIVE resolved(oid, typbasetype) AS (
+                    SELECT t.oid, t.typbasetype FROM pg_type t WHERE t.oid = a.atttypid
+                    UNION ALL
+                    SELECT t.oid, t.typbasetype FROM pg_type t JOIN resolved r ON t.oid = r.typbasetype
+                )
+                SELECT oid FROM resolved WHERE typbasetype = 0 LIMIT 1
+            ) base ON true
+            LEFT JOIN pg_stats s ON s.schemaname = n.nspname AND s.tablename = c.relname
+                                AND s.attname = a.attname
+            WHERE n.nspname = %s AND c.relname = %s AND a.attnum > 0 AND NOT a.attisdropped
+            ORDER BY a.attnum
+        """
+        keys_query = """
+            SELECT con.conname, con.contype,
+                   ARRAY(SELECT a.attname FROM unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord)
+                          JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum
+                         ORDER BY k.ord)                                    AS columns
+            FROM pg_constraint con
+            JOIN pg_class c ON c.oid = con.conrelid
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = %s AND c.relname = %s
+              AND con.contype IN ('p', 'u', 'x') AND con.conparentid = 0
+            ORDER BY con.conname
+        """
+        ## a unique INDEX which is not a constraint follows the same rule and is easy to forget
+        unique_indexes_query = """
+            SELECT i.relname,
+                   ARRAY(SELECT pg_get_indexdef(x.indexrelid, k.ord::integer, true)
+                           FROM generate_subscripts(x.indkey, 1) AS k(ord))  AS columns
+            FROM pg_index x
+            JOIN pg_class i ON i.oid = x.indexrelid
+            JOIN pg_class c ON c.oid = x.indrelid
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = %s AND c.relname = %s AND x.indisunique
+              AND NOT EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid = i.oid)
+            ORDER BY i.relname
+        """
+        referencing_query = """
+            SELECT con.conname, child.relname
+            FROM pg_constraint con
+            JOIN pg_class c ON c.oid = con.confrelid
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            JOIN pg_class child ON child.oid = con.conrelid
+            WHERE n.nspname = %s AND c.relname = %s AND con.contype = 'f' AND con.conparentid = 0
+            ORDER BY con.conname
+        """
+        table_query = """
+            SELECT c.reltuples::bigint,
+                   EXISTS (SELECT 1 FROM pg_inherits i JOIN pg_class p ON p.oid = i.inhparent
+                            WHERE i.inhrelid = c.oid AND p.relkind <> 'p')  AS inherits_from,
+                   EXISTS (SELECT 1 FROM pg_inherits i JOIN pg_class ch ON ch.oid = i.inhrelid
+                            WHERE i.inhparent = c.oid AND c.relkind <> 'p') AS inherited_by
+            FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = %s AND c.relname = %s
+        """
+        binds = (source_schema_name, source_table_name)
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(columns_query, binds)
+            columns = {}
+            for row in cursor.fetchall():
+                columns[row[0]] = {
+                    'type_name': row[1], 'not_null': bool(row[2]), 'is_generated': bool(row[3]),
+                    'has_btree_opclass': bool(row[4]), 'has_hash_opclass': bool(row[5]),
+                    ## None where nobody has run ANALYZE - reported as not checked, never as 0
+                    'null_fraction': row[6],
+                }
+
+            cursor.execute(keys_query, binds)
+            unique_keys = []
+            exclusion_constraints = []
+            for row in cursor.fetchall():
+                if row[1] == 'x':
+                    exclusion_constraints.append(row[0])
+                    continue
+                unique_keys.append({'name': row[0], 'columns': list(row[2] or []),
+                                    'is_primary': row[1] == 'p'})
+
+            cursor.execute(unique_indexes_query, binds)
+            for row in cursor.fetchall():
+                unique_keys.append({'name': row[0], 'columns': list(row[1] or []),
+                                    'is_primary': False})
+
+            cursor.execute(referencing_query, binds)
+            referenced_by = [{'name': row[0], 'table': row[1]} for row in cursor.fetchall()]
+
+            cursor.execute(table_query, binds)
+            row = cursor.fetchone()
+            cursor.close()
+        except Exception as e:
+            self.config_parser.print_log_message(
+                'WARNING', f"postgresql_connector: fetch_partitioning_facts: the facts of "
+                           f"{source_schema_name}.{source_table_name} could not be read "
+                           f"({first_line(e)}) - the checks which need them are reported as NOT "
+                           f"made rather than as passed.")
+            return None
+
+        return {
+            'columns': columns,
+            'unique_keys': unique_keys,
+            'exclusion_constraints': exclusion_constraints,
+            'referenced_by': referenced_by,
+            'inherits_from_a_plain_table': bool(row[1]) if row else False,
+            'is_a_plain_inheritance_parent': bool(row[2]) if row else False,
+            'row_estimate': int(row[0]) if row and row[0] is not None and row[0] >= 0 else None,
+            'date_range_types': self.DATE_RANGE_TYPES,
+        }
+
     def get_create_partition_sql(self, settings):
         """
         `CREATE TABLE … PARTITION OF …` for one partition of a scheme which is carried over

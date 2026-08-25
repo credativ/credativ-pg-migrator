@@ -1,6 +1,6 @@
 # credativ-pg-migrator — test suite
 
-1180 test functions in 60 files. **No test in this directory needs a database, a driver
+1203 test functions in 60 files. **No test in this directory needs a database, a driver
 connection, or a network.** Everything that would talk to a server is either constructed
 with `Class.__new__(Class)` and fed a fake config, or replaced with `unittest.mock`. A
 full run touches nothing outside the repository and finishes in seconds.
@@ -693,7 +693,7 @@ from `information_schema`.
 
 **Expected result.** All 60 pass.
 
-### `test_partitioning.py` — 111 tests
+### `test_partitioning.py` — 137 tests
 
 **Purpose.** What becomes of a table which is partitioned, PostgreSQL to PostgreSQL.
 `development/PARTITIONING_STRATEGY.md` §0.4. Three answers — the scheme of the source
@@ -729,6 +729,17 @@ silently truncated into its neighbour. And that the min/max of the column is ask
 of the SOURCE, one column at a time, with MySQL's backtick and the Transact-SQL bracket asserted
 per connector: a double quote is a string literal in MySQL, so `min("col")` there answers the
 constant.
+
+And the **diagnosis**, which is the half that stops a run: a generated column as the partition
+key, a type with no default btree operator class for a RANGE key, `date_range` over a column
+which carries no date, a nullable key column whose statistics hold NULLs with no `DEFAULT`
+partition, an inheritance parent, an exclusion constraint, a foreign key referencing the table on
+a target older than 12, a partition count past what a scheme can carry, a generated name the
+target schema already holds, and an entry whose partitions cannot be worked out at all — which
+would build a partitioned table with nothing under it and refuse every row. Each of them is
+asserted as blocking, with the message which names what to write instead; and each of the things
+which could **not** be checked — a column nobody has analysed, a source which reads no facts — is
+asserted to be reported as not checked rather than as good.
 
 ### `test_pg_udt_ordering.py` — 16 tests
 

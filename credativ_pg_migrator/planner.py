@@ -828,44 +828,153 @@ class Planner:
         """
         Every `target_partitioning` entry, against the table it names - §4.4 of the design.
 
-        The columns and the unique keys are read from the SOURCE: the protocol tables are
-        still empty at this point in the run, which is what makes this the early copy of the
-        check the planner makes again when it prepares the table.
+        Everything it reads comes from the SOURCE: the protocol tables are still empty at this
+        point in the run, which is what makes this the early copy of the check the planner
+        makes again when it prepares the table. Everything it refuses is a run which otherwise
+        fails somewhere in the middle - and most of them at the very end, after the data has
+        been loaded, which is the worst moment to find out.
         """
         blocking_issues = []
         entries = self.config_parser.get_target_partitioning()
         if not entries:
             return blocking_issues
 
+        existing_target_names = self.target_schema_object_names()
         for entry in entries:
             table_name = entry.get('table_name')
             decision = plan.get(table_name)
-            columns = []
-            unique_keys = None
             table_exists = decision is not None
-            if table_exists:
-                try:
-                    source_columns = self.source_connection.fetch_table_columns({
-                        'table_schema': self.source_schema_name,
-                        'table_name': table_name,
-                        'target_db_type': self.config_parser.get_target_db_type(),
-                    })
-                    columns = [column['column_name'] for column in (source_columns or {}).values()]
-                except Exception as e:
-                    self.config_parser.print_log_message(
-                        'WARNING', f"planner: check_repartitioning: the columns of {table_name} "
-                                   f"could not be read ({e}) - the entry is not checked against them.")
-                unique_keys = self.read_unique_keys(table_name)
+            columns = []
+            facts = None
+            first_value = last_value = None
+            bounds_were_read = False
 
-            issues, warnings = partitioning.check_repartitioning(
-                entry, columns, unique_keys,
+            if table_exists:
+                columns, facts = self.read_partitioning_facts(table_name)
+                first_value, last_value, bounds_were_read = self.read_partitioning_bounds(
+                    entry, table_name)
+
+            verdict = partitioning.check_repartitioning(
+                entry, columns, None,
                 target_version_num=self.target_connection.get_server_version_num(),
                 table_exists=table_exists,
-                table_is_partition=bool(decision and decision.scheme.get('is_partition')))
-            for warning in warnings:
-                self.config_parser.print_log_message('WARNING', f"planner: check_repartitioning: {warning}.")
-            blocking_issues.extend(issues)
+                table_is_partition=bool(decision and decision.scheme.get('is_partition')),
+                facts=facts,
+                first_value=first_value, last_value=last_value,
+                existing_target_names=existing_target_names,
+                bounds_were_read=bounds_were_read)
+
+            self.report_partitioning_verdict(entry, verdict)
+            blocking_issues.extend(verdict.issues)
         return blocking_issues
+
+    def report_partitioning_verdict(self, entry, verdict):
+        """
+        One block per `target_partitioning` entry: what it asks for, what was checked and found
+        good, what is worth saying, and what stops the run.
+
+        An entry which passes says so as plainly as one which fails. A report which only speaks
+        up when it is unhappy is one nobody trusts when it is silent.
+        """
+        columns = ', '.join(partitioning.partitioning_columns_of(entry)) or '-'
+        headline = (f"target_partitioning: {verdict.table_name} -> "
+                    f"{str(entry.get('partition_by') or '?').upper()} ({columns})"
+                    + (f", {entry.get('date_range')}" if entry.get('date_range') else ''))
+        self.config_parser.print_log_message('INFO', f"planner: check_repartitioning: {headline}")
+        for note in verdict.notes:
+            self.config_parser.print_log_message('INFO', f"planner: check_repartitioning:     ok       {note}")
+        for warning in verdict.warnings:
+            self.config_parser.print_log_message('WARNING', f"planner: check_repartitioning:     note     {warning}.")
+        for issue in verdict.issues:
+            self.config_parser.print_log_message('ERROR', f"planner: check_repartitioning:     BLOCKING {issue}.")
+        if verdict.can_be_built:
+            self.config_parser.print_log_message(
+                'INFO', f"planner: check_repartitioning:     -> {verdict.table_name} can be "
+                        f"partitioned as asked.")
+
+    def read_partitioning_facts(self, table_name):
+        """
+        The columns of one source table and everything about it which decides whether it can be
+        partitioned. Returns (column names, facts) - and facts is None where this connector
+        does not read them, which the checks report as NOT made.
+        """
+        columns = []
+        try:
+            source_columns = self.source_connection.fetch_table_columns({
+                'table_schema': self.source_schema_name,
+                'table_name': table_name,
+                'target_db_type': self.config_parser.get_target_db_type(),
+            })
+            columns = [column['column_name'] for column in (source_columns or {}).values()]
+        except Exception as e:
+            self.config_parser.print_log_message(
+                'WARNING', f"planner: read_partitioning_facts: the columns of {table_name} could "
+                           f"not be read ({e}) - the entry is not checked against them.")
+        try:
+            facts = self.source_connection.fetch_partitioning_facts({
+                'source_schema_name': self.source_schema_name,
+                'source_table_name': table_name,
+            })
+        except Exception as e:
+            self.config_parser.print_log_message(
+                'WARNING', f"planner: read_partitioning_facts: the facts of {table_name} could "
+                           f"not be read ({e}) - the checks which need them are NOT made.")
+            facts = None
+        if facts is None:
+            ## the connector reads no facts of its own - the keys are still worth asking for
+            ## through the indexes, which every connector answers
+            keys = self.read_unique_keys(table_name)
+            if keys is not None:
+                facts = {'columns': {}, 'unique_keys': keys, 'exclusion_constraints': [],
+                         'referenced_by': [], 'row_estimate': None,
+                         'inherits_from_a_plain_table': False,
+                         'is_a_plain_inheritance_parent': False, 'date_range_types': ()}
+        return columns, facts
+
+    def read_partitioning_bounds(self, entry, table_name):
+        """
+        The smallest and the largest value of the partitioning column, for an entry which asks
+        for a range of dates. Returns (first, last, whether they were read).
+        """
+        if not entry.get('date_range'):
+            return None, None, False
+        columns = partitioning.partitioning_columns_of(entry)
+        if not columns:
+            return None, None, False
+        try:
+            first_value, last_value = self.source_connection.probe_column_bounds({
+                'source_schema_name': self.source_schema_name,
+                'source_table_name': table_name,
+                'column_name': columns[0],
+            })
+            return first_value, last_value, True
+        except Exception as e:
+            self.config_parser.print_log_message(
+                'WARNING', f"planner: read_partitioning_bounds: the smallest and the largest "
+                           f"value of {table_name}.{columns[0]} could not be read ({e}).")
+            return None, None, False
+
+    def target_schema_object_names(self):
+        """
+        What the target schema already holds, so that a generated partition name which would
+        collide with it is refused before anything is created rather than in the middle of it.
+        """
+        try:
+            self.target_connection.connect()
+            cursor = self.target_connection.connection.cursor()
+            cursor.execute("""
+                SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname = %s
+            """, (self.target_schema_name,))
+            names = {row[0] for row in cursor.fetchall()}
+            cursor.close()
+            return names
+        except Exception as e:
+            self.config_parser.print_log_message(
+                'DEBUG', f"planner: target_schema_object_names: the objects of "
+                         f"{self.target_schema_name} could not be listed ({e}) - a generated "
+                         f"partition name is not checked against them.")
+            return set()
 
     def read_unique_keys(self, table_name):
         """

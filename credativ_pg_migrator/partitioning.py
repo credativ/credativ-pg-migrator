@@ -67,9 +67,11 @@ def version_text(version_num):
 class Partition:
     """One partition which has to be created, and everything needed to create it."""
 
-    __slots__ = ('name', 'parent', 'bound', 'key_definition', 'level', 'is_default')
+    __slots__ = ('name', 'parent', 'bound', 'key_definition', 'level', 'is_default',
+                 'start', 'end')
 
-    def __init__(self, name, parent, bound, key_definition='', level=2, is_default=False):
+    def __init__(self, name, parent, bound, key_definition='', level=2, is_default=False,
+                 start=None, end=None):
         self.name = name
         self.parent = parent
         self.bound = bound
@@ -77,6 +79,10 @@ class Partition:
         self.key_definition = key_definition
         self.level = level
         self.is_default = is_default
+        ## the dates a GENERATED partition was built from, so that a report can say what the
+        ## scheme covers without parsing the bound it has just written
+        self.start = start
+        self.end = end
 
     def __repr__(self):
         return f'Partition({self.name!r} of {self.parent!r} {self.bound!r})'
@@ -337,93 +343,6 @@ def _check_flattened(decision):
             f"common a query asks for")
 
 
-def check_repartitioning(entry, columns, unique_keys, target_version_num=None,
-                         table_exists=True, table_is_partition=False):
-    """
-    Whether one `target_partitioning` entry can be carried out - §4.4 of the design.
-
-    entry              - the entry, as the configuration holds it
-    columns            - the column names the source table really has
-    unique_keys        - [{'name': str, 'columns': [str], 'is_primary': bool}] of the table,
-                         or None when this connector does not read them
-    target_version_num - the server version of the target
-    table_exists       - whether the table named by the entry is in the source at all
-    table_is_partition - whether it is a partition of another table
-
-    Returns (issues, warnings). Everything it answers is answerable before anything is created.
-    """
-    issues = []
-    warnings = []
-    table_name = entry.get('table_name') or '<unnamed>'
-
-    if not table_exists:
-        issues.append(
-            f"target_partitioning names the table {table_name}, which the source schema does "
-            f"not hold, or which include_tables / exclude_tables leaves out. Nothing would be "
-            f"partitioned and nothing would say so")
-        return issues, warnings
-
-    if table_is_partition:
-        issues.append(
-            f"target_partitioning names {table_name}, which is a PARTITION of another table on "
-            f"the source. A partition is created with its parent and cannot be given a scheme "
-            f"of its own here - name the parent instead")
-        return issues, warnings
-
-    method = str(entry.get('partition_by') or '').upper()
-    if method not in METHOD_VERSIONS:
-        issues.append(
-            f"target_partitioning for {table_name} asks for partition_by '{entry.get('partition_by')}' "
-            f"- PostgreSQL has RANGE, LIST and HASH and nothing else")
-    elif target_version_num and target_version_num < METHOD_VERSIONS[method]:
-        issues.append(
-            f"target_partitioning for {table_name} asks for {method}, which needs PostgreSQL "
-            f"{version_text(METHOD_VERSIONS[method])} or newer - the target runs "
-            f"{version_text(target_version_num)}")
-
-    partitioning_columns = partitioning_columns_of(entry)
-    if not partitioning_columns:
-        issues.append(f"target_partitioning for {table_name} names no partitioning column")
-        return issues, warnings
-
-    known = {str(name).lower() for name in (columns or [])}
-    missing = [name for name in partitioning_columns if name.lower() not in known]
-    if known and missing:
-        issues.append(
-            f"target_partitioning for {table_name} names the column(s) {', '.join(missing)}, "
-            f"which the table does not have. The entry is written in the names of the source")
-
-    if entry.get('date_range') and (method != 'RANGE' or len(partitioning_columns) != 1):
-        issues.append(
-            f"target_partitioning for {table_name} has date_range, which belongs to a RANGE "
-            f"over exactly one date or timestamp column - this entry is {method or 'unset'} "
-            f"over {len(partitioning_columns)} column(s)")
-
-    if unique_keys is None:
-        warnings.append(
-            f"the unique keys of {table_name} could not be read from this source, so it was NOT "
-            f"checked that they contain the partitioning columns. PostgreSQL refuses a primary "
-            f"key or a unique constraint on a partitioned table which does not")
-        return issues, warnings
-
-    for key in unique_keys:
-        key_columns = {str(name).lower() for name in (key.get('columns') or [])}
-        if not key_columns:
-            continue
-        absent = [name for name in partitioning_columns if name.lower() not in key_columns]
-        if not absent:
-            continue
-        kind = 'PRIMARY KEY' if key.get('is_primary') else 'UNIQUE'
-        issues.append(
-            f"{kind} {key.get('name')} of {table_name} is ({', '.join(key.get('columns') or [])}) "
-            f"and does not contain {', '.join(absent)}. PostgreSQL refuses a unique constraint "
-            f"on a partitioned table which does not contain every partitioning column, so the "
-            f"table would be created, the data would be loaded and the constraint would fail. "
-            f"Add {', '.join(absent)} to the key, or do not partition this table by "
-            f"{', '.join(partitioning_columns)}")
-    return issues, warnings
-
-
 ## ------------------------------------------------------------------------------------
 ## The generator: a scheme the source never had - §5.3 of the design.
 ##
@@ -575,12 +494,370 @@ def generate_range_partitions(entry, table_name, first_value, last_value):
         seen[name] = start
         partitions.append(Partition(
             name=name, parent=table_name,
-            bound=f"FOR VALUES FROM ('{start}') TO ('{end}')"))
+            bound=f"FOR VALUES FROM ('{start}') TO ('{end}')", start=start, end=end))
 
     if entry.get('default_partition'):
         partitions.append(Partition(
             name=f'{table_name}_default', parent=table_name, bound='DEFAULT', is_default=True))
     return partitions
+
+
+## The version a foreign key REFERENCING a partitioned table needs. A foreign key FROM one
+## has been possible since 11.
+REFERENCING_PARTITIONED_VERSION = 120000
+
+## Where a partition count stops being a plan and starts being a cost of its own - §2.3 puts
+## "several thousand" at the point where planning time shows on a query which cannot prune.
+PARTITION_COUNT_WARNING = 500
+PARTITION_COUNT_LIMIT = 5000
+
+
+class Verdict:
+    """What was found about one `target_partitioning` entry, and what may be built from it."""
+
+    __slots__ = ('table_name', 'issues', 'warnings', 'notes', 'partitions', 'bounds_usable')
+
+    def __init__(self, table_name):
+        self.table_name = table_name
+        ## cleared when the partitioning column cannot carry a calendar at all - the partitions
+        ## are then not worked out, because "this is not a date" and "this value is not a date"
+        ## are the same finding said twice
+        self.bounds_usable = True
+        ## blocking: the migration would fail later, so it is stopped now
+        self.issues = []
+        ## worth saying, and not a reason to stop
+        self.warnings = []
+        ## what was checked and found good, so that a passing entry says so as plainly as a
+        ## failing one - a report which only speaks up when it is unhappy is a report nobody
+        ## trusts when it is silent
+        self.notes = []
+        self.partitions = []
+
+    @property
+    def can_be_built(self):
+        return not self.issues
+
+
+def check_repartitioning(entry, columns, unique_keys, target_version_num=None,
+                         table_exists=True, table_is_partition=False, facts=None,
+                         first_value=None, last_value=None, existing_target_names=(),
+                         bounds_were_read=False):
+    """
+    Whether one `target_partitioning` entry can be carried out - §4.4 of the design.
+
+    entry               - the entry, as the configuration holds it
+    columns             - the column names the source table really has
+    unique_keys         - [{'name', 'columns', 'is_primary'}], or None where this connector
+                          does not read them
+    target_version_num  - the server version of the target
+    table_exists        - whether the table the entry names is in the migration at all
+    table_is_partition  - whether it is a partition of another table
+    facts               - what fetch_partitioning_facts() answered, or None
+    first_value,
+    last_value          - the smallest and the largest value of the partitioning column, when
+                          they were read; `bounds_were_read` says whether they were
+    existing_target_names - the names the target schema already holds, for the collision check
+
+    Returns a Verdict. Everything it answers is answerable before anything is created, and
+    everything it refuses is a run which otherwise fails somewhere in the middle - most of them
+    at the very end, after the data has been loaded.
+    """
+    verdict = Verdict(entry.get('table_name') or '<unnamed>')
+    table_name = verdict.table_name
+
+    if not table_exists:
+        verdict.issues.append(
+            f"target_partitioning names the table {table_name}, which the source schema does "
+            f"not hold, or which include_tables / exclude_tables leaves out. Nothing would be "
+            f"partitioned and nothing would say so")
+        return verdict
+
+    if table_is_partition:
+        verdict.issues.append(
+            f"target_partitioning names {table_name}, which is a PARTITION of another table on "
+            f"the source. A partition is created with its parent and cannot be given a scheme "
+            f"of its own here - name the parent instead")
+        return verdict
+
+    method = str(entry.get('partition_by') or '').upper()
+    if method not in METHOD_VERSIONS:
+        verdict.issues.append(
+            f"target_partitioning for {table_name} asks for partition_by "
+            f"'{entry.get('partition_by')}' - PostgreSQL has RANGE, LIST and HASH and nothing "
+            f"else")
+    elif target_version_num and target_version_num < METHOD_VERSIONS[method]:
+        verdict.issues.append(
+            f"target_partitioning for {table_name} asks for {method}, which needs PostgreSQL "
+            f"{version_text(METHOD_VERSIONS[method])} or newer - the target runs "
+            f"{version_text(target_version_num)}")
+
+    partitioning_columns = partitioning_columns_of(entry)
+    if not partitioning_columns:
+        verdict.issues.append(f"target_partitioning for {table_name} names no partitioning column")
+        return verdict
+
+    known = {str(name).lower() for name in (columns or [])}
+    missing = [name for name in partitioning_columns if name.lower() not in known]
+    if known and missing:
+        verdict.issues.append(
+            f"target_partitioning for {table_name} names the column(s) {', '.join(missing)}, "
+            f"which the table does not have. The entry is written in the names of the source")
+        return verdict
+
+    if entry.get('date_range') and (method != 'RANGE' or len(partitioning_columns) != 1):
+        verdict.issues.append(
+            f"target_partitioning for {table_name} has date_range, which belongs to a RANGE "
+            f"over exactly one date or timestamp column - this entry is {method or 'unset'} "
+            f"over {len(partitioning_columns)} column(s)")
+
+    _check_the_table_itself(verdict, table_name, facts)
+    _check_the_columns(verdict, entry, table_name, method, partitioning_columns, facts)
+    _check_the_keys(verdict, table_name, partitioning_columns, unique_keys, facts)
+    _check_the_rows_fit(verdict, entry, table_name, method, partitioning_columns, facts)
+    _check_what_references_it(verdict, table_name, facts, target_version_num)
+    _check_the_partitions(verdict, entry, table_name, method, partitioning_columns,
+                          first_value, last_value, existing_target_names, bounds_were_read)
+    return verdict
+
+
+def _check_the_table_itself(verdict, table_name, facts):
+    """The shapes of table which cannot be partitioned at all, whatever the entry says."""
+    if facts is None:
+        return
+    if facts.get('is_a_plain_inheritance_parent'):
+        verdict.issues.append(
+            f"{table_name} is the parent of a table INHERITANCE hierarchy on the source. "
+            f"PostgreSQL cannot make a partitioned table out of a table which other tables "
+            f"inherit from - the two are different mechanisms and a table is one or the other")
+    if facts.get('inherits_from_a_plain_table'):
+        verdict.issues.append(
+            f"{table_name} INHERITS from another table on the source. A partitioned table "
+            f"cannot inherit, so the entry and the hierarchy cannot both be built")
+    for name in facts.get('exclusion_constraints') or []:
+        verdict.issues.append(
+            f"{table_name} carries the EXCLUSION constraint {name}. PostgreSQL does not allow "
+            f"an exclusion constraint on a partitioned table unless every one of its columns is "
+            f"compared with equality and the partitioning columns are among them - the table "
+            f"would be created, the data would be loaded and the constraint would fail")
+    estimate = facts.get('row_estimate')
+    if estimate is not None and 0 <= estimate < 1000:
+        verdict.warnings.append(
+            f"{table_name} holds about {estimate} rows. Partitioning does not make a small "
+            f"table faster - it prunes, it detaches cheaply and it maintains per partition, and "
+            f"none of the three is worth much here")
+
+
+def _check_the_columns(verdict, entry, table_name, method, partitioning_columns, facts):
+    """The partitioning columns themselves: their type, and what PostgreSQL will do with them."""
+    if facts is None:
+        verdict.warnings.append(
+            f"the columns of {table_name} could not be read from this source, so it was NOT "
+            f"checked that their types can carry a {method or 'partitioning'} key")
+        return
+    date_range = entry.get('date_range')
+    date_types = facts.get('date_range_types') or ()
+    for name in partitioning_columns:
+        column = facts['columns'].get(name) or facts['columns'].get(name.lower())
+        if column is None:
+            continue
+        if column.get('is_generated'):
+            verdict.issues.append(
+                f"{table_name}.{name} is a GENERATED column. PostgreSQL refuses a generated "
+                f"column in a partition key")
+        if method in ('RANGE', 'LIST') and not column.get('has_btree_opclass'):
+            verdict.issues.append(
+                f"{table_name}.{name} is {column.get('type_name')}, which has no default btree "
+                f"operator class - a {method} partition key needs one, because the bounds are "
+                f"compared with < and =")
+        if method == 'HASH' and not column.get('has_hash_opclass'):
+            verdict.issues.append(
+                f"{table_name}.{name} is {column.get('type_name')}, which has no default hash "
+                f"operator class - a HASH partition key needs one")
+        if date_range and column.get('type_name') not in date_types:
+            verdict.bounds_usable = False
+            verdict.issues.append(
+                f"target_partitioning for {table_name} asks for date_range: {date_range} over "
+                f"{name}, which is {column.get('type_name')}. A range of dates can only be "
+                f"counted over {' or '.join(date_types)} - write the partitions out, or "
+                f"partition by a column which carries a date")
+        else:
+            verdict.notes.append(f"{name} is {column.get('type_name')}")
+
+
+def _check_the_keys(verdict, table_name, partitioning_columns, unique_keys, facts):
+    """§3.1: the rule which breaks migrations."""
+    keys = unique_keys
+    if keys is None and facts is not None:
+        keys = facts.get('unique_keys')
+    if keys is None:
+        verdict.warnings.append(
+            f"the unique keys of {table_name} could not be read from this source, so it was NOT "
+            f"checked that they contain the partitioning columns. PostgreSQL refuses a primary "
+            f"key or a unique constraint on a partitioned table which does not")
+        return
+    if not keys:
+        verdict.notes.append('no primary key and no unique constraint - nothing to extend')
+        return
+    for key in keys:
+        key_columns = {str(name).lower() for name in (key.get('columns') or [])}
+        if not key_columns:
+            continue
+        kind = 'PRIMARY KEY' if key.get('is_primary') else 'UNIQUE'
+        absent = [name for name in partitioning_columns if name.lower() not in key_columns]
+        if not absent:
+            verdict.notes.append(
+                f"{kind} {key.get('name')} ({', '.join(key.get('columns') or [])}) contains "
+                f"{', '.join(partitioning_columns)}")
+            continue
+        verdict.issues.append(
+            f"{kind} {key.get('name')} of {table_name} is ({', '.join(key.get('columns') or [])}) "
+            f"and does not contain {', '.join(absent)}. PostgreSQL refuses a unique constraint "
+            f"on a partitioned table which does not contain every partitioning column, so the "
+            f"table would be created, the data would be loaded and the constraint would fail. "
+            f"Add {', '.join(absent)} to the key, or do not partition this table by "
+            f"{', '.join(partitioning_columns)}")
+
+
+def _check_the_rows_fit(verdict, entry, table_name, method, partitioning_columns, facts):
+    """
+    A row which fits no partition is refused, one row at a time, in the middle of the data
+    migration. The one shape of that which is answerable from the catalogue is the NULL.
+    """
+    if facts is None or method != 'RANGE':
+        return
+    has_default = bool(entry.get('default_partition'))
+    for name in partitioning_columns:
+        column = facts['columns'].get(name) or facts['columns'].get(name.lower())
+        if column is None:
+            continue
+        if column.get('not_null'):
+            verdict.notes.append(f"{name} is NOT NULL - every row has a partition to go to")
+            continue
+        if has_default:
+            verdict.notes.append(
+                f"{name} is nullable, and default_partition is set - a NULL has somewhere to go")
+            continue
+        null_fraction = column.get('null_fraction')
+        if null_fraction is None:
+            verdict.warnings.append(
+                f"{table_name}.{name} is nullable and nobody has ANALYZEd the table, so it is "
+                f"NOT known whether it holds a NULL. A NULL fits no RANGE partition except the "
+                f"DEFAULT one, and the rows holding it would be refused one at a time in the "
+                f"middle of the data migration - set default_partition: true")
+        elif null_fraction > 0:
+            verdict.issues.append(
+                f"{table_name}.{name} is nullable and the statistics of the source say about "
+                f"{null_fraction * 100:.1f}% of its rows are NULL. A NULL fits no RANGE "
+                f"partition except the DEFAULT one, and this entry has none - those rows cannot "
+                f"be loaded. Set default_partition: true, or partition by a column which is "
+                f"NOT NULL")
+        else:
+            verdict.notes.append(
+                f"{name} is nullable and the statistics of the source hold no NULL in it")
+
+
+def _check_what_references_it(verdict, table_name, facts, target_version_num):
+    """A foreign key pointing AT a partitioned table needs PostgreSQL 12."""
+    if facts is None:
+        return
+    referencing = facts.get('referenced_by') or []
+    if not referencing:
+        return
+    named = ', '.join(f"{item['table']}.{item['name']}" for item in referencing[:4])
+    if target_version_num and target_version_num < REFERENCING_PARTITIONED_VERSION:
+        verdict.issues.append(
+            f"{len(referencing)} foreign key(s) reference {table_name} ({named}). A foreign key "
+            f"referencing a PARTITIONED table needs PostgreSQL "
+            f"{version_text(REFERENCING_PARTITIONED_VERSION)} or newer - the target runs "
+            f"{version_text(target_version_num)}")
+    else:
+        verdict.notes.append(
+            f"{len(referencing)} foreign key(s) reference it ({named}) - allowed on a "
+            f"partitioned table from PostgreSQL "
+            f"{version_text(REFERENCING_PARTITIONED_VERSION)} on")
+
+
+def _check_the_partitions(verdict, entry, table_name, method, partitioning_columns,
+                          first_value, last_value, existing_target_names, bounds_were_read):
+    """
+    The partitions the entry would really produce: how many, what they are called, and whether
+    there would be any at all.
+    """
+    date_range = entry.get('date_range')
+    if method == 'RANGE' and not date_range and not entry.get('partitions'):
+        verdict.issues.append(
+            f"target_partitioning for {table_name} asks for RANGE and says nothing about which "
+            f"partitions to create. The table would be created partitioned and EMPTY, and every "
+            f"row of the migration would be refused with 'no partition of relation "
+            f"{table_name} found for row' - write a date_range")
+        return
+    if method == 'HASH':
+        verdict.issues.append(
+            f"target_partitioning for {table_name} asks for HASH, and the number of partitions "
+            f"to create it with is not part of the configuration language yet. The table would "
+            f"be created partitioned and EMPTY, and every row would be refused")
+        return
+    if method == 'LIST':
+        verdict.issues.append(
+            f"target_partitioning for {table_name} asks for LIST, and the values of each "
+            f"partition are not part of the configuration language yet - only this migration's "
+            f"user knows them. The table would be created partitioned and EMPTY, and every row "
+            f"would be refused")
+        return
+    if not date_range:
+        return
+    if not verdict.bounds_usable:
+        ## the column cannot carry a calendar, which has already been said - working the
+        ## partitions out would only say it again in the words of the generator
+        return
+
+    if not bounds_were_read:
+        verdict.warnings.append(
+            f"the smallest and the largest value of {table_name}.{partitioning_columns[0]} could "
+            f"not be read, so the partitions this entry would create were NOT worked out")
+        return
+    if first_value is None or last_value is None:
+        verdict.warnings.append(
+            f"{table_name} holds no row in {partitioning_columns[0]}, so no partition can be "
+            f"generated from its values. The table is created partitioned and empty - which is "
+            f"right for a table with no rows, and every INSERT after the migration is refused "
+            f"until a partition exists")
+        return
+
+    try:
+        partitions = generate_range_partitions(entry, table_name, first_value, last_value)
+    except ValueError as e:
+        verdict.issues.append(f"target_partitioning for {table_name}: {e}")
+        return
+
+    verdict.partitions = partitions
+    count = len(partitions)
+    ranged = [partition for partition in partitions if partition.start is not None]
+    if ranged:
+        verdict.notes.append(
+            f"{count} partition(s) by {date_range}, {ranged[0].start} .. {ranged[-1].end}"
+            + (' plus a DEFAULT partition' if partitions[-1].is_default else ''))
+
+    if count > PARTITION_COUNT_LIMIT:
+        verdict.issues.append(
+            f"target_partitioning for {table_name} by {date_range} would create {count} "
+            f"partitions. Every one of them is a table with its own statistics, its own indexes "
+            f"and its own place in every plan which cannot prune - this is past what a scheme "
+            f"can carry. Use a coarser date_range")
+    elif count > PARTITION_COUNT_WARNING:
+        verdict.warnings.append(
+            f"target_partitioning for {table_name} by {date_range} creates {count} partitions. "
+            f"§2.3 of the design puts several thousand at the point where planning time starts "
+            f"to show on a query which cannot prune - a coarser date_range may be the better "
+            f"scheme")
+
+    existing = {str(name).lower() for name in (existing_target_names or [])}
+    colliding = [partition.name for partition in partitions if partition.name.lower() in existing]
+    if colliding:
+        verdict.issues.append(
+            f"the partition(s) {', '.join(colliding[:5])} of {table_name} would be created under "
+            f"a name the target schema already holds. Write a partition_name which does not "
+            f"collide, or take the object out of the target schema first")
 
 
 def partitioning_columns_of(entry):

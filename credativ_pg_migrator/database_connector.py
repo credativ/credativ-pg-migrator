@@ -1813,6 +1813,38 @@ class DatabaseConnector(ABC):
         """
         return None
 
+    def fetch_partitioning_facts(self, settings):
+        """
+        Everything about one table which decides whether it CAN be partitioned, read before
+        anything is created.
+
+        settings: source_schema_name, source_table_name
+
+        Returns None where this connector cannot read them - and then every check which needs
+        them is reported as one which was NOT made, never as one which passed. Otherwise:
+
+        {
+          'columns': {name: {'type_name': str,
+                             'not_null': bool,
+                             'is_generated': bool,
+                             'has_btree_opclass': bool,   # RANGE and LIST need one
+                             'has_hash_opclass': bool,    # HASH needs one
+                             'null_fraction': float|None}},   # None: nobody has analysed it
+          'unique_keys': [{'name': str, 'columns': [str], 'is_primary': bool}],
+          'exclusion_constraints': [str],
+          'referenced_by': [{'name': str, 'table': str}],
+          'inherits_from_a_plain_table': bool,
+          'is_a_plain_inheritance_parent': bool,
+          'row_estimate': int|None,
+          'date_range_types': (str, ...),   # the types a date_range can be counted in
+        }
+
+        Nothing here may read a row of the table: the answers come from the catalogue and from
+        the statistics the server has already gathered, and an estimate is reported as an
+        estimate. See development/PARTITIONING_STRATEGY.md §4.4 and §4.5.
+        """
+        return None
+
     def fetch_table_partitioning(self, settings):
         """
         The partitioning of one table of the source.

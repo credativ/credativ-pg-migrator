@@ -37,6 +37,8 @@ import pytest
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 
+import datetime
+
 from credativ_pg_migrator import partitioning
 from credativ_pg_migrator.connectors.postgresql_connector import PostgreSQLConnector
 
@@ -282,11 +284,47 @@ ENTRY = {'table_name': 'events', 'partition_by': 'RANGE',
          'partitioning_columns': 'ts', 'date_range': 'month'}
 
 
-def check(entry=None, columns=('id', 'ts'), unique_keys=(), **kwargs):
-    return partitioning.check_repartitioning(
-        entry or ENTRY, list(columns),
-        None if unique_keys is None else list(unique_keys),
-        target_version_num=kwargs.pop('version', MODERN), **kwargs)
+def facts_of(columns=('id', 'ts'), unique_keys=(), types=None, not_null=('ts',),
+             null_fraction=None, generated=(), exclusions=(), referenced_by=(),
+             inheritance_parent=False, inheritance_child=False, rows=100000,
+             btree=True, hash_opclass=True):
+    """What fetch_partitioning_facts() answers, for a table built to order."""
+    types = types or {}
+    return {
+        'columns': {name: {
+            'type_name': types.get(name, 'timestamp with time zone' if name == 'ts' else 'bigint'),
+            'not_null': name in not_null,
+            'is_generated': name in generated,
+            'has_btree_opclass': btree,
+            'has_hash_opclass': hash_opclass,
+            'null_fraction': null_fraction,
+        } for name in columns},
+        'unique_keys': None if unique_keys is None else list(unique_keys),
+        'exclusion_constraints': list(exclusions),
+        'referenced_by': list(referenced_by),
+        'inherits_from_a_plain_table': inheritance_child,
+        'is_a_plain_inheritance_parent': inheritance_parent,
+        'row_estimate': rows,
+        'date_range_types': ('date', 'timestamp without time zone', 'timestamp with time zone'),
+    }
+
+
+def check(entry=None, columns=('id', 'ts'), unique_keys=(), facts=None, **kwargs):
+    """
+    One target_partitioning entry through the whole check. The bounds are handed in as read,
+    so that the entries which ask for a date_range really produce their partitions here.
+    """
+    if facts is None:
+        facts = facts_of(columns=columns, unique_keys=unique_keys)
+    bounds = kwargs.pop('bounds', (datetime.date(2025, 1, 1), datetime.date(2025, 3, 1)))
+    verdict = partitioning.check_repartitioning(
+        entry or ENTRY, list(columns), None,
+        target_version_num=kwargs.pop('version', MODERN),
+        facts=facts,
+        first_value=bounds[0], last_value=bounds[1],
+        bounds_were_read=kwargs.pop('bounds_were_read', True),
+        **kwargs)
+    return verdict.issues, verdict.warnings
 
 
 def test_a_primary_key_which_does_not_contain_the_partitioning_column_is_refused():
@@ -295,26 +333,27 @@ def test_a_primary_key_which_does_not_contain_the_partitioning_column_is_refused
     constraint on a partitioned table which does not contain every partitioning column, so the
     table is created, the data is loaded and the constraint fails at the very end.
     """
-    issues, _warnings = check(unique_keys=[{'name': 'events_pkey', 'columns': ['id'], 'is_primary': True}])
+    issues, _warnings = check(facts=facts_of(unique_keys=[
+        {'name': 'events_pkey', 'columns': ['id'], 'is_primary': True}]))
     assert any('PRIMARY KEY events_pkey' in issue and 'does not contain ts' in issue
                for issue in issues)
 
 
 def test_a_unique_constraint_is_checked_as_well_as_the_primary_key():
-    issues, _warnings = check(unique_keys=[
+    issues, _warnings = check(facts=facts_of(unique_keys=[
         {'name': 'events_pkey', 'columns': ['id', 'ts'], 'is_primary': True},
-        {'name': 'events_uq', 'columns': ['code'], 'is_primary': False}])
+        {'name': 'events_uq', 'columns': ['code'], 'is_primary': False}]))
     assert any('UNIQUE events_uq' in issue for issue in issues)
 
 
 def test_a_key_which_contains_the_partitioning_columns_raises_nothing():
-    issues, warnings = check(unique_keys=[
-        {'name': 'events_pkey', 'columns': ['id', 'ts'], 'is_primary': True}])
+    issues, warnings = check(facts=facts_of(unique_keys=[
+        {'name': 'events_pkey', 'columns': ['id', 'ts'], 'is_primary': True}]))
     assert issues == [] and warnings == []
 
 
 def test_a_source_whose_keys_cannot_be_read_says_the_check_was_not_made():
-    issues, warnings = check(unique_keys=None)
+    issues, warnings = check(facts=facts_of(unique_keys=None))
     assert issues == []
     assert any('NOT checked' in warning for warning in warnings)
 
@@ -605,7 +644,8 @@ def planner_with(schemes, mode='preserve', selected=None, repartitioned=(), vers
         (True, None) if selected is None or name in selected else (False, 'excluded'))
     made.config_parser.get_source_partitioning.side_effect = lambda table_name=None: mode
     made.config_parser.get_target_partitioning.return_value = [
-        {'table_name': name, 'partition_by': 'RANGE', 'partitioning_columns': 'id'}
+        {'table_name': name, 'partition_by': 'RANGE', 'partitioning_columns': 'ts',
+         'date_range': 'month'}
         for name in repartitioned]
 
     source = MagicMock()
@@ -618,6 +658,10 @@ def planner_with(schemes, mode='preserve', selected=None, repartitioned=(), vers
     source.fetch_partitioning_candidates.return_value = candidates
     source.fetch_table_partitioning.side_effect = \
         lambda settings: schemes.get(settings['source_table_name'], {})
+    ## a connector which does not read the facts of a table: the planner then falls back to the
+    ## unique keys it can get out of fetch_indexes(), which every connector answers
+    source.fetch_partitioning_facts.return_value = None
+    source.probe_column_bounds.return_value = (datetime.date(2025, 1, 1), datetime.date(2025, 3, 1))
     made.source_connection = source
 
     target = MagicMock()
@@ -627,6 +671,7 @@ def planner_with(schemes, mode='preserve', selected=None, repartitioned=(), vers
         f'PARTITION OF "{settings["target_schema_name"]}"."{settings["parent_table_name"]}" '
         f'{settings["partition_bound"]}'
         + (f' PARTITION BY {settings["key_definition"]}' if settings.get('key_definition') else ''))
+    target.connection.cursor.return_value.fetchall.return_value = []
     made.target_connection = target
     return made
 
@@ -761,22 +806,47 @@ def test_a_table_which_is_not_partitioned_gets_nothing():
     assert made.partitioning_clause_for(None, 'customers') == ('', [])
 
 
-def test_the_analysis_checks_every_target_partitioning_entry_against_the_source():
+def repartitioning_planner(pkey_columns):
     made = planner_with({'events': {}}, repartitioned=['events'])
     made.source_connection.fetch_table_columns.return_value = {
         1: {'column_name': 'id'}, 2: {'column_name': 'ts'}}
     made.source_connection.fetch_indexes.return_value = {
-        1: {'index_name': 'events_pkey', 'index_type': 'PRIMARY KEY', 'index_columns': '"id", "ts"'}}
-    issues = made.check_partitioning()
-    assert issues == []
+        1: {'index_name': 'events_pkey', 'index_type': 'PRIMARY KEY',
+            'index_columns': pkey_columns}}
+    return made
 
-    made = planner_with({'events': {}}, repartitioned=['events'])
-    made.source_connection.fetch_table_columns.return_value = {
-        1: {'column_name': 'id'}, 2: {'column_name': 'ts'}}
-    made.source_connection.fetch_indexes.return_value = {
-        1: {'index_name': 'events_pkey', 'index_type': 'PRIMARY KEY', 'index_columns': '"other"'}}
+
+def test_the_analysis_checks_every_target_partitioning_entry_against_the_source():
+    assert repartitioning_planner('"id", "ts"').check_partitioning() == []
+
+    issues = repartitioning_planner('"other"').check_partitioning()
+    assert any('does not contain ts' in issue for issue in issues)
+
+
+def test_a_range_entry_which_creates_no_partition_is_refused():
+    """
+    The table would be created partitioned and EMPTY, and every row of the migration would be
+    refused with `no partition of relation ... found for row` - one row at a time, in the
+    middle of the data migration.
+    """
+    made = repartitioning_planner('"id", "ts"')
+    made.config_parser.get_target_partitioning.return_value = [
+        {'table_name': 'events', 'partition_by': 'RANGE', 'partitioning_columns': 'ts'}]
     issues = made.check_partitioning()
-    assert any('does not contain id' in issue for issue in issues)
+    assert any('says nothing about which partitions to create' in issue for issue in issues)
+
+
+def test_the_report_says_what_it_checked_and_found_good():
+    """
+    An entry which passes says so as plainly as one which fails. A report which only speaks up
+    when it is unhappy is one nobody trusts when it is silent.
+    """
+    made = repartitioning_planner('"id", "ts"')
+    made.check_partitioning()
+    report = '\n'.join(message for _level, message in made.messages)
+    assert 'target_partitioning: events -> RANGE (ts), month' in report
+    assert 'can be partitioned as asked' in report
+    assert 'contains ts' in report
 
 
 def test_an_entry_naming_a_table_the_migration_does_not_have_is_blocking():
@@ -954,3 +1024,168 @@ def test_each_source_delimits_an_identifier_the_way_it_really_does(module_name, 
     module = importlib.import_module(f'credativ_pg_migrator.connectors.{module_name}')
     connector_class = getattr(module, class_name)
     assert connector_class.IDENTIFIER_QUOTES == (opening, closing)
+
+
+# --------------------------------------------------------------------------------------
+# the deeper diagnosis: everything which cannot work, found before anything is created
+
+
+def test_a_generated_column_cannot_be_a_partition_key():
+    issues, _warnings = check(facts=facts_of(generated=('ts',)))
+    assert any('GENERATED column' in issue for issue in issues)
+
+
+def test_a_type_with_no_btree_operator_class_cannot_carry_a_range_key():
+    """
+    RANGE and LIST compare the bounds with < and =. A column of a type which has no default
+    btree operator class — json, point, xml — cannot be a partition key, and the CREATE TABLE
+    is what would say so, after the whole plan was made.
+    """
+    issues, _warnings = check(facts=facts_of(types={'ts': 'json'}, btree=False))
+    assert any('no default btree operator class' in issue for issue in issues)
+
+
+def test_a_type_with_no_hash_operator_class_cannot_carry_a_hash_key():
+    entry = {'table_name': 'events', 'partition_by': 'HASH', 'partitioning_columns': 'ts'}
+    issues, _warnings = check(entry=entry, facts=facts_of(hash_opclass=False))
+    assert any('no default hash operator class' in issue for issue in issues)
+
+
+@pytest.mark.parametrize('type_name', ['text', 'bigint', 'numeric(10,2)'])
+def test_a_date_range_over_a_column_which_carries_no_date_is_refused(type_name):
+    """
+    `date_range: month` over a text column passed every check there was and fell over in the
+    middle of the run, where the value read from it could not be made into a date.
+    """
+    issues, _warnings = check(facts=facts_of(types={'ts': type_name}))
+    assert any('A range of dates can only be counted over' in issue for issue in issues)
+
+
+def test_a_nullable_partitioning_column_with_nulls_and_no_default_partition_is_refused():
+    """
+    A NULL fits no RANGE partition except the DEFAULT one. Without it, those rows are refused
+    one at a time in the middle of the data migration — and the statistics of the source say in
+    advance that there are some.
+    """
+    issues, _warnings = check(facts=facts_of(not_null=(), null_fraction=0.12))
+    assert any('12.0% of its rows are NULL' in issue for issue in issues)
+    assert any('default_partition: true' in issue for issue in issues)
+
+
+def test_a_default_partition_answers_the_nulls():
+    entry = dict(ENTRY, default_partition=True)
+    issues, warnings = check(entry=entry, facts=facts_of(not_null=(), null_fraction=0.12))
+    assert issues == []
+
+
+def test_a_nullable_column_nobody_has_analysed_is_reported_as_not_known():
+    """P2-8 again: "not checked" and "checked and good" must not read alike."""
+    issues, warnings = check(facts=facts_of(not_null=(), null_fraction=None))
+    assert issues == []
+    assert any('NOT known whether it holds a NULL' in warning for warning in warnings)
+
+
+def test_a_not_null_partitioning_column_needs_no_default_partition():
+    issues, warnings = check(facts=facts_of(not_null=('ts',)))
+    assert issues == [] and warnings == []
+
+
+def test_an_inheritance_parent_cannot_be_partitioned():
+    issues, _warnings = check(facts=facts_of(inheritance_parent=True))
+    assert any('INHERITANCE hierarchy' in issue for issue in issues)
+
+
+def test_a_table_which_inherits_cannot_be_partitioned():
+    issues, _warnings = check(facts=facts_of(inheritance_child=True))
+    assert any('INHERITS from another table' in issue for issue in issues)
+
+
+def test_an_exclusion_constraint_stops_the_table_from_being_partitioned():
+    issues, _warnings = check(facts=facts_of(exclusions=('price_history_no_overlap',)))
+    assert any('EXCLUSION constraint price_history_no_overlap' in issue for issue in issues)
+
+
+def test_a_foreign_key_referencing_the_table_needs_postgresql_12():
+    facts = facts_of(referenced_by=[{'name': 'items_order_fk', 'table': 'items'}])
+    issues, _warnings = check(facts=facts, version=110000)
+    assert any('referencing a PARTITIONED table needs PostgreSQL 12' in issue for issue in issues)
+
+
+def test_the_same_foreign_key_is_only_a_note_on_a_modern_target():
+    facts = facts_of(referenced_by=[{'name': 'items_order_fk', 'table': 'items'}])
+    issues, warnings = check(facts=facts)
+    assert issues == [] and warnings == []
+
+
+def test_a_small_table_is_not_worth_partitioning_and_the_run_says_so():
+    issues, warnings = check(facts=facts_of(rows=120))
+    assert issues == []
+    assert any('does not make a small table faster' in warning for warning in warnings)
+
+
+def test_too_many_partitions_is_a_warning_and_far_too_many_is_a_refusal():
+    entry = dict(ENTRY, date_range='day')
+    issues, warnings = check(entry=entry,
+                             bounds=(datetime.date(2023, 1, 1), datetime.date(2025, 1, 1)))
+    assert issues == []
+    assert any('creates 734 partitions' in warning for warning in warnings)
+
+    issues, _warnings = check(entry=entry,
+                              bounds=(datetime.date(1990, 1, 1), datetime.date(2025, 1, 1)))
+    assert any('past what a scheme can carry' in issue for issue in issues)
+
+
+def test_a_generated_partition_name_which_the_target_already_holds_is_refused():
+    issues, _warnings = check(existing_target_names={'events_month_20250101'})
+    assert any('a name the target schema already holds' in issue for issue in issues)
+
+
+def test_a_name_the_generator_refuses_is_reported_as_the_entry_which_asked_for_it():
+    entry = dict(ENTRY, partition_name='{table}_{start:%Y}')
+    issues, _warnings = check(entry=entry)
+    assert any('same name' in issue for issue in issues)
+
+
+@pytest.mark.parametrize('method, expected', [
+    ('HASH', 'the number of partitions to create it with is not part of the configuration'),
+    ('LIST', 'the values of each partition are not part of the configuration'),
+])
+def test_a_method_whose_partitions_cannot_be_generated_yet_says_so_rather_than_creating_none(
+        method, expected):
+    """
+    Both would build a partitioned table with nothing under it, which refuses every row of the
+    migration. Saying "not built yet" is the honest answer; an empty partitioned table is not.
+    """
+    entry = {'table_name': 'events', 'partition_by': method, 'partitioning_columns': 'ts'}
+    issues, _warnings = check(entry=entry)
+    assert any(expected in issue for issue in issues)
+
+
+def test_a_table_with_no_rows_in_the_column_is_a_warning_and_not_a_refusal():
+    issues, warnings = check(bounds=(None, None))
+    assert issues == []
+    assert any('holds no row in' in warning for warning in warnings)
+
+
+def test_a_source_which_reads_no_facts_reports_every_check_it_could_not_make():
+    """P2-8: a check which was not made must not read like one which passed."""
+    verdict = partitioning.check_repartitioning(
+        ENTRY, ['id', 'ts'], None, target_version_num=MODERN, facts=None,
+        first_value=datetime.date(2025, 1, 1), last_value=datetime.date(2025, 3, 1),
+        bounds_were_read=True)
+    assert verdict.can_be_built
+    assert any('NOT checked that their types' in warning for warning in verdict.warnings)
+    assert any('NOT checked that they contain the partitioning columns' in warning
+               for warning in verdict.warnings)
+
+
+def test_an_entry_which_passes_says_what_it_checked():
+    verdict = partitioning.check_repartitioning(
+        ENTRY, ['id', 'ts'], None, target_version_num=MODERN, facts=facts_of(unique_keys=[
+            {'name': 'events_pkey', 'columns': ['id', 'ts'], 'is_primary': True}]),
+        first_value=datetime.date(2025, 1, 1), last_value=datetime.date(2025, 3, 1),
+        bounds_were_read=True)
+    assert verdict.can_be_built
+    assert any('contains ts' in note for note in verdict.notes)
+    assert any('is NOT NULL' in note for note in verdict.notes)
+    assert any('partition(s) by month' in note for note in verdict.notes)

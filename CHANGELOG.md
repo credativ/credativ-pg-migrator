@@ -1,6 +1,12 @@
 # Changelog
 
-## 0.16.0 - 2026.08.25
+## 0.16.0 - 2026.08.26
+
+- 2026.08.26
+
+  - Fix - **The money literals of the Transact-SQL family are converted into plain numbers.** `$0`, `$19.99`, `$-5` are how Sybase ASE and MS SQL Server write a MONEY value; no parser of another dialect reads one, so sqlglot took `$0` for an identifier, the conversion quoted it, and the target answered `column "$0" does not exist` for a view whose text said `isnull(c.credit_limit, $0)`. A larger number failed the other way round - PostgreSQL reads `$1000` as the positional parameter number 1000. MONEY is migrated as `NUMERIC(19,4)`, so the number alone is the whole value. It is converted in the views, in the statements of the query conversion and in the bodies of the routines, where a `$0` is worse still: the body reaches PostgreSQL inside a dollar quoted string, in which it is a reference to a parameter the function does not have. A currency sign inside a string literal, inside a comment or inside a name is data and is left as it was written.
+
+  - New - Documentation: **the mapping workflow has a document of its own** - [docs/workflow/mapping.md](docs/workflow/mapping.md). How the matching decides between an existing source and an existing target, every option of the `mapping` block, which options of `migration` the workflow reads and which it ignores, the protocol tables it writes, the conflict actions with the SQL each produces, and the limitations it has today.
 
 - 2026.08.25
 

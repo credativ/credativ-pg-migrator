@@ -1508,12 +1508,10 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
         view_code = settings['view_code']
         converted_code = view_code
 
-        remote_subs = self.config_parser.get_remote_objects_substitution()
-        if remote_subs:
-            iterator = remote_subs.items() if isinstance(remote_subs, dict) else remote_subs
-            for source_obj, target_obj in iterator:
-                if source_obj and target_obj:
-                    converted_code = re.sub(re.escape(source_obj), target_obj, converted_code, flags=re.IGNORECASE)
+        ## one mechanism, which records what it replaced - see
+        ## database_connector.apply_remote_objects_substitution()
+        converted_code, _ = self.apply_remote_objects_substitution(
+            converted_code, 'view', settings.get('target_view_name') or settings.get('view_name') or '')
 
         if settings['target_db_type'] == 'postgresql':
             # Convert DB2 LISTAGG(...) WITHIN GROUP (ORDER BY ...) to PostgreSQL STRING_AGG(...)

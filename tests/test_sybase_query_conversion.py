@@ -45,6 +45,15 @@ class RecordingLog:
     def get_connectivity(self, direction):
         return {'db_type': 'postgresql'}
 
+    def get_source_schema(self):
+        ## the owner a 'db..table' left out - written back before the statement is parsed
+        return 'dbo'
+
+    def get_source_db_name(self):
+        ## the database the statements are read from - a 'db..table' naming it is a
+        ## reference to the migrated database itself, not to a remote one
+        return 'migdb'
+
     def get_remote_objects_substitution(self):
         return {}
 
@@ -224,3 +233,115 @@ def test_a_statement_with_an_outer_join_reaches_the_converter(sybase):
     parse_text = sybase.prepare_query_for_parsing(statement)
     classification = classifier.classify(statement, 'sybase_ase', parse_text=parse_text)
     assert classification.verdict == 'select', classification.reason
+
+
+## ---------------------------------------------------------------- the money literals
+
+def test_a_money_literal_becomes_a_number_and_not_a_column(sybase):
+    """
+    '$0' is how Sybase writes a MONEY value. sqlglot reads it as an identifier, the
+    conversion quotes it, and the target answered 'column "$0" does not exist' for the view
+    that had 'isnull(c.credit_limit, $0)' in it. MONEY is migrated as NUMERIC(19,4), so the
+    number alone is the whole value.
+    """
+    answer = convert(sybase, 'SELECT isnull(c.credit_limit, $0) AS credit_limit FROM dbo.customer c')
+    assert answer['converted'] is True
+    assert '"$0"' not in answer['code']
+    assert 'COALESCE("c"."credit_limit", 0)' in answer['code']
+
+
+def test_a_money_literal_is_not_read_as_a_positional_parameter(sybase):
+    """
+    A number large enough to look like a placeholder failed the other way round: PostgreSQL
+    read '$1000' as the positional parameter number 1000.
+    """
+    answer = convert(sybase, 'SELECT isnull(c.credit_limit, $1000) AS l FROM dbo.customer c')
+    assert answer['converted'] is True
+    assert '$1000' not in answer['code']
+    assert 'COALESCE("c"."credit_limit", 1000)' in answer['code']
+
+
+@pytest.mark.parametrize('literal, number', [
+    ('$0', '0'),
+    ('$19.99', '19.99'),
+    ('$-5', '-5'),
+    ('$+7', '7'),
+    ('$ 12', '12'),
+    ('$1000', '1000'),
+])
+def test_every_spelling_of_a_money_literal_loses_its_currency_sign(sybase, literal, number):
+    prepared = sybase.prepare_query_for_parsing(f'SELECT isnull(a, {literal}) FROM t')
+    assert prepared == f'SELECT isnull(a, {number}) FROM t'
+
+
+def test_a_currency_sign_inside_a_string_literal_is_data(sybase):
+    """'costs $5' is text of the application, not a number the statement computes with."""
+    prepared = sybase.prepare_query_for_parsing("SELECT 'costs $5 today' AS note, isnull(a, $0) FROM t")
+    assert prepared == "SELECT 'costs $5 today' AS note, isnull(a, 0) FROM t"
+
+
+def test_a_currency_sign_inside_a_comment_is_left_alone(sybase):
+    prepared = sybase.prepare_query_for_parsing('/* $250 per unit */ SELECT isnull(a, $0) FROM t')
+    assert prepared == '/* $250 per unit */ SELECT isnull(a, 0) FROM t'
+
+
+def test_a_currency_sign_inside_a_name_is_part_of_the_name(sybase):
+    """Sybase allows '$' inside an identifier, so 'a$5' is a name and not a money literal."""
+    prepared = sybase.prepare_query_for_parsing('SELECT a$5, price$ FROM t')
+    assert prepared == 'SELECT a$5, price$ FROM t'
+
+
+def test_a_double_quoted_string_holding_a_currency_sign_stays_text(sybase):
+    """
+    With quoted_identifier off a double quoted literal is a STRING in ASE. It is rewritten
+    into a single quoted one, and what stands inside it is not a money literal.
+    """
+    prepared = sybase.prepare_query_for_parsing('SELECT "it costs $9 now" AS note, isnull(a, $0) FROM t')
+    assert prepared == "SELECT 'it costs $9 now' AS note, isnull(a, 0) FROM t"
+
+
+def test_a_money_literal_survives_next_to_a_legacy_outer_join(sybase):
+    """
+    The reported view had both. The two rewrites of prepare_query_for_parsing() have to leave
+    each other's work alone.
+    """
+    answer = convert(
+        sybase,
+        'SELECT o.order_id, isnull(sum(i.line_total), $0) AS total '
+        'FROM dbo.orders o, dbo.items i WHERE o.order_id *= i.order_id GROUP BY o.order_id')
+    assert answer['converted'] is True
+    assert 'COALESCE(SUM("i"."line_total"), 0)' in answer['code']
+    assert 'LEFT JOIN' in answer['code']
+
+
+def test_the_expression_converter_still_reads_a_default(sybase):
+    """
+    The column defaults and the check constraints go through _convert_money_literals(), which
+    now shares the pattern with the statement path. Its own behaviour is unchanged.
+    """
+    assert sybase._convert_money_literals('$0') == '0'
+    assert sybase._convert_money_literals('$-1000') == '-1000'
+    assert sybase._convert_money_literals("'costs $5'") == "'costs $5'"
+
+
+def test_a_money_literal_in_the_body_of_a_routine_becomes_a_number(sybase):
+    """
+    The routine converter is a different one - it does not go through sqlglot - and it had
+    the same defect. A '$0' left in the body is worse there than in a view: the body reaches
+    PostgreSQL inside a dollar quoted string, where '$0' is a reference to a parameter the
+    function does not have.
+    """
+    sybase._user_messages = {}
+    code = ('create procedure p_test as begin '
+            'declare @x money '
+            'select @x = isnull(credit_limit, $0) from customers where customer_id = 1 '
+            'return end')
+    converted = sybase.convert_funcproc_code({
+        'funcproc_code': code,
+        'funcproc_name': 'p_test',
+        'source_schema_name': 'dbo',
+        'target_schema_name': 'tgt',
+        'target_db_type': 'postgresql',
+    })
+    assert '$0' not in converted
+    assert 'coalesce(credit_limit, 0)' in converted.lower()

@@ -22,6 +22,8 @@ from credativ_pg_migrator.database_connector import DatabaseConnector, first_lin
 from credativ_pg_migrator.migrator_logging import MigratorLogger
 from credativ_pg_migrator.connectors.tsql_parser import TsqlParser
 from credativ_pg_migrator.query_conversion import outer_joins as query_outer_joins
+from credativ_pg_migrator.query_conversion import money_literals as query_money_literals
+from credativ_pg_migrator.query_conversion import object_references as query_object_references
 from credativ_pg_migrator.query_conversion.outer_joins import outer_join_warnings
 from credativ_pg_migrator.jvm_helper import detach_thread_from_jvm
 from credativ_pg_migrator.text_decoding import TextDecoder
@@ -1417,6 +1419,25 @@ class MsSQLConnector(DatabaseConnector):
                 # Apply transformations
                 expression = expression.transform(quote_column_names)
                 expression = expression.transform(replace_functions)
+
+                ## The database in front of a table name - 'ccd..t', 'ccd.dbo.t', and the four
+                ## part 'SRV1.db.dbo.t' of a linked server. Where it names the database being
+                ## migrated it says nothing the migration does not know and is dropped, so that
+                ## the schema mapping below gives the table the schema of the target like any
+                ## other. Left in, it reached the target as 'ccd.."t"', which is a syntax
+                ## error, or as 'ccd."ccd"."t"', which is the database written in front of the
+                ## schema that replaced it. A reference to ANOTHER database or another server
+                ## is left as it stands and reported - see object_references.py.
+                unresolved_references = query_object_references.resolve_tsql_table_references(
+                    expression, self.config_parser.get_source_db_name(), settings['source_schema_name'],
+                    settings.get('target_schema_name'))
+                if unresolved_references:
+                    self.config_parser.print_log_message('WARNING',
+                        query_object_references.unresolved_reference_message(
+                            'ms_sql_connector: convert_statement_code',
+                            settings.get('target_view_name') or settings.get('statement_id') or 'the statement',
+                            unresolved_references))
+
                 expression = expression.transform(replace_schema_names)
                 expression = expression.transform(quote_schema_and_table_names)
                 expression = expression.transform(replace_udts)
@@ -1466,6 +1487,12 @@ class MsSQLConnector(DatabaseConnector):
           code; this connector had nothing, so the identical statement converted from one
           source of the family and was reported as unreadable from the other.
 
+          '$0' - a money literal. No parser of another dialect reads one: sqlglot takes it
+          for an identifier, the conversion quotes it, and the target answers 'column "$0"
+          does not exist' - or, for a number large enough to look like a placeholder,
+          'there is no parameter $1000'. MONEY is migrated as NUMERIC(19,4), so the number
+          alone is the whole value. The same shared code as in sybase_ase.
+
         It is used by convert_statement_code() - so the view path and the query path are given
         one preparation - and by the query conversion, which has to classify a statement
         before it converts it: a statement which cannot be parsed would be reported as one the
@@ -1474,8 +1501,14 @@ class MsSQLConnector(DatabaseConnector):
         """
         if not query_code:
             return query_code
-        return query_outer_joins.mark_tsql_outer_joins(
+        prepared = query_outer_joins.mark_tsql_outer_joins(
             query_code, self.sql_without_literals_and_comments)
+        prepared = query_money_literals.convert_money_literals(
+            prepared, self.sql_without_literals_and_comments)
+        ## 'ccd..t' with the owner left out - see the same call in sybase_ase
+        return query_object_references.write_omitted_owner(
+            prepared, self.config_parser.get_source_schema(),
+            self.sql_without_literals_and_comments, self.config_parser.get_source_db_name())
 
     ## The source test of §8.1. SET NOEXEC ON makes the server compile every statement behind
     ## it - the names are resolved and the plan is made - and run none of them. It is a

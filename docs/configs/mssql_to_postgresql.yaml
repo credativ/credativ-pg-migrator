@@ -90,9 +90,6 @@ migration:
   on_undecodable_bytes: substitute
   parallel_workers: 8         # >>> ADJUST
   batch_size: 25000
-  # ODBC round trips are comparatively expensive; chunking keeps the workers
-  # busy on wide tables.
-  chunk_size: 100000
   names_case_handling: lower  # >>> ADJUST - "keep" preserves MixedCase names
   varchar_to_text_length: 4000
   char_to_text_length: 255
@@ -122,8 +119,13 @@ data_types_substitution:
   # - ["", "", "datetime2", "TIMESTAMP", '']
   # - ["", "", "money", "NUMERIC(19,4)", '']
 
-# Three-part / four-part names of a linked server cannot be resolved in
-# PostgreSQL - rewrite them to something local.
+# Names of a LINKED SERVER cannot be resolved in PostgreSQL - rewrite them to
+# something local. 'db..table' and 'db.dbo.table' naming the database being
+# migrated need nothing here: they are resolved by the conversion itself.
+#
+# >>> DEPRECATED - a search and replace over the whole statement, which also
+# rewrites a name inside a string literal. See the protocol table
+# 'remote_objects_applied' for what it really did.
 # remote_objects_substitution:
 #   - ["remotedb:dbo.table1", "remote_db.table1"]     # >>> ADJUST
 

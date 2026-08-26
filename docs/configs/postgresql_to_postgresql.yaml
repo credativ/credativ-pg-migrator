@@ -87,7 +87,6 @@ migration:
   on_error: continue          # continue | stop
   parallel_workers: 8         # >>> ADJUST to the cores/IO you can spare
   batch_size: 100000          # rows per INSERT batch
-  # chunk_size: 250000        # rows per worker chunk; -1 (default) = no chunking
   names_case_handling: keep   # keep | lower | upper
 
   # Final pass over views, functions and triggers: an object that failed

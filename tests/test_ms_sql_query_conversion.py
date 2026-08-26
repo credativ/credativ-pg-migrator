@@ -47,6 +47,15 @@ class RecordingLog:
     def get_connectivity(self, direction):
         return {'db_type': 'postgresql'}
 
+    def get_source_schema(self):
+        ## the owner a 'db..table' left out - written back before the statement is parsed
+        return 'dbo'
+
+    def get_source_db_name(self):
+        ## the database the statements are read from - a 'db..table' naming it is a
+        ## reference to the migrated database itself, not to a remote one
+        return 'migdb'
+
     def get_remote_objects_substitution(self):
         return {}
 
@@ -218,3 +227,44 @@ def test_a_nolock_hint_is_converted_and_warned_about():
     classification = classifier.classify('SELECT id FROM dbo.orders WITH (NOLOCK)', 'mssql')
     assert classification.verdict == 'select'
     assert any('NOLOCK' in warning for warning in classification.warnings)
+
+
+## ---------------------------------------------------------------- the money literals
+
+def test_a_money_literal_becomes_a_number_and_not_a_column(ms_sql):
+    """
+    '$0' is how the Transact-SQL family writes a MONEY value. sqlglot reads it as an
+    identifier, the conversion quotes it, and the target answers 'column "$0" does not
+    exist'. Sybase ASE had the same defect and the two share the rewrite - the identical
+    statement must not convert from one source of the family and fail from the other.
+    """
+    answer = convert(ms_sql, 'SELECT isnull(c.credit_limit, $0) AS credit_limit FROM dbo.customer c')
+    assert answer['converted'] is True
+    assert '"$0"' not in answer['code']
+    assert 'COALESCE("c"."credit_limit", 0)' in answer['code']
+
+
+def test_a_money_literal_is_not_read_as_a_positional_parameter(ms_sql):
+    prepared = ms_sql.prepare_query_for_parsing('SELECT isnull(a, $1000) FROM t')
+    assert prepared == 'SELECT isnull(a, 1000) FROM t'
+
+
+def test_a_currency_sign_inside_a_string_literal_is_data(ms_sql):
+    prepared = ms_sql.prepare_query_for_parsing("SELECT 'costs $5 today' AS note, isnull(a, $0) FROM t")
+    assert prepared == "SELECT 'costs $5 today' AS note, isnull(a, 0) FROM t"
+
+
+def test_a_money_literal_survives_next_to_a_legacy_outer_join(ms_sql):
+    prepared = ms_sql.prepare_query_for_parsing(
+        'SELECT isnull(o.total, $0) FROM dbo.customer c, dbo.orders o WHERE c.id *= o.cid')
+    assert 'isnull(o.total, 0)' in prepared
+    assert '/* left_outer */' in prepared
+
+
+def test_the_default_converter_still_reads_a_thousands_separator(ms_sql):
+    """
+    A column default is one expression and never a list, so its converter may read
+    '-$1,000.00'. The statement path deliberately does not - see money_literals.py.
+    """
+    assert ms_sql._convert_money_literals('(-$1,000.00)') == '(-1000.00)'
+    assert ms_sql._convert_money_literals('($1000.0000)') == '(1000.0000)'

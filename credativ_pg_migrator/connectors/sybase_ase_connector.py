@@ -28,6 +28,8 @@ from tabulate import tabulate
 import sqlglot
 from credativ_pg_migrator.connectors.tsql_parser import TsqlParser
 from credativ_pg_migrator.query_conversion import outer_joins as query_outer_joins
+from credativ_pg_migrator.query_conversion import money_literals as query_money_literals
+from credativ_pg_migrator.query_conversion import object_references as query_object_references
 from credativ_pg_migrator.query_conversion.outer_joins import outer_join_warnings
 from sqlglot import exp, TokenType
 from sqlglot.dialects import TSQL
@@ -354,8 +356,10 @@ class SybaseASEConnector(DatabaseConnector):
 
     # A money literal of Sybase - $1000, $19.99, $-5 - is a number written with a currency
     # sign in front of it. PostgreSQL has no such literal and reads '$1000' in a statement
-    # as the positional parameter number 1000: 'there is no parameter $1000'.
-    MONEY_LITERAL_PATTERN = re.compile(r"""(?<![A-Za-z0-9_$@#'"])\$\s*([-+]?)\s*(\d+(?:\.\d*)?|\.\d+)""")
+    # as the positional parameter number 1000: 'there is no parameter $1000'. The pattern is
+    # shared with the statement path, which needs the same one - see
+    # query_conversion/money_literals.py and prepare_query_for_parsing() below.
+    MONEY_LITERAL_PATTERN = query_money_literals.MONEY_LITERAL
 
     @classmethod
     def _convert_money_literals(cls, sql_text):
@@ -363,13 +367,17 @@ class SybaseASEConnector(DatabaseConnector):
         Rewrite the money literals of an expression into plain numbers. The MONEY of the
         source is migrated as NUMERIC(19,4), so the number alone is the whole value. What
         stands inside a string literal is data ('costs $5') and is left untouched.
+
+        This is the converter for ONE expression - a column default, the condition of a check
+        constraint, the check of a domain. A whole statement is converted in
+        prepare_query_for_parsing(), which also protects the comments and the quoted
+        identifiers.
         """
         if not sql_text or '$' not in str(sql_text):
             return sql_text
         parts = re.split(r"('(?:[^']|'')*')", str(sql_text))
         for position in range(0, len(parts), 2):
-            parts[position] = cls.MONEY_LITERAL_PATTERN.sub(
-                lambda match: f"{match.group(1) if match.group(1) == '-' else ''}{match.group(2)}", parts[position])
+            parts[position] = query_money_literals.convert_money_literals(parts[position])
         return ''.join(parts)
 
     @staticmethod
@@ -756,14 +764,38 @@ class SybaseASEConnector(DatabaseConnector):
                 # 'invalid input syntax for type timestamp: "b'\x00\x00...<\x8e'"'.
                 'TIMESTAMP': 'BYTEA',
                 'BIGINT': 'BIGINT',
-                'UNSIGNED BIGINT': 'BIGINT',
                 'INTEGER': 'INTEGER',
                 'INT': 'INTEGER',
                 'INT8': 'BIGINT',
-                'UNSIGNED INT': 'INTEGER',
-                'UINT': 'INTEGER',
-                'TINYINT': 'SMALLINT',
                 'SMALLINT': 'SMALLINT',
+
+                # The unsigned integers of ASE hold twice what the signed type of the same
+                # width holds, so each of them is migrated to the NEXT type up - PostgreSQL
+                # has no unsigned integer at all. 'uint' used to be mapped to INTEGER, which
+                # holds barely half of its range: everything above 2147483647 was refused by
+                # the target, and a refused row is dropped by the row-by-row retry of the
+                # batch, so the table simply ended up short.
+                #
+                # 'usmallint' and 'ubigint' were not mapped at all, and an unmapped type
+                # falls through to TEXT without a word - an unsigned smallint column reached
+                # the target as text.
+                #
+                # The catalog spells them 'usmallint' / 'uint' / 'ubigint' (systypes.name);
+                # the SQL spellings are kept next to them so that a routine or a view which
+                # writes 'unsigned int' is converted as well.
+                #
+                # What this does NOT carry over is the lower bound: the target accepts a
+                # negative value which the source would have refused. Preserving it needs a
+                # domain or a CHECK per column - see
+                # development/SYBASE_NUMERIC_TYPE_MAPPING.md.
+                'TINYINT': 'SMALLINT',                  # 0 .. 255
+                'USMALLINT': 'INTEGER',                 # 0 .. 65535
+                'UNSIGNED SMALLINT': 'INTEGER',
+                'UINT': 'BIGINT',                       # 0 .. 4294967295
+                'UNSIGNED INT': 'BIGINT',
+                # 2**64-1 has twenty digits and no integer type of PostgreSQL holds it
+                'UBIGINT': 'NUMERIC(20,0)',             # 0 .. 18446744073709551615
+                'UNSIGNED BIGINT': 'NUMERIC(20,0)',
 
                 'BLOB': 'BYTEA',
 
@@ -1757,6 +1789,14 @@ class SybaseASEConnector(DatabaseConnector):
                                 f"{settings.get('funcproc_name')} could not be converted - it is missing in the target.")
                     return "\n\n".join(converted_members) + "\n" if converted_members else ''
 
+            ## The money literals go first, while the double quoted strings are still double
+            ## quoted and the mask therefore still recognises them as literals. A '$0' left in
+            ## the body of a routine is not merely an unknown column: the body is handed to
+            ## PostgreSQL inside a dollar quoted string, where '$0' is a reference to a
+            ## parameter the function does not have.
+            funcproc_code = query_money_literals.convert_money_literals(
+                funcproc_code, self.sql_without_literals_and_comments)
+
             # Convert double-quoted string literals to single-quoted strings
             # Sybase often allows "string" where PostgreSQL expects 'string' (which would otherwise parse as an identifier)
             def replacer_dq(m):
@@ -1825,22 +1865,38 @@ class SybaseASEConnector(DatabaseConnector):
             ## body used them ('sp_changelog_delete()' with locvar_row_id inside)
             header_match = re.search(r'CREATE\s+(?:OR\s+REPLACE\s+)?(?:PROC|PROCEDURE|FUNCTION)\s+([a-zA-Z0-9_\.]+)(.*?)(\bAS\b)', header_str, flags=re.IGNORECASE | re.DOTALL)
 
-            func_schema = ""
+            ## The routine is created in the schema of the TARGET, always. The qualifier the
+            ## source wrote in its own header - 'CREATE PROCEDURE dbo.acc2035c_...' - used to
+            ## be carried over as the schema of the generated routine, and only a header
+            ## without one fell back to the target schema. So a schema qualified routine was
+            ## created in a schema of the source which the target does not have, and
+            ## PostgreSQL answered 'schema "dbo" does not exist'. Everything else about the
+            ## routine already used the target schema: the protocol records it there and the
+            ## COMMENT ON of the orchestrator is written for it, so a routine created in the
+            ## qualifier of the source could not even be commented.
             proc_name = settings.get('funcproc_name', '')
             params_str = ""
+            source_qualifier = ""
 
             if header_match:
                  full_name = header_match.group(1)
                  params_str = header_match.group(2).strip()
-                 if '.' in full_name:
-                     parts = full_name.split('.')
-                     func_schema = parts[0]
-                     if not proc_name: proc_name = parts[1]
-                 else:
-                     if not proc_name: proc_name = full_name
+                 ## 'owner.routine' and 'database.owner.routine' alike - the name is the last
+                 ## part of it, and everything in front is the qualifier of the source. Taking
+                 ## parts[1] made the OWNER the name of a routine written the second way.
+                 parts = [part for part in full_name.split('.') if part]
+                 if not proc_name and parts:
+                     proc_name = parts[-1]
+                 if len(parts) > 1:
+                     source_qualifier = '.'.join(parts[:-1])
 
-            if not func_schema:
-                 func_schema = settings.get('target_schema_name', 'public')
+            func_schema = settings.get('target_schema_name') or 'public'
+
+            if source_qualifier and source_qualifier.lower() != func_schema.lower():
+                 self.config_parser.print_log_message('DEBUG',
+                     f"sybase_ase_connector: convert_funcproc_code: {proc_name} is written "
+                     f"'{source_qualifier}.{proc_name}' in the source - it is created in the schema of the "
+                     f"target, '{func_schema}'.")
 
             pg_params_str = ""
             output_params = []
@@ -4923,15 +4979,12 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_function_name}"();
         self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: convert_statement_code: settings in convert_view_code: {settings}")
         converted_code = settings['view_code']
 
-        # Apply remote_objects_substitution
-        remote_subs = self.config_parser.get_remote_objects_substitution()
-        if remote_subs:
-            iterator = remote_subs.items() if isinstance(remote_subs, dict) else remote_subs
-            for source_obj, target_obj in iterator:
-                if source_obj and target_obj:
-                    # Case-insensitive replacement
-                    converted_code = re.sub(re.escape(source_obj), target_obj, converted_code, flags=re.IGNORECASE)
-                    self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: convert_statement_code: Applied remote object substitution: {source_obj} -> {target_obj}")
+        ## one mechanism, which records what it replaced - see
+        ## database_connector.apply_remote_objects_substitution()
+        converted_code, _ = self.apply_remote_objects_substitution(
+            converted_code, 'view',
+            settings.get('target_view_name') or settings.get('view_name')
+            or settings.get('statement_id') or '')
 
         converted_code = self.prepare_query_for_parsing(converted_code)
 
@@ -4967,6 +5020,24 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_function_name}"();
             parsed_code = parsed_code.transform(replace_cast_types)
 
             self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: convert_statement_code: Double quoted columns: {parsed_code.sql(dialect='postgres')}")
+
+            ## The database in front of a table name - 'ccd..t', 'ccd.dbo.t'. Where it names the
+            ## database being migrated it says nothing the migration does not know, and it is
+            ## dropped so that the schema mapping below gives the table the schema of the
+            ## target like any other. Left in, it reached the target as 'ccd.."t"', which is a
+            ## syntax error, or as 'ccd."ccd"."t"', which is the database written in front of
+            ## the schema that replaced it. A reference to ANOTHER database is left as it
+            ## stands and reported - see object_references.py.
+            unresolved_references = query_object_references.resolve_tsql_table_references(
+                parsed_code, self.config_parser.get_source_db_name(), settings['source_schema_name'],
+                settings.get('target_schema_name'))
+            if unresolved_references:
+                self.config_parser.print_log_message('WARNING',
+                    query_object_references.unresolved_reference_message(
+                        'sybase_ase_connector: convert_statement_code',
+                        settings.get('view_name') or settings.get('statement_id') or 'the statement',
+                        unresolved_references))
+            self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: convert_statement_code: Resolved database qualifiers: {parsed_code.sql(dialect='postgres')}")
 
             # replace source schema with target schema
             parsed_code = parsed_code.transform(replace_schema_names)
@@ -5042,6 +5113,12 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_function_name}"();
 
           'noholdlock' - a read hint which a parser reads as the alias of the table.
 
+          '$0' - a money literal. No parser of another dialect reads one: sqlglot takes it
+          for an identifier, the conversion quotes it, and the target answers 'column "$0"
+          does not exist' - or, for a number large enough to look like a placeholder,
+          'there is no parameter $1000'. MONEY is migrated as NUMERIC(19,4), so the number
+          alone is the whole value.
+
           "text" - with quoted_identifier off, a double quoted literal is a STRING in ASE and
           an identifier everywhere else.
 
@@ -5056,6 +5133,17 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_function_name}"();
         prepared = query_outer_joins.mark_tsql_outer_joins(
             query_code, self.sql_without_literals_and_comments)
         prepared = re.sub(r'\bnoholdlock\b', '', prepared, flags=re.IGNORECASE)
+        ## 'ccd..t' with the owner left out. In a FROM clause a parser reads it; in an
+        ## expression - 'ccd..fn_x(a)' - it reads nothing at all, so a whole view could not be
+        ## parsed and reached the target with every qualifier of every reference untouched.
+        ## Writing the owner back makes them all the ordinary three part name.
+        prepared = query_object_references.write_omitted_owner(
+            prepared, self.config_parser.get_source_schema(),
+            self.sql_without_literals_and_comments, self.config_parser.get_source_db_name())
+        ## before the rewrite of the double quotes below, so that a '$' inside a double quoted
+        ## string is still protected as a literal by the mask
+        prepared = query_money_literals.convert_money_literals(
+            prepared, self.sql_without_literals_and_comments)
 
         def single_quote(match):
             return "'" + match.group(1).replace("'", "''") + "'"

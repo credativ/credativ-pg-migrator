@@ -986,6 +986,30 @@ class Planner:
                                 aliased_referenced_table_name = alias_name
                                 self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_tables: Constraint referenced table {constraint_details['referenced_table_name']} mapped to target alias {aliased_referenced_table_name}")
 
+                        ## Where the referenced table lands in the TARGET, decided here rather
+                        ## than assumed downstream. A migration reads one schema of the source
+                        ## and writes one schema of the target, so a reference INSIDE that
+                        ## schema - which is what an empty referenced schema means, and most
+                        ## connectors report it that way - lands in the target schema. A
+                        ## reference to another schema of the source is not part of this
+                        ## migration: it is recorded empty, and the worker says so instead of
+                        ## building a REFERENCES clause pointing at a table which is not there.
+                        target_referenced_table_schema = ''
+                        target_referenced_table_name = ''
+                        if referenced_table_name:
+                            if (not referenced_table_schema
+                                    or referenced_table_schema.lower() == self.source_schema_name.lower()):
+                                target_referenced_table_schema = self.target_schema_name
+                                target_referenced_table_name = self.config_parser.convert_names_case(
+                                    aliased_referenced_table_name)
+                            else:
+                                self.config_parser.print_log_message('WARNING',
+                                    f"planner: stdwf_prepare_tables: Constraint {constraint_name} of "
+                                    f"{table_info['table_name']} points at "
+                                    f"{referenced_table_schema}.{referenced_table_name}, which is not in the "
+                                    f"migrated schema {self.source_schema_name} - the migration does not create "
+                                    f"that table and the constraint is created only if the target already has it.")
+
                         target_db_constraint_sql = self.target_connection.get_create_constraint_sql({
                             'source_db_type': self.config_parser.get_source_db_type(),
                             'source_schema_name': self.source_schema_name,
@@ -998,6 +1022,8 @@ class Planner:
                             'constraint_columns': constraint_details['constraint_columns'] if 'constraint_columns' in constraint_details else '',
                             'referenced_table_schema': referenced_table_schema,
                             'referenced_table_name': aliased_referenced_table_name,
+                            ## the schema the REFERENCES clause has to name - see above
+                            'target_referenced_table_schema': target_referenced_table_schema,
                             'referenced_columns': constraint_details['referenced_columns'] if 'referenced_columns' in constraint_details else '',
                             'constraint_owner': constraint_details['constraint_owner'] if 'constraint_owner' in constraint_details else '',
                             'constraint_sql': constraint_details['constraint_sql'] if 'constraint_sql' in constraint_details else '',
@@ -1018,8 +1044,10 @@ class Planner:
                             'constraint_type': constraint_details['constraint_type'],
                             'constraint_owner': constraint_details['constraint_owner'] if 'constraint_owner' in constraint_details else '',
                             'constraint_columns': constraint_details['constraint_columns'] if 'constraint_columns' in constraint_details else '',
-                            'referenced_table_schema': referenced_table_schema,
-                            'referenced_table_name': referenced_table_name,
+                            'source_referenced_table_schema': referenced_table_schema,
+                            'source_referenced_table_name': referenced_table_name,
+                            'target_referenced_table_schema': target_referenced_table_schema,
+                            'target_referenced_table_name': target_referenced_table_name,
                             'referenced_columns': constraint_details['referenced_columns'] if 'referenced_columns' in constraint_details else '',
                             'delete_rule': constraint_details['delete_rule'] if 'delete_rule' in constraint_details else '',
                             'update_rule': constraint_details['update_rule'] if 'update_rule' in constraint_details else '',
@@ -1145,7 +1173,13 @@ class Planner:
             return [c.strip().strip('"').strip("'") for c in str(cols_str).split(',') if c.strip()]
 
         for fk in fk_constraints:
-            parent_tbl_name = fk.get('referenced_table_name', '')
+            ## 'tables_by_target' is keyed by the name of the TARGET, so the referenced table
+            ## has to be looked up by the name the target gives it. It was looked up by the
+            ## name of the SOURCE, which found nothing whenever names_case_handling changed the
+            ## spelling - and a foreign key whose parent is not found is silently left with the
+            ## column types of the source on both sides.
+            parent_tbl_name = (fk.get('target_referenced_table_name')
+                               or self.config_parser.convert_names_case(fk.get('source_referenced_table_name') or ''))
             child_tbl_name = fk.get('target_table_name', '')
             fk_name = fk.get('constraint_name', '')
 
@@ -1271,7 +1305,7 @@ class Planner:
 
         added_count = 0
         for fk in fk_constraints:
-            ref_tbl = fk.get('referenced_table_name', '')
+            ref_tbl = fk.get('source_referenced_table_name', '')
             ref_cols_str = fk.get('referenced_columns', '')
             fk_name = fk.get('constraint_name', '')
 
@@ -1284,7 +1318,7 @@ class Planner:
             ## index below was created ON a table spelled the way the source spells it.
             ref_tbl_target = fk.get('target_referenced_table_name') or self.config_parser.convert_names_case(ref_tbl)
             if self.config_parser.get_use_aliases_as_target_names():
-                ref_schema = fk.get('referenced_table_schema', '') or self.source_schema_name
+                ref_schema = fk.get('source_referenced_table_schema', '') or self.source_schema_name
                 alias_dict = self.migrator_tables.get_alias_for_table(ref_schema, ref_tbl)
                 if alias_dict and alias_dict.get('target_alias_name'):
                     ref_tbl_target = self.config_parser.convert_names_case(alias_dict.get('target_alias_name'))
@@ -1673,12 +1707,11 @@ class Planner:
                 })
                 self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_views: Converted view SQL: {converted_view_sql}")
 
-                self.config_parser.print_log_message( 'DEBUG', "planner: stdwf_prepare_views: Checking for remote objects substitution in view SQL...")
-                rows = self.migrator_tables.get_records_remote_objects_substitution()
-                if rows:
-                    for row in rows:
-                        self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_views: Views - remote objects substituting {row[0]} with {row[1]}")
-                        converted_view_sql = re.sub(re.escape(row[0]), row[1], converted_view_sql, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
+                ## one mechanism, which records what it replaced. This runs AFTER the
+                ## conversion while the connectors run their pass before it - the two stages
+                ## are unchanged here, and the record now shows when both fire on one view.
+                converted_view_sql, _ = self.source_connection.apply_remote_objects_substitution(
+                    converted_view_sql, 'view', target_view_name)
 
                 ## The names inside the query, spelled the way the target has them. Three of
                 ## the twelve connectors did this themselves and nine did not - ms_sql and

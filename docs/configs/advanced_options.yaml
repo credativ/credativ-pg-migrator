@@ -105,7 +105,6 @@ migration:
   on_error: continue
   parallel_workers: 8         # >>> ADJUST
   batch_size: 100000
-  chunk_size: 250000
   validate_objects: retry
 
   # ------------------------------------------------------------------------
@@ -175,6 +174,13 @@ migration:
 # Three- and four-part names of a linked server / remote database appear inside
 # view and routine bodies and have no PostgreSQL equivalent. Each entry is a
 # plain search-and-replace over the converted code.
+#
+# >>> DEPRECATED. It replaces text, so it also rewrites a name inside a string
+# literal or a comment, it matches a substring rather than a name, and the
+# result depends on the order of the entries. A reference to the database being
+# MIGRATED no longer needs it - 'db..table' naming the migrated database is
+# resolved by the conversion itself. Use it only for another database, and read
+# the protocol table 'remote_objects_applied' to see what it really did.
 # >>> ADJUST or delete
 # ---------------------------------------------------------------------------
 # remote_objects_substitution:
@@ -219,7 +225,6 @@ exclude_funcprocs: []
 table_settings:
   # - table_name: "huge_history"
   #   batch_size: 5000            # smaller batches for very wide rows
-  #   chunk_size: 50000
   # - table_name: "staging_.*"
   #   migrate_data: false         # create the table, do not copy the rows
   # - table_name: "reference_.*"

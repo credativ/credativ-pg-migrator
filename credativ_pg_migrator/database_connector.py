@@ -579,20 +579,27 @@ class DatabaseConnector(ABC):
             index += 1
         return ''.join(masked)
 
-    def apply_remote_objects_substitution(self, code: str):
+    def apply_remote_objects_substitution(self, code: str, object_type: str = '',
+                                          object_name: str = ''):
         """
         The names of `remote_objects_substitution` replaced by the names they stand for.
 
         A statement of an application reaches the same database links and four part names the
-        query of a view does, so it is given the same substitution list from the same key of
-        the configuration. Returns (code, applied) - the second is what really fired, which the
-        query conversion writes into the block of the statement: a query which now reads
-        another object than the one its text names is something the developer has to be told.
+        query of a view does, so it is given the same substitution list from the same key of the
+        configuration. Returns (code, applied) - the second is what really fired, as a list of
+        dictionaries with the rule and how many times it matched.
 
-        It runs on the text of the source dialect, before anything parses it, which is where
-        the view path of sybase_ase and of the two Db2 flavours which have it run it as well.
-        The query conversion applies it first, so their own pass finds nothing left to do
-        rather than doing it twice.
+        **Every replacement is recorded**, on the config parser, which lives for the whole run.
+        It used to fire silently in four of the five places it is applied: a view was created
+        reading a different table than its text names and nothing in the run said so - not the
+        log, not the protocol, not the summary. The record is written into the protocol table
+        `remote_objects_applied` and counted in the summary. 'object_type' and 'object_name' say
+        what was being converted, so the record can name it.
+
+        It runs on the text of the source dialect, before anything parses it, which is where the
+        view path of sybase_ase and of the two Db2 flavours which have it run it as well. The
+        query conversion applies it first, so their own pass finds nothing left to do rather
+        than doing it twice.
         """
         applied = []
         if not code:
@@ -600,16 +607,45 @@ class DatabaseConnector(ABC):
         substitutions = self.config_parser.get_remote_objects_substitution()
         if not substitutions:
             return code, applied
-        iterator = substitutions.items() if isinstance(substitutions, dict) else substitutions
-        for source_object, target_object in iterator:
+        for source_object, target_object in substitutions:
             if not source_object or not target_object:
                 continue
             replaced, count = re.subn(re.escape(source_object), target_object, code,
                                       flags=re.IGNORECASE)
             if count:
                 code = replaced
-                applied.append(f"{source_object} -> {target_object}")
+                applied.append({
+                    'source_object_name': source_object,
+                    'target_object_name': target_object,
+                    'occurrences': count,
+                })
+
+        if applied:
+            self.record_remote_objects_applied(object_type, object_name, applied)
         return code, applied
+
+    def record_remote_objects_applied(self, object_type, object_name, applied):
+        """
+        What the substitution did, kept for the protocol table and said once in the log.
+
+        The message is a WARNING because it is one: the object which comes out reads something
+        other than what the source wrote, and whoever reads the migration has to know it.
+        """
+        if not applied:
+            return
+        replacements = []
+        for entry in applied:
+            replacements.append(f"{entry['source_object_name']} -> {entry['target_object_name']}"
+                                f" ({entry['occurrences']}x)")
+            self.config_parser.remote_substitutions_applied.append({
+                'object_type': object_type or 'unknown',
+                'object_name': object_name or 'unknown',
+                **entry,
+            })
+        self.config_parser.print_log_message('WARNING',
+            f"remote_objects_substitution: {object_type or 'object'} "
+            f"{object_name or '(unnamed)'}: {', '.join(replacements)} - the converted object "
+            f"reads the object of the target, not the one the text of the source names.")
 
     def apply_sql_functions_mapping(self, code: str, settings: dict) -> str:
         """

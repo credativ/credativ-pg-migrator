@@ -441,8 +441,9 @@ def build_comments_catalog(config_parser):
             'constraint_type': 'The kind of constraint - PRIMARY KEY, UNIQUE, FOREIGN KEY or CHECK.',
             'constraint_owner': 'Owner of the constraint in the source database.',
             'constraint_columns': 'The columns of the table the constraint is placed on.',
-            'referenced_table_schema': 'Schema of the table a foreign key points at.',
-            'referenced_table_name': 'The table a foreign key points at, named as the source names it.',
+            'source_referenced_table_schema': 'Schema of the table a foreign key points at, as the source names it. Empty means the schema of the constraint itself - most sources report a foreign key inside one schema that way.',
+            'source_referenced_table_name': 'The table a foreign key points at, named as the source names it.',
+            'target_referenced_table_schema': 'The schema the referenced table has in the TARGET - the schema the REFERENCES clause names. Empty means the referenced table is not part of this migration: it lies in a schema of the source which this run does not read, so the constraint can only be created if the target already holds that table.',
             'target_referenced_table_name': 'The name the object really has in the target - the spelling names_case_handling produced. The column next to it holds the spelling of the source, which is kept unchanged: two objects of the source which differ only in the case of their letters are two different objects, and the record of what was read has to say so.',
             'referenced_columns': 'The columns of that table the foreign key points at.',
             'constraint_sql': 'The statement which was sent to the target.',
@@ -911,11 +912,32 @@ def build_comments_catalog(config_parser):
         },
     }
 
+    catalog['remote_objects_applied'] = {
+        'comment': (
+            'What remote_objects_substitution really replaced, as opposed to what it was configured to replace - one '
+            'row per object and rule. The table next to it holds the rules; this one holds the outcome. Four of the '
+            'five places the substitution is applied used to fire silently, so an object was created reading '
+            'something other than what its source text names and nothing in the run said so. Every row here is an '
+            'object whose meaning was changed by the configuration.'
+        ),
+        'columns': {
+            'id': 'Primary key of the record.',
+            'object_type': 'What was being converted when the rule fired - a view, a function, a procedure, a trigger, a statement of the query conversion.',
+            'object_name': 'The name of that object.',
+            'source_object_name': 'The text the rule looks for.',
+            'target_object_name': 'The text it was replaced with.',
+            'occurrences': 'How many times the rule matched inside this one object.',
+            'inserted': 'When the replacement was recorded.',
+        },
+    }
+
     catalog['remote_objects_substitution'] = {
         'comment': (
-            'The replacements from the configuration for objects which do not live in the migrated database at all - '
-            'the references to another server or another database which the code of the source carries. They are '
-            'rewritten to the name the object has in the new landscape.'
+            'DEPRECATED. The replacements from the configuration for objects which do not live in the migrated '
+            'database at all - the references to another server or another database which the code of the source '
+            'carries. They are rewritten to the name the object has in the new landscape. It is a search and replace '
+            'over the whole statement and rewrites a name inside a string literal or a comment as readily as one in '
+            'the SQL; what it really did is in remote_objects_applied.'
         ),
         'columns': {
             'source_object_name': 'The name as the code of the source writes it.',

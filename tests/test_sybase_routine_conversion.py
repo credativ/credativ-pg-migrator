@@ -67,6 +67,9 @@ class Config:
     def get_source_schema(self):
         return 'dbo'
 
+    def get_source_db_name(self):
+        return 'migdb'
+
     def get_target_schema(self):
         return self.target_schema
 

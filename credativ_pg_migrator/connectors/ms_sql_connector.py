@@ -23,6 +23,7 @@ from credativ_pg_migrator.migrator_logging import MigratorLogger
 from credativ_pg_migrator.connectors.tsql_parser import TsqlParser
 from credativ_pg_migrator.query_conversion import outer_joins as query_outer_joins
 from credativ_pg_migrator.query_conversion import money_literals as query_money_literals
+from credativ_pg_migrator.query_conversion import object_references as query_object_references
 from credativ_pg_migrator.query_conversion.outer_joins import outer_join_warnings
 from credativ_pg_migrator.jvm_helper import detach_thread_from_jvm
 from credativ_pg_migrator.text_decoding import TextDecoder
@@ -1418,6 +1419,24 @@ class MsSQLConnector(DatabaseConnector):
                 # Apply transformations
                 expression = expression.transform(quote_column_names)
                 expression = expression.transform(replace_functions)
+
+                ## The database in front of a table name - 'ccd..t', 'ccd.dbo.t', and the four
+                ## part 'SRV1.db.dbo.t' of a linked server. Where it names the database being
+                ## migrated it says nothing the migration does not know and is dropped, so that
+                ## the schema mapping below gives the table the schema of the target like any
+                ## other. Left in, it reached the target as 'ccd.."t"', which is a syntax
+                ## error, or as 'ccd."ccd"."t"', which is the database written in front of the
+                ## schema that replaced it. A reference to ANOTHER database or another server
+                ## is left as it stands and reported - see object_references.py.
+                unresolved_references = query_object_references.resolve_tsql_table_references(
+                    expression, self.config_parser.get_source_db_name(), settings['source_schema_name'])
+                if unresolved_references:
+                    self.config_parser.print_log_message('WARNING',
+                        query_object_references.unresolved_reference_message(
+                            'ms_sql_connector: convert_statement_code',
+                            settings.get('target_view_name') or settings.get('statement_id') or 'the statement',
+                            unresolved_references))
+
                 expression = expression.transform(replace_schema_names)
                 expression = expression.transform(quote_schema_and_table_names)
                 expression = expression.transform(replace_udts)

@@ -34,6 +34,9 @@ class ConfigParser:
         self.logger = logger
         ## counts of objects kept and left out by include_*/exclude_*, per object kind
         self.object_filter_counters = {}
+        ## every replacement remote_objects_substitution really made, per object - the run used
+        ## to rewrite the name of a table in a view and say nothing at all about it
+        self.remote_substitutions_applied = []
         self.config = self.load_config(args.config)
         self.print_log_message('DEBUG3', f"config_parser: __init__: Configuration loaded: {self.config}")
         self.validate_config()
@@ -237,8 +240,100 @@ class ConfigParser:
                 f"matching - they are only written into the mapping report. Correct a column match "
                 f"with mapping.heuristics, or by renaming the column in the target.")
 
+        self.validate_remote_objects_substitution()
         self.validate_schema_names()
         self.validate_anonymization_config()
+
+        return True
+
+    def validate_remote_objects_substitution(self):
+        """
+        Check every entry of remote_objects_substitution before anything is converted, and say
+        that the option is deprecated.
+
+        The mechanism is a plain search and replace over the whole statement: it rewrites what
+        stands inside a string literal or a comment, it matches a substring rather than a name -
+        a rule for 'arch' fires inside 'archive_2024' - and the result depends on the order the
+        entries are written in. Nothing here can repair that; what it can do is refuse an entry
+        the code cannot read at all, and name the two shapes which make the outcome depend on
+        the order. See development/REMOTE_OBJECTS_SUBSTITUTION.md.
+        """
+        configured = self.config.get('remote_objects_substitution')
+        if not configured:
+            return True
+
+        if isinstance(configured, dict):
+            raise ValueError(
+                "remote_objects_substitution is written as a mapping. It has to be a list of "
+                "[source, target] pairs - written as a mapping it stops the planner with "
+                "'too many values to unpack'. Write it as:\n"
+                "  remote_objects_substitution:\n"
+                "    - [\"otherdb..customers\", \"legacy.customers\"]")
+
+        if not isinstance(configured, (list, tuple)):
+            raise ValueError(
+                f"remote_objects_substitution must be a list of [source, target] pairs, "
+                f"found {type(configured).__name__}.")
+
+        for position, entry in enumerate(configured, start=1):
+            if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+                raise ValueError(
+                    f"Entry {position} of remote_objects_substitution must be a list of exactly "
+                    f"two elements - [source, target] - found {entry!r}.")
+            source, target = entry
+            if not str(source).strip():
+                raise ValueError(
+                    f"Entry {position} of remote_objects_substitution has an empty source - it "
+                    f"would match every position of every statement.")
+            if not str(target).strip():
+                raise ValueError(
+                    f"Entry {position} of remote_objects_substitution has an empty target. To "
+                    f"remove a qualifier, write what the reference is to become; the option "
+                    f"cannot delete text.")
+
+        pairs = self.get_remote_objects_substitution()
+
+        self.print_log_message('WARNING',
+            f"config_parser: validate_remote_objects_substitution: remote_objects_substitution "
+            f"is DEPRECATED and carries {len(pairs)} entry(ies). It is a search and replace over "
+            f"the whole statement: it rewrites a name inside a string literal or a comment, it "
+            f"matches a substring rather than a name, and it is applied twice to the query of a "
+            f"view. A reference to the database being MIGRATED no longer needs it - those are "
+            f"resolved by the conversion itself - so use it only for a reference to another "
+            f"database, check what it did in the protocol table 'remote_objects_applied', and "
+            f"see development/REMOTE_OBJECTS_SUBSTITUTION.md for what is meant to replace it.")
+
+        ## The two shapes whose outcome depends on the order the entries are written in. They
+        ## are reported and not refused: a configuration which relies on them works today, and
+        ## breaking it would be worse than naming it.
+        seen_sources = {}
+        for position, (source, target) in enumerate(pairs, start=1):
+            key = source.lower()
+            if key in seen_sources:
+                self.print_log_message('WARNING',
+                    f"config_parser: validate_remote_objects_substitution: entries "
+                    f"{seen_sources[key]} and {position} of remote_objects_substitution have the "
+                    f"same source '{source}' - the first one wins and the second never fires.")
+            else:
+                seen_sources[key] = position
+
+        for position, (source, target) in enumerate(pairs, start=1):
+            for other_position, (other_source, _) in enumerate(pairs, start=1):
+                if position == other_position:
+                    continue
+                if other_source.lower() in target.lower():
+                    self.print_log_message('WARNING',
+                        f"config_parser: validate_remote_objects_substitution: entry {position} "
+                        f"replaces '{source}' with '{target}', which entry {other_position} then "
+                        f"matches with '{other_source}' - the two chain, and what comes out "
+                        f"depends on the order they are written in.")
+                elif (other_source.lower() in source.lower()
+                        and other_source.lower() != source.lower()):
+                    self.print_log_message('WARNING',
+                        f"config_parser: validate_remote_objects_substitution: the source of "
+                        f"entry {other_position}, '{other_source}', is contained in the source of "
+                        f"entry {position}, '{source}' - whichever is applied first decides, and "
+                        f"the list is applied in the order it is written.")
 
         return True
 
@@ -896,7 +991,27 @@ class ConfigParser:
         return normalized
 
     def get_remote_objects_substitution(self):
-        return (self.config.get('remote_objects_substitution') or {})
+        """
+        The entries of remote_objects_substitution, always as a list of (source, target) pairs.
+
+        It used to answer whatever the YAML happened to hold - the default was a DICT while the
+        schema documents a list of pairs - and the consumers disagreed about what to do with
+        that: the connectors carried an `isinstance(..., dict)` branch and the planner unpacked
+        the entries directly, so a configuration written as a YAML mapping crashed the planner
+        with "too many values to unpack" while the same file worked in the query conversion.
+        The shape is decided here, once, and validate_remote_objects_substitution() refuses
+        anything this cannot read.
+        """
+        configured = self.config.get('remote_objects_substitution')
+        if not configured:
+            return []
+        if isinstance(configured, dict):
+            return [(str(source), str(target)) for source, target in configured.items()]
+        pairs = []
+        for entry in configured:
+            if isinstance(entry, (list, tuple)) and len(entry) == 2:
+                pairs.append((str(entry[0]), str(entry[1])))
+        return pairs
 
     ## Migration settings
     def _match_table_name(self, table_name, pattern):

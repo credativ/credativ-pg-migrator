@@ -139,6 +139,7 @@ class MigratorTables:
         self.create_table_for_views()
         self.create_ddl_tables()
         self.create_table_for_mapping()
+        self.create_table_for_remote_objects_applied()
         self.create_table_for_anonymization_stats()
         self.apply_comments()
 
@@ -473,6 +474,57 @@ class MigratorTables:
             """, (source_object_name, target_object_name))
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: prepare_remote_objects_substitution: Data inserted into table remote_objects_substitution in schema {self.protocol_schema}")
         self.apply_comments(['remote_objects_substitution'])
+
+    def create_table_for_remote_objects_applied(self):
+        """
+        What remote_objects_substitution really did, as opposed to what it was configured to do.
+
+        The rules stand in `remote_objects_substitution`; this is the record of the replacements
+        which fired, one row per object and rule. Four of the five places the substitution is
+        applied used to fire silently, so a view was created reading a different table than its
+        text names and nothing in the run said so.
+        """
+        self.protocol_connection.execute_query(f"""
+        DROP TABLE IF EXISTS "{self.protocol_schema}".remote_objects_applied;
+        """)
+        self.protocol_connection.execute_query(f"""
+        CREATE TABLE IF NOT EXISTS "{self.protocol_schema}".remote_objects_applied (
+        id SERIAL PRIMARY KEY,
+        object_type TEXT,
+        object_name TEXT,
+        source_object_name TEXT,
+        target_object_name TEXT,
+        occurrences INTEGER,
+        inserted TIMESTAMP DEFAULT clock_timestamp()
+        )
+        """)
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: create_table_for_remote_objects_applied: Table remote_objects_applied created in schema {self.protocol_schema}")
+
+    def record_remote_objects_applied(self):
+        """
+        Write what the substitution replaced during this run into the protocol.
+
+        The replacements are collected on the config parser, which is one object for the whole
+        run, because they happen in the connectors as well as in the planner and the
+        orchestrator - the connectors have no protocol connection of their own. Called once,
+        from the summary, so that the summary can read them back out of the table.
+        """
+        applied = getattr(self.config_parser, 'remote_substitutions_applied', None)
+        if not applied:
+            return
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            psycopg2.extras.execute_values(cursor, f"""
+                INSERT INTO "{self.protocol_schema}".remote_objects_applied
+                (object_type, object_name, source_object_name, target_object_name, occurrences)
+                VALUES %s
+            """, [(entry['object_type'], entry['object_name'], entry['source_object_name'],
+                   entry['target_object_name'], entry['occurrences']) for entry in applied])
+            cursor.close()
+            ## written once - a second call from another phase must not double them
+            self.config_parser.remote_substitutions_applied = []
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: record_remote_objects_applied: Error: {e}")
 
     def get_records_remote_objects_substitution(self):
         query = f"""
@@ -5217,6 +5269,36 @@ class MigratorTables:
             else:
                 lines.append("No data migration executed in this run.")
 
+        except psycopg2.errors.UndefinedTable:
+            self.protocol_connection.connection.rollback()
+        except Exception:
+            self.protocol_connection.connection.rollback()
+
+        ## What remote_objects_substitution replaced. It fires while the objects are being
+        ## converted, in the connectors as well as here, so the record is written now - at the
+        ## end of the run, from the one config parser all of them share.
+        self.record_remote_objects_applied()
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(f"""
+                SELECT source_object_name, target_object_name,
+                       count(DISTINCT object_type || '.' || object_name), sum(occurrences)
+                FROM "{self.protocol_schema}".remote_objects_applied
+                GROUP BY source_object_name, target_object_name
+                ORDER BY sum(occurrences) DESC
+            """)
+            substitutions = cursor.fetchall()
+            cursor.close()
+            if substitutions:
+                lines.append("")
+                lines.append("[ REMOTE OBJECT SUBSTITUTIONS ]")
+                lines.append("-" * 80)
+                lines.append("remote_objects_substitution is DEPRECATED - see the warning at the start of the run.")
+                lines.append("Every object below reads what the rule names, NOT what the source wrote:")
+                for source_object, target_object, objects, occurrences in substitutions:
+                    lines.append(f"    {source_object} -> {target_object}: "
+                                 f"{occurrences} replacement(s) in {objects} object(s)")
+                lines.append("")
         except psycopg2.errors.UndefinedTable:
             self.protocol_connection.connection.rollback()
         except Exception:

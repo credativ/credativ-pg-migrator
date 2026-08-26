@@ -1707,12 +1707,11 @@ class Planner:
                 })
                 self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_views: Converted view SQL: {converted_view_sql}")
 
-                self.config_parser.print_log_message( 'DEBUG', "planner: stdwf_prepare_views: Checking for remote objects substitution in view SQL...")
-                rows = self.migrator_tables.get_records_remote_objects_substitution()
-                if rows:
-                    for row in rows:
-                        self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_views: Views - remote objects substituting {row[0]} with {row[1]}")
-                        converted_view_sql = re.sub(re.escape(row[0]), row[1], converted_view_sql, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
+                ## one mechanism, which records what it replaced. This runs AFTER the
+                ## conversion while the connectors run their pass before it - the two stages
+                ## are unchanged here, and the record now shows when both fire on one view.
+                converted_view_sql, _ = self.source_connection.apply_remote_objects_substitution(
+                    converted_view_sql, 'view', target_view_name)
 
                 ## The names inside the query, spelled the way the target has them. Three of
                 ## the twelve connectors did this themselves and nine did not - ms_sql and

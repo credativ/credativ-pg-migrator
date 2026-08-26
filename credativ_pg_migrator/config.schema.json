@@ -1156,7 +1156,7 @@
         "array",
         "null"
       ],
-      "description": "Rewrites references to objects living in another database, which PostgreSQL cannot express. Each entry is [source_object, target_object] and is applied as a plain search and replace over the converted code. The key may also be left empty, which means the same as an empty list.",
+      "description": "Rewrites references to objects living in another database, which PostgreSQL cannot express. Each entry is [source_object, target_object] and is applied as a plain search and replace over the whole statement - so it also rewrites what stands inside a string literal or a comment, it matches a substring rather than a name (a rule for 'arch' fires inside 'archive_2024'), the result depends on the order the entries are written in, and the query of a view is given the list twice. A reference to the database being MIGRATED no longer needs it: 'db..table' and 'db.owner.table' naming the migrated database are resolved by the conversion itself. Use it only for a reference to ANOTHER database, and read the protocol table remote_objects_applied to see what it did. development/REMOTE_OBJECTS_SUBSTITUTION.md describes what is meant to replace it. The key may also be left empty, which means the same as an empty list.",
       "items": {
         "type": "array",
         "minItems": 2,
@@ -1165,7 +1165,8 @@
           "type": "string"
         },
         "description": "[source_object, target_object]"
-      }
+      },
+      "deprecated": true
     },
     "data_migration_limitation": {
       "type": [

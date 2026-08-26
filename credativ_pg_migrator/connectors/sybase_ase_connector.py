@@ -4979,15 +4979,12 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_function_name}"();
         self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: convert_statement_code: settings in convert_view_code: {settings}")
         converted_code = settings['view_code']
 
-        # Apply remote_objects_substitution
-        remote_subs = self.config_parser.get_remote_objects_substitution()
-        if remote_subs:
-            iterator = remote_subs.items() if isinstance(remote_subs, dict) else remote_subs
-            for source_obj, target_obj in iterator:
-                if source_obj and target_obj:
-                    # Case-insensitive replacement
-                    converted_code = re.sub(re.escape(source_obj), target_obj, converted_code, flags=re.IGNORECASE)
-                    self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: convert_statement_code: Applied remote object substitution: {source_obj} -> {target_obj}")
+        ## one mechanism, which records what it replaced - see
+        ## database_connector.apply_remote_objects_substitution()
+        converted_code, _ = self.apply_remote_objects_substitution(
+            converted_code, 'view',
+            settings.get('target_view_name') or settings.get('view_name')
+            or settings.get('statement_id') or '')
 
         converted_code = self.prepare_query_for_parsing(converted_code)
 

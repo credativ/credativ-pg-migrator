@@ -1958,9 +1958,8 @@ class Orchestrator:
 
             target_schema_name = constraint_data['target_schema_name']
             target_table_name = constraint_data['target_table_name']
-            # referenced_table_schema = constraint_data['target_schema_name']
-            referenced_table_schema = constraint_data['referenced_table_schema']
-            referenced_table_name = constraint_data['referenced_table_name']
+            source_referenced_table_schema = constraint_data['source_referenced_table_schema']
+            source_referenced_table_name = constraint_data['source_referenced_table_name']
 
             if create_constraint_sql:
 
@@ -1976,24 +1975,57 @@ class Orchestrator:
                 if not worker_target_connection.target_table_exists(target_schema_name, target_table_name_to_check):
                     self.config_parser.print_log_message('ERROR', f"orchestrator: constraint_worker: Worker {worker_id}: Target table {target_schema_name}.{target_table_name_to_check} for constraint {constraint_name} does not exist - skipping constraint creation.")
                     self.migrator_tables.update_constraint_status({'row_id': constraint_data['id'], 'success': False, 'message': f'ERROR: target table {target_schema_name}.{target_table_name_to_check} does not exist'})
+                    ## every other way out of this worker closes its connection - this one kept
+                    ## it open, one per constraint which could not be created
+                    worker_target_connection.disconnect()
                     return False
 
                 # if constraint_data['constraint_type'] is 'FOREIGN KEY': ## original version on main, must be tested
-                if referenced_table_name and referenced_table_name.strip():
-                    referenced_target_table = self.migrator_tables.select_table_by_source({'source_schema_name': referenced_table_schema, 'source_table_name': referenced_table_name})
-                    if referenced_target_table is None:
-                        self.config_parser.print_log_message('INFO', f"orchestrator: type is {constraint_data['constraint_type']}")
-                        self.config_parser.print_log_message('ERROR', f"orchestrator: constraint_worker: Worker {worker_id}: Referenced table {referenced_table_schema}.{referenced_table_name} for constraint {constraint_name} not found - skipping constraint creation.")
-                        self.migrator_tables.update_constraint_status({'row_id': constraint_data['id'], 'success': False, 'message': f'ERROR: referenced table {referenced_table_schema}.{referenced_table_name} not found'})
+                if source_referenced_table_name and source_referenced_table_name.strip():
+                    ## Where the referenced table is in the target. The planner recorded it
+                    ## when it built the constraint, and that record is what the REFERENCES
+                    ## clause of the statement names - so this is the pair the existence of
+                    ## which decides whether the statement can work at all.
+                    referenced_target_schema_name = constraint_data['target_referenced_table_schema']
+                    referenced_target_table_name_to_check = constraint_data['target_referenced_table_name']
+
+                    ## The protocol row of the referenced table, when the migration created it
+                    ## in this run: it carries the alias which use_aliases_as_target_names puts
+                    ## in place of the name. A referenced schema left empty by the connector
+                    ## means the schema of the constraint itself - most of them report a
+                    ## foreign key inside one schema that way, and looking the table up under
+                    ## the empty string found nothing, so EVERY such foreign key was skipped
+                    ## with 'referenced table .X not found'.
+                    lookup_schema_name = source_referenced_table_schema or constraint_data['source_schema_name']
+                    referenced_target_table = self.migrator_tables.select_table_by_source(
+                        {'source_schema_name': lookup_schema_name, 'source_table_name': source_referenced_table_name})
+
+                    if referenced_target_table is not None:
+                        referenced_target_schema_name = referenced_target_table['target_schema_name']
+                        referenced_target_table_name_to_check = (
+                            referenced_target_table['target_alias_name']
+                            if use_aliases_as_target_names and referenced_target_table.get('target_alias_name')
+                            else referenced_target_table['target_table_name'])
+
+                    referenced_target_table_name_to_check = self.config_parser.convert_names_case(
+                        referenced_target_table_name_to_check or '')
+
+                    ## Nothing to point at: the referenced table is neither in this migration
+                    ## nor recorded as a table of the target. The reason is named, because
+                    ## 'not found' used to be said about a table which was simply looked up
+                    ## under the wrong schema.
+                    if not referenced_target_schema_name or not referenced_target_table_name_to_check:
+                        message = (f"the referenced table {lookup_schema_name}.{source_referenced_table_name} is not "
+                                   f"part of this migration and no table of the target is recorded for it")
+                        self.config_parser.print_log_message('ERROR', f"orchestrator: constraint_worker: Worker {worker_id}: Constraint {constraint_name} ({constraint_data['constraint_type']}): {message} - skipping constraint creation.")
+                        self.migrator_tables.update_constraint_status({'row_id': constraint_data['id'], 'success': False, 'message': f'ERROR: {message}'})
                         worker_target_connection.disconnect()
                         return False
 
-                    referenced_target_table_name_to_check = referenced_target_table['target_alias_name'] if use_aliases_as_target_names and referenced_target_table.get('target_alias_name') else referenced_target_table['target_table_name']
-                    referenced_target_table_name_to_check = self.config_parser.convert_names_case(referenced_target_table_name_to_check)
-
-                    if not worker_target_connection.target_table_exists(referenced_target_table['target_schema_name'], referenced_target_table_name_to_check):
-                        self.config_parser.print_log_message('ERROR', f"orchestrator: constraint_worker: Worker {worker_id}: Referenced table {referenced_target_table['target_schema_name']}.{referenced_target_table_name_to_check} for constraint {constraint_name} does not exist - skipping constraint creation.")
-                        self.migrator_tables.update_constraint_status({'row_id': constraint_data['id'], 'success': False, 'message': f"ERROR: referenced table {referenced_target_table['target_schema_name']}.{referenced_target_table_name_to_check} does not exist"})
+                    if not worker_target_connection.target_table_exists(referenced_target_schema_name, referenced_target_table_name_to_check):
+                        self.config_parser.print_log_message('ERROR', f"orchestrator: constraint_worker: Worker {worker_id}: Referenced table {referenced_target_schema_name}.{referenced_target_table_name_to_check} for constraint {constraint_name} does not exist - skipping constraint creation.")
+                        self.migrator_tables.update_constraint_status({'row_id': constraint_data['id'], 'success': False, 'message': f"ERROR: referenced table {referenced_target_schema_name}.{referenced_target_table_name_to_check} does not exist"})
+                        worker_target_connection.disconnect()
                         return False
 
                     ## A column of the referenced table can carry another data type than the
@@ -2008,7 +2040,7 @@ class Orchestrator:
                                 'target_schema_name': target_schema_name,
                                 'target_table_name': target_table_name_to_check,
                                 'constraint_columns': self.split_constraint_columns(constraint_data['constraint_columns']),
-                                'referenced_schema_name': referenced_target_table['target_schema_name'],
+                                'referenced_schema_name': referenced_target_schema_name,
                                 'referenced_table_name': referenced_target_table_name_to_check,
                                 'referenced_columns': self.split_constraint_columns(constraint_data['referenced_columns']),
                             }):
@@ -2070,8 +2102,12 @@ class Orchestrator:
                 worker_target_connection.disconnect()
                 return True
             else:
-                self.config_parser.print_log_message('INFO', f"orchestrator: constraint_worker: Worker {worker_id}: Constraint {constraint_name} does not have a SQL statement - skipping.")
-                worker_target_connection.disconnect()
+                ## No statement, so no connection was opened either - this branch used to close
+                ## one, which raised UnboundLocalError and turned 'the constraint has no
+                ## statement' into an error of the migration reported somewhere else entirely.
+                message = 'no statement could be built for this constraint'
+                self.config_parser.print_log_message('WARNING', f"orchestrator: constraint_worker: Worker {worker_id}: Constraint {constraint_name} of {constraint_data.get('target_table_name')} - {message} - skipping.")
+                self.migrator_tables.update_constraint_status({'row_id': constraint_data['id'], 'success': False, 'message': f'ERROR: {message}'})
                 return False
 
         except Exception as e:

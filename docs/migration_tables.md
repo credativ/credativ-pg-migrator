@@ -36,7 +36,8 @@ Critical for massive parallel imports and the ability to resume aborted migratio
 Populated from the YAML configuration, these tables enforce explicit overriding rules during planning:
 *   **`data_types_substitution`**: Rules mapping source types (e.g., `NUMBER`) to target types (e.g., `BIGINT`), filterable down to specific columns.
 *   **`data_migration_limitation`**: Stores filtering `WHERE` clauses for partial data migration.
-*   **`remote_objects_substitution`**: Remaps database link references.
+*   **`remote_objects_substitution`**: **Deprecated.** Remaps references to another database or another server, as a plain search and replace over the converted code. A reference to the database being migrated is resolved by the conversion itself and needs no entry here.
+*   **`remote_objects_applied`**: What that substitution really replaced - one row per object and rule, with how often it fired. The table above holds the rules, this one the outcome.
 *   **`default_values_substitution`**: Rewrites specific default data values during schema conversion.
 
 ## 5. Offline DDL & Discovery Features

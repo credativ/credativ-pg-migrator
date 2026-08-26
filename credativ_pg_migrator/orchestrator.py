@@ -2285,12 +2285,9 @@ class Orchestrator:
                                     f"the objects of the target because names_case_handling is "
                                     f"lower.")
 
-                        self.config_parser.print_log_message( 'DEBUG', "orchestrator: run_migrate_funcprocs: Checking for remote objects substitution in functions/procedures...")
-                        rows = self.migrator_tables.get_records_remote_objects_substitution()
-                        if rows:
-                            for row in rows:
-                                self.config_parser.print_log_message( 'DEBUG', f"orchestrator: run_migrate_funcprocs: Funcs/Procs - remote objects substituting {row[0]} with {row[1]}")
-                                converted_code = re.sub(re.escape(row[0]), row[1], converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
+                        ## one mechanism, which records what it replaced
+                        converted_code, _ = self.source_connection.apply_remote_objects_substitution(
+                            converted_code, funcproc_type.lower(), funcproc_data['name'])
 
                         self.migrator_tables.insert_funcprocs({
                             'source_schema_name': self.source_schema_name,
@@ -2386,12 +2383,9 @@ class Orchestrator:
                                     'message': f'ERROR: manual adjustment required: {details}'})
                                 continue
 
-                            self.config_parser.print_log_message( 'DEBUG', "orchestrator: run_migrate_triggers: Checking for remote objects substitution in triggers...")
-                            rows = self.migrator_tables.get_records_remote_objects_substitution()
-                            if rows:
-                                for row in rows:
-                                    self.config_parser.print_log_message( 'DEBUG', f"orchestrator: run_migrate_triggers: Triggers - remote objects substituting {row[0]} with {row[1]}")
-                                    converted_code = re.sub(re.escape(row[0]), row[1], converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
+                            ## one mechanism, which records what it replaced
+                            converted_code, _ = self.source_connection.apply_remote_objects_substitution(
+                                converted_code, 'trigger', trigger_detail.get('trigger_name', ''))
 
                             try:
                                 if converted_code is not None and converted_code.strip():

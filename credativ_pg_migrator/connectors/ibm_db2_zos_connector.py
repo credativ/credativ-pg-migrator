@@ -2310,12 +2310,10 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
         view_code = settings['view_code']
         converted_code = self.convert_mqt_to_materialized_view(view_code)
 
-        remote_subs = self.config_parser.get_remote_objects_substitution()
-        if remote_subs:
-            iterator = remote_subs.items() if isinstance(remote_subs, dict) else remote_subs
-            for source_obj, target_obj in iterator:
-                if source_obj and target_obj:
-                    converted_code = re.sub(re.escape(source_obj), target_obj, converted_code, flags=re.IGNORECASE)
+        ## one mechanism, which records what it replaced - see
+        ## database_connector.apply_remote_objects_substitution()
+        converted_code, _ = self.apply_remote_objects_substitution(
+            converted_code, 'view', settings.get('target_view_name') or settings.get('view_name') or '')
 
         # WITH [CASCADED|LOCAL] CHECK OPTION is valid in PostgreSQL as well, but the SQL parser
         # does not understand it - it is cut off here and appended back to the converted code.

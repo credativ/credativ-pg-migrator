@@ -917,11 +917,32 @@ def build_comments_catalog(config_parser):
         },
     }
 
+    catalog['remote_objects_applied'] = {
+        'comment': (
+            'What remote_objects_substitution really replaced, as opposed to what it was configured to replace - one '
+            'row per object and rule. The table next to it holds the rules; this one holds the outcome. Four of the '
+            'five places the substitution is applied used to fire silently, so an object was created reading '
+            'something other than what its source text names and nothing in the run said so. Every row here is an '
+            'object whose meaning was changed by the configuration.'
+        ),
+        'columns': {
+            'id': 'Primary key of the record.',
+            'object_type': 'What was being converted when the rule fired - a view, a function, a procedure, a trigger, a statement of the query conversion.',
+            'object_name': 'The name of that object.',
+            'source_object_name': 'The text the rule looks for.',
+            'target_object_name': 'The text it was replaced with.',
+            'occurrences': 'How many times the rule matched inside this one object.',
+            'inserted': 'When the replacement was recorded.',
+        },
+    }
+
     catalog['remote_objects_substitution'] = {
         'comment': (
-            'The replacements from the configuration for objects which do not live in the migrated database at all - '
-            'the references to another server or another database which the code of the source carries. They are '
-            'rewritten to the name the object has in the new landscape.'
+            'DEPRECATED. The replacements from the configuration for objects which do not live in the migrated '
+            'database at all - the references to another server or another database which the code of the source '
+            'carries. They are rewritten to the name the object has in the new landscape. It is a search and replace '
+            'over the whole statement and rewrites a name inside a string literal or a comment as readily as one in '
+            'the SQL; what it really did is in remote_objects_applied.'
         ),
         'columns': {
             'source_object_name': 'The name as the code of the source writes it.',

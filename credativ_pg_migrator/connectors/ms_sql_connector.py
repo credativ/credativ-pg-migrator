@@ -1437,7 +1437,8 @@ class MsSQLConnector(DatabaseConnector):
                 ## schema that replaced it. A reference to ANOTHER database or another server
                 ## is left as it stands and reported - see object_references.py.
                 unresolved_references = query_object_references.resolve_tsql_table_references(
-                    expression, self.config_parser.get_source_db_name(), settings['source_schema_name'])
+                    expression, self.config_parser.get_source_db_name(), settings['source_schema_name'],
+                    settings.get('target_schema_name'))
                 if unresolved_references:
                     self.config_parser.print_log_message('WARNING',
                         query_object_references.unresolved_reference_message(
@@ -1510,8 +1511,12 @@ class MsSQLConnector(DatabaseConnector):
             return query_code
         prepared = query_outer_joins.mark_tsql_outer_joins(
             query_code, self.sql_without_literals_and_comments)
-        return query_money_literals.convert_money_literals(
+        prepared = query_money_literals.convert_money_literals(
             prepared, self.sql_without_literals_and_comments)
+        ## 'ccd..t' with the owner left out - see the same call in sybase_ase
+        return query_object_references.write_omitted_owner(
+            prepared, self.config_parser.get_source_schema(),
+            self.sql_without_literals_and_comments, self.config_parser.get_source_db_name())
 
     ## The source test of §8.1. SET NOEXEC ON makes the server compile every statement behind
     ## it - the names are resolved and the plan is made - and run none of them. It is a

@@ -177,6 +177,10 @@ class Config:
     def warnings(self):
         return [message for level, message in self.messages if level == 'WARNING']
 
+    def get_source_schema(self):
+        ## the owner a 'db..table' left out - written back before the statement is parsed
+        return 'dbo'
+
     def get_source_db_name(self):
         return MIGRATED_DATABASE
 
@@ -258,3 +262,169 @@ def test_a_view_reading_another_database_is_warned_about_by_name(convert):
     converted, config = convert('select * from otherdb..archive')
     assert any('v_report' in warning and 'otherdb.archive' in warning
                for warning in config.warnings()), config.warnings()
+
+
+## ------------------------------- every occurrence, not only the first one the pass met
+
+## Reported after the first repair: a view came back half converted - the table of the FROM
+## clause resolved and a function in the select list still written 'ccd..fn_x(a)'. Two causes,
+## both held below: the pass walked `exp.Table` and nothing else, and 'db..object' in an
+## EXPRESSION position does not parse at all, so a view carrying one was never parsed and
+## reached the target with every qualifier of every reference untouched.
+
+MANY_OCCURRENCES = [
+    pytest.param('select * from ccd..a, ccd..b, ccd..c, ccd..d, ccd..e',
+                 5, id='five tables in one FROM'),
+    pytest.param('select * from ccd..a join ccd..b on a.id = b.id join ccd..c on c.id = a.id',
+                 3, id='three joined tables'),
+    pytest.param('select * from ccd..a union all select * from ccd..b union all select * from ccd..c',
+                 3, id='three arms of a union'),
+    pytest.param('select * from ccd..a where id in (select id from ccd..b where x in (select y from ccd..c))',
+                 3, id='nested subqueries'),
+    pytest.param('with c as (select id from ccd..a) select * from c join ccd..b on 1 = 1',
+                 2, id='a CTE and a join'),
+    pytest.param('select * from ccd..a join (select id from ccd..b) x on x.id = a.id',
+                 2, id='a derived table'),
+]
+
+
+@pytest.mark.parametrize('convert', VIEW_PATHS)
+@pytest.mark.parametrize('statement,expected', MANY_OCCURRENCES)
+def test_every_table_of_the_statement_is_resolved(convert, statement, expected):
+    converted, _ = convert(statement)
+    assert '..' not in converted, 'a qualifier was left behind'
+    assert converted.count(f'"{TARGET_SCHEMA}".') >= expected
+
+
+@pytest.mark.parametrize('convert', VIEW_PATHS)
+@pytest.mark.parametrize('statement', [
+    'select ccd.dbo.fn_calc(a) as c from ccd..t',
+    'select ccd..fn_one(x), ccd..fn_two(y) from ccd..a join ccd..b on 1 = 1',
+    'select * from ccd..a cross apply ccd..fn_t(a.id) f',
+])
+def test_a_function_call_carries_the_same_qualifier_and_is_resolved_too(convert, statement):
+    """
+    The pass walked `exp.Table`, and a qualified call is a Dot chain ending in the call - so the
+    table of the FROM clause was resolved and the function next to it was not. That is the
+    'it only found the first occurrence' of the report.
+    """
+    converted, _ = convert(statement)
+    assert '..' not in converted
+    assert f'"{TARGET_SCHEMA}".fn' in converted, converted
+
+
+@pytest.mark.parametrize('convert', VIEW_PATHS)
+def test_a_qualifier_in_an_expression_no_longer_stops_the_parser(convert):
+    """
+    'ccd..fn_x(a)' in a select list is not readable by the parser at all, so the whole view fell
+    back to its source text - every qualifier of every reference, table ones included, survived.
+    The omitted owner is written back before the parse, which makes the shape an ordinary three
+    part name.
+    """
+    converted, _ = convert('select ccd..fn_x(a) as c, t.other from ccd..t')
+    assert '..' not in converted
+    assert 'SELECT' in converted.upper(), 'the view fell back to its source text'
+
+
+@pytest.mark.parametrize('convert', VIEW_PATHS)
+def test_a_double_dot_inside_a_string_literal_is_left_alone(convert):
+    """The rewrite which makes the shape parseable must not reach the data of the statement."""
+    converted, _ = convert("select 'doc ccd..readme' as note, ccd..fn(x) as v from ccd..t")
+    assert "'doc ccd..readme'" in converted
+    assert f'"{TARGET_SCHEMA}".fn' in converted
+
+
+@pytest.mark.parametrize('convert', VIEW_PATHS)
+def test_another_database_is_still_left_exactly_as_written(convert):
+    """
+    Writing the omitted owner into 'otherdb..archive' would make it 'otherdb.dbo.archive', and
+    the schema mapping would then turn the owner into the schema of the target - a reference this
+    migration does not read, changed, still unusable, and no longer the text the source wrote.
+    """
+    converted, config = convert('select * from otherdb..archive join ccd..local on 1 = 1')
+    assert 'otherdb..' in converted
+    assert f'"{TARGET_SCHEMA}"."local"' in converted
+    assert any('otherdb.archive' in warning for warning in config.warnings())
+
+
+## ------------------------------------------------- the resolver, on the two node kinds
+
+
+def resolve_with_target(statement):
+    """
+    The pipeline as the connectors run it: write the omitted owner back, parse, resolve, and
+    render for the target - which is where a quoted name is written with double quotes rather
+    than with the brackets of Transact-SQL.
+    """
+    prepared = object_references.write_omitted_owner(
+        statement, SOURCE_SCHEMA, None, MIGRATED_DATABASE)
+    expression = sqlglot.parse_one(prepared, read='tsql')
+    unresolved = object_references.resolve_tsql_table_references(
+        expression, MIGRATED_DATABASE, SOURCE_SCHEMA, TARGET_SCHEMA)
+    return expression.sql(dialect='postgres'), unresolved
+
+
+@pytest.mark.parametrize('statement,expected', [
+    ('select ccd.dbo.fn_calc(a) from t', f'"{TARGET_SCHEMA}".fn_calc'),
+    ('select ccd.reporting.fn_calc(a) from t', f'"{TARGET_SCHEMA}".fn_calc'),
+])
+def test_a_qualified_call_is_pointed_at_the_schema_of_the_target(statement, expected):
+    """
+    A table is rewritten to its owner and the connector maps the schema afterwards. Nothing
+    downstream maps the qualifier of a FUNCTION, so leaving the owner of the source in front of
+    one would only exchange a name the target cannot read for a schema it does not have.
+    """
+    converted, unresolved = resolve_with_target(statement)
+    assert expected in converted
+    assert unresolved == []
+
+
+def test_a_call_qualified_by_another_database_is_reported_and_left():
+    converted, unresolved = resolve_with_target('select otherdb.dbo.fn_calc(a) from t')
+    assert 'otherdb.dbo.fn_calc' in converted
+    assert [item['reference'] for item in unresolved] == ['otherdb.dbo.fn_calc']
+
+
+def test_a_locally_qualified_call_is_not_this_pass_business():
+    """'dbo.fn(x)' has one qualifier - a schema, not a database - and is left to the rest."""
+    converted, unresolved = resolve_with_target('select dbo.fn_calc(a) from t')
+    assert 'dbo.fn_calc' in converted
+    assert unresolved == []
+
+
+def test_the_walk_collects_before_it_rewrites():
+    """
+    Rewriting a node while the walk which produced it is still running is the other way a pass
+    stops after its first hit. Asserted on a statement with several of both kinds.
+    """
+    converted, _ = resolve_with_target(
+        'select ccd..f1(a), ccd..f2(b) from ccd..t1 join ccd..t2 on 1 = 1 join ccd..t3 on 1 = 1')
+    assert '..' not in converted
+    assert converted.count(f'"{TARGET_SCHEMA}".') == 2, 'both calls'
+    assert converted.count('dbo.') == 3, 'all three tables'
+
+
+## ---------------------------------------------------------- the pre-parse normalisation
+
+
+@pytest.mark.parametrize('written,expected', [
+    ('select * from ccd..t',            'select * from ccd.dbo.t'),
+    ('select ccd..fn(x) from ccd..t',   'select ccd.dbo.fn(x) from ccd.dbo.t'),
+    ('select * from "ccd".."My Table"', 'select * from "ccd".dbo."My Table"'),
+    ('select * from [ccd]..[t]',        'select * from [ccd].dbo.[t]'),
+    ('select 1.5 from t',               'select 1.5 from t'),
+    ('select * from dbo.t',             'select * from dbo.t'),
+])
+def test_the_omitted_owner_is_written_back(written, expected):
+    assert object_references.write_omitted_owner(written, 'dbo', None, MIGRATED_DATABASE) == expected
+
+
+def test_only_the_migrated_database_gets_its_owner_written_back():
+    written = 'select * from otherdb..archive join ccd..local on 1 = 1'
+    assert object_references.write_omitted_owner(written, 'dbo', None, MIGRATED_DATABASE) == (
+        'select * from otherdb..archive join ccd.dbo.local on 1 = 1')
+
+
+def test_without_a_database_to_match_nothing_is_written_back():
+    written = 'select * from ccd..t'
+    assert object_references.write_omitted_owner(written, '', None, MIGRATED_DATABASE) == written

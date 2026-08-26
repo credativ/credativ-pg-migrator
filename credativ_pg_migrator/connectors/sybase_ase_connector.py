@@ -5042,7 +5042,8 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_function_name}"();
             ## the schema that replaced it. A reference to ANOTHER database is left as it
             ## stands and reported - see object_references.py.
             unresolved_references = query_object_references.resolve_tsql_table_references(
-                parsed_code, self.config_parser.get_source_db_name(), settings['source_schema_name'])
+                parsed_code, self.config_parser.get_source_db_name(), settings['source_schema_name'],
+                settings.get('target_schema_name'))
             if unresolved_references:
                 self.config_parser.print_log_message('WARNING',
                     query_object_references.unresolved_reference_message(
@@ -5145,6 +5146,13 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_function_name}"();
         prepared = query_outer_joins.mark_tsql_outer_joins(
             query_code, self.sql_without_literals_and_comments)
         prepared = re.sub(r'\bnoholdlock\b', '', prepared, flags=re.IGNORECASE)
+        ## 'ccd..t' with the owner left out. In a FROM clause a parser reads it; in an
+        ## expression - 'ccd..fn_x(a)' - it reads nothing at all, so a whole view could not be
+        ## parsed and reached the target with every qualifier of every reference untouched.
+        ## Writing the owner back makes them all the ordinary three part name.
+        prepared = query_object_references.write_omitted_owner(
+            prepared, self.config_parser.get_source_schema(),
+            self.sql_without_literals_and_comments, self.config_parser.get_source_db_name())
         ## before the rewrite of the double quotes below, so that a '$' inside a double quoted
         ## string is still protected as a literal by the mask
         prepared = query_money_literals.convert_money_literals(

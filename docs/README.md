@@ -15,4 +15,6 @@ Workflows
 
 [Standard Workflow](workflow/standard.md)
 
+[Mapping Workflow](workflow/mapping.md)
+
 [Anonymization Workflow](workflow/anonymization.md)

@@ -90,9 +90,6 @@ migration:
   on_undecodable_bytes: substitute
   parallel_workers: 8         # >>> ADJUST
   batch_size: 25000
-  # ODBC round trips are comparatively expensive; chunking keeps the workers
-  # busy on wide tables.
-  chunk_size: 100000
   names_case_handling: lower  # >>> ADJUST - "keep" preserves MixedCase names
   varchar_to_text_length: 4000
   char_to_text_length: 255

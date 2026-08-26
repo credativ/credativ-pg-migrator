@@ -105,7 +105,6 @@ migration:
   on_error: continue
   parallel_workers: 8         # >>> ADJUST
   batch_size: 100000
-  chunk_size: 250000
   validate_objects: retry
 
   # ------------------------------------------------------------------------
@@ -219,7 +218,6 @@ exclude_funcprocs: []
 table_settings:
   # - table_name: "huge_history"
   #   batch_size: 5000            # smaller batches for very wide rows
-  #   chunk_size: 50000
   # - table_name: "staging_.*"
   #   migrate_data: false         # create the table, do not copy the rows
   # - table_name: "reference_.*"

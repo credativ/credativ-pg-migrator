@@ -138,7 +138,6 @@ exclude_funcprocs: []
 table_settings:
   # - table_name: "big_history"
   #   batch_size: 5000
-  #   chunk_size: 50000
   # - table_name: "staging_.*"
   #   migrate_data: false
 

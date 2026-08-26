@@ -268,7 +268,7 @@ reported as a warning — PostgreSQL then refuses it, which is the honest outcom
 - **User-defined types** conversion is best-effort: attributes that reference other object types are emitted unqualified (may not resolve on the target), and type inheritance (`UNDER`/supertypes) and VARRAY upper bounds are not modeled.
 - **Domains** exist only in Oracle 23ai; on older releases (11g/12c/19c/21c) there are no domain objects to migrate, and the 23ai path is best-effort and has not been validated against a live 23ai instance.
 - **Data-type coverage**: `SDO_GEOMETRY` (spatial) is not mapped and falls back to `TEXT` (it requires PostGIS on the target); `BFILE` (external file locator) is not migrated. `INTERVAL YEAR TO MONTH` is mapped to PostgreSQL `INTERVAL` but its value semantics differ, so such columns are worth verifying. Any type can still be overridden with custom data-type replacement rules.
-- **Large-table extraction**: data is fetched in chunks using `OFFSET … FETCH NEXT`, which becomes less efficient at very large offsets. Keyset/ROWID-range pagination is a planned optimization.
+- **Large-table extraction**: a table is read with one `SELECT` unless `chunk_size` is set. Where it is, the chunks are paged with `OFFSET … FETCH NEXT`, which becomes rapidly less efficient at large offsets - see section 8.2 for what chunking is for and what it costs. Keyset/ROWID-range pagination is a planned optimization.
 - **Views / materialized views**: the defining query is parsed with `sqlglot` and generated as PostgreSQL, including rewriting Oracle **`(+)` outer joins** into ANSI `LEFT`/`RIGHT JOIN`s. Oracle writes the marker on the column, condition by condition, so it says which conditions belong to the join: `AND o.status(+) = 'X'` carries one and is moved into the `ON` clause, `AND o.status = 'X'` does not and stays in the `WHERE` clause — where Oracle applies it too, turning the outer join into an inner one on both sides. Nothing is inferred for Oracle, because Oracle already said it. The marker is read from the parsed statement, so it is found inside a call as well (`UPPER(o.cid(+))`), which used to be reported as an outer join that could not be rewritten. A `(+)` under an `OR` is **not** rewritten and is reported — Oracle refuses that itself with ORA-01719, and moving it into the `ON` clause would leave an inner join, which answers fewer rows and looks healthy while doing it. `TRUNC(d, 'MM')` is written with the field PostgreSQL knows (`date_trunc('month', d)`) rather than with the format model of Oracle, and `ADD_MONTHS` becomes the addition of an interval. The same conversion is what `--convert-queries` gives the statements of an application; it lives in `connectors/oracle_query_conversion.py`, which imports no Oracle driver. A few constructs still cannot be auto-converted reliably and are logged as `WARNING`s for manual review: **`CONNECT BY` / `START WITH`** hierarchical queries (need a recursive CTE), **`ROWNUM`** (use `LIMIT`), and complex **`LISTAGG`** forms. An unusual `(+)` predicate that could not be mapped to a join is also warned about individually. There is no separate toggle for materialized vs. regular views (both follow `migrate_views`), and view dependency ordering is not topologically resolved.
 
 ### 4.4 PostgreSQL
@@ -901,7 +901,7 @@ The migration database is one of the key strengths of credativ‑pg‑migrator: 
 
 This allows you to:
 - Audit exactly what was migrated and how.
-- Compare source vs generated PL/pgSQL for functions/procedures and triggers wherever conversion is supported (see section 8.2 for which engines those are) — this is the practical way to review the best-effort conversions before trusting them.
+- Compare source vs generated PL/pgSQL for functions/procedures and triggers wherever conversion is supported (see section 8.3 for which engines those are) — this is the practical way to review the best-effort conversions before trusting them.
 - Rerun or manually fix individual objects without redoing the entire migration.
 
 ### 7.1 How object names are spelled — `names_case_handling`
@@ -984,7 +984,75 @@ Treat the migration database as read‑only metadata. You can query it freely fo
 - Not every source feature has a PostgreSQL counterpart. Where a construct cannot be reproduced exactly, the connector degrades it deliberately, logs a `WARNING`, and records what was changed in the migration database — for example SQLite partial indexes (section 4.7.7) or Oracle package state (section 4.3).
 - The per-connector, per-feature status is maintained in `FEATURE_MATRIX.md`.
 
-### 8.2 PL/SQL / procedural code
+### 8.2 Chunked reading of large tables — `chunk_size`
+
+**The default is `-1`, which means no chunking, and that is the right value for almost every
+migration.** Nothing needs to be configured to get it.
+
+#### What it does
+
+Normally the migrator reads one table with **one** `SELECT` and pulls the rows off that cursor
+in blocks of `batch_size`. `chunk_size` replaces that one statement with **several** statements,
+each fetching that many rows through the paging clause of the source dialect
+(`OFFSET … FETCH NEXT`, `LIMIT … OFFSET`, `SKIP … LIMIT`, `TOP … START AT`). `batch_size` is
+unaffected and still governs how many rows travel per round trip and per `INSERT`.
+
+#### What it is for
+
+One case, and it is not speed: **a source whose driver or server builds the whole result set
+before the first row arrives.** Some ODBC/JDBC drivers use a client-side cursor and materialise
+every row in the client process; some servers spool a large sorted result into temporary space.
+A single `SELECT` over a table of hundreds of millions of rows can then exhaust the memory of
+the migrator process or the temporary space of the source server, and the statement fails or the
+server starts to suffer. Splitting it into chunks bounds what any one statement has to hold.
+
+If you are not hitting that, leave `chunk_size` at `-1`.
+
+#### What it costs
+
+- **It is normally slower, and the more chunks the worse.** `OFFSET n` makes the source produce
+  and discard the first *n* rows: chunk 1 skips nothing, chunk 2 skips one chunk, chunk 50 skips
+  forty-nine. The total work grows with the square of the chunk count, and the sort is repeated
+  for every chunk.
+- **The paging needs an order which is unique.** The migrator orders by the primary key of the
+  table when the `indexes` protocol table has one, and otherwise by **every non-LOB column** (or,
+  if the table has none, by its first column). Where neither is unique — a table with duplicate
+  rows and no key — the source is free to return equal rows in a different order for each chunk,
+  and rows can then be **read twice or missed altogether**. The row counts of `--validate` are
+  what catches it.
+- Ordering by every column of a keyless table is expensive in its own right, chunked or not.
+
+#### What each source really does
+
+| source | how a chunk is fetched | chunking effective? |
+|---|---|---|
+| Oracle | `ORDER BY … OFFSET n ROWS FETCH NEXT m ROWS ONLY` | yes |
+| PostgreSQL | `ORDER BY … LIMIT m OFFSET n` | yes |
+| MS SQL Server | `ORDER BY … OFFSET n ROWS FETCH NEXT m ROWS ONLY` | yes (SQL Server 2012 and newer) |
+| MySQL, MariaDB | `ORDER BY … LIMIT m OFFSET n` | yes |
+| SQLite | `ORDER BY … LIMIT m OFFSET n` | yes |
+| Informix | `SELECT SKIP n … ORDER BY … LIMIT m` | yes |
+| IBM DB2 LUW | `ORDER BY … LIMIT m OFFSET n` | only where the server accepts `LIMIT`/`OFFSET`, which Db2 does through the MySQL compatibility vector — otherwise the statement is refused |
+| SQL Anywhere | `SELECT TOP m START AT k …` — **the `ORDER BY` is built and never added to the statement** | the rows are paged out of an **unordered** result: chunks can overlap and skip. Do not use chunking here |
+| Sybase ASE | no paging clause at all — older ASE has no `LIMIT`/`OFFSET`, so the connector reads the whole table in one pass and marks the table finished | **ignored**: setting it changes nothing |
+| IBM DB2 for i, IBM DB2 for z/OS | the data does not come over a connection at all; it is loaded from the export files of `data_export` | **ignored**: setting it changes nothing |
+
+The two DB2 file-based connectors and Sybase ASE simply do not read the setting — a value in the
+configuration there is harmless but does nothing. SQL Anywhere is the one where a value can
+change the *result*, not only the speed.
+
+#### If you do need it
+
+- Set it larger than `batch_size`. A smaller value is refused with a `WARNING` and chunking is
+  switched off.
+- Prefer tables which have a primary key. `migrate_indexes` has to be on for the migrator to know
+  about it — the key is read from the `indexes` protocol table.
+- Set it per table rather than globally, with `table_settings[].chunk_size`, so that only the one
+  table which needs it pays for it.
+- Run `--validate` afterwards. The row-count check is what shows a chunk boundary that lost or
+  duplicated rows.
+
+### 8.3 PL/SQL / procedural code
 
 Conversion of functions, procedures and triggers is the feature that varies most between connectors:
 
@@ -994,7 +1062,7 @@ Conversion of functions, procedures and triggers is the feature that varies most
 - **Not implemented**: MySQL, MariaDB and SQL Anywhere — these connectors contain placeholders only, so neither routines nor triggers are migrated.
 - Support for other engines can be added based on real‑world migration projects.
 
-### 8.3 Customization
+### 8.4 Customization
 
 The tool provides several customization layers:
 
@@ -1009,7 +1077,7 @@ The tool provides several customization layers:
   - Per-table WHERE conditions that restrict migrated data (e.g., only “recent” rows).
   - If filters omit rows referenced by foreign keys, FK constraints may fail on the target. Dependency analysis of source model is strongly recommended.
 
-### 8.4 Schema Mapping Workflow
+### 8.5 Schema Mapping Workflow
 
 The tool integrates a comprehensive Mapping Workflow managed by the central orchestrator, built to facilitate advanced data migrations with differing geometries. Features include:
 - Execution of multi-metric schema matching functions and customizable data normalization rules.
@@ -1020,12 +1088,12 @@ For the full description - how the matching decides, how the configuration is wr
 migrator tables are used and which options the workflow ignores - see the
 [Schema Mapping Workflow](workflow/mapping.md) documentation.
 
-### 8.5 Data Anonymization Workflow
+### 8.6 Data Anonymization Workflow
 
 The tool includes a pluggable anonymization engine designed to obscure sensitive data during migration without modifying core ETL pipelines. It natively supports Python in-memory transformations and can offload logic directly to the PostgreSQL engine.
 For full details on the available transformation methods, see the [Data Anonymization Workflow](workflow/anonymization.md) documentation.
 
-### 8.6 Roadmap
+### 8.7 Roadmap
 
 Planned features:
 - Partitioning support for target tables.

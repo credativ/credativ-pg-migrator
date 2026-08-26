@@ -82,7 +82,6 @@ migration:
   on_error: continue
   parallel_workers: 8         # >>> ADJUST
   batch_size: 25000
-  # chunk_size: 25000
   names_case_handling: lower  # >>> ADJUST - Db2 names are upper case
   varchar_to_text_length: 4000
   char_to_text_length: 255

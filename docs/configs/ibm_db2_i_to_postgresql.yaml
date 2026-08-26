@@ -93,7 +93,6 @@ migration:
   on_error: continue
   parallel_workers: 8         # >>> ADJUST
   batch_size: 2500
-  chunk_size: 25000
   # IBM i names are upper case. "lower" gives idiomatic PostgreSQL names.
   names_case_handling: lower  # >>> ADJUST
   varchar_to_text_length: 4000

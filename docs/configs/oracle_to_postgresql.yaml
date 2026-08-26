@@ -78,7 +78,6 @@ migration:
   on_error: continue
   parallel_workers: 8         # >>> ADJUST
   batch_size: 25000
-  # chunk_size: 25000
 
   # Oracle names are upper case; "lower" gives you idiomatic PostgreSQL names
   # that need no quoting. Use "keep" only if the application sends quoted

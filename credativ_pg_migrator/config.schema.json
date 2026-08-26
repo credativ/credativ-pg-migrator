@@ -1432,7 +1432,7 @@
         },
         "target_copy": {
           "type": "object",
-          "description": "Connection to an untouched copy of the target database from before the migration. Required when workflow is 'mapping' and data conflicts exist; ignored for the standard workflow.",
+          "description": "Connection to an untouched copy of the target database from before the migration. The validator of the 'mapping' workflow compares against it: it is the only way to tell a row the migration wrote from a row which was already in the target, which is what makes the 'skip' and the two 'merge_*' conflict actions checkable at all. Required when workflow is 'mapping' and data conflicts exist; ignored for the standard workflow.",
           "additionalProperties": false,
           "properties": {
             "type": {
@@ -1482,6 +1482,21 @@
               ],
               "default": "prefer",
               "description": "sslmode of the PostgreSQL connection URI."
+            },
+            "owner": {
+              "type": "string",
+              "description": "Older name for 'schema'. Read only when 'schema' is absent - the validator asks for one and then for the other, exactly as it does for the target."
+            },
+            "settings": {
+              "type": "object",
+              "description": "PostgreSQL session settings applied to the connection to the copy, as name: value - the same block the target takes. A copy which needs a role or a search_path of its own to be read is configured here; the settings of the target are NOT reused, because it is a different database.",
+              "additionalProperties": {
+                "type": [
+                  "string",
+                  "number",
+                  "boolean"
+                ]
+              }
             }
           }
         }

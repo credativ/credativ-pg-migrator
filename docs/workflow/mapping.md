@@ -500,6 +500,11 @@ only connected for the mapping workflow ([`validator.py:313`](../../credativ_pg_
 and it is what makes `skip` and the two `merge_*` actions verifiable at all — see
 [section 11](#11-validating-a-mapping-run).
 
+It takes the same keys as the `target` block, `owner` and `settings` included: it is an ordinary
+PostgreSQL connection, and a copy which needs a role or a `search_path` of its own to be read is
+configured here. The settings of the target are **not** reused for it — it is a different
+database, and a role which exists in one need not exist in the other.
+
 ---
 
 ## 6. How the matching decides

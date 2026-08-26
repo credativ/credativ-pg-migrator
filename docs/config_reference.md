@@ -297,11 +297,11 @@ Post-migration data-integrity check, run by the --validate switch instead of a m
 | `check_lob_sizes` | boolean |  | `false` | Compare the byte size of migrated BLOB and CLOB values on the sampled rows. |
 | `random_sample_size` | integer | >= 1 | `1000` | Upper bound on the number of rows sampled, used by check_random_sample and check_lob_sizes. |
 | `report_filename` | string |  |  | File for the detailed tabular report. The console shows only the summary. |
-| [`target_copy`](#validationtarget_copy) | block |  |  | Connection to an untouched copy of the target database from before the migration. Required when workflow is 'mapping' and data conflicts exist; ignored for the standard workflow. |
+| [`target_copy`](#validationtarget_copy) | block |  |  | Connection to an untouched copy of the target database from before the migration. The validator of the 'mapping' workflow compares against it: it is the only way to tell a row the migration wrote from a row which was already in the target, which is what makes the 'skip' and the two 'merge_*' conflict actions checkable at all. Required when workflow is 'mapping' and data conflicts exist; ignored for the standard workflow. |
 
 ### `validation.target_copy`
 
-Connection to an untouched copy of the target database from before the migration. Required when workflow is 'mapping' and data conflicts exist; ignored for the standard workflow.
+Connection to an untouched copy of the target database from before the migration. The validator of the 'mapping' workflow compares against it: it is the only way to tell a row the migration wrote from a row which was already in the target, which is what makes the 'skip' and the two 'merge_*' conflict actions checkable at all. Required when workflow is 'mapping' and data conflicts exist; ignored for the standard workflow.
 
 | Key | Type | Allowed values | Default | Notes |
 |---|---|---|---|---|
@@ -313,6 +313,8 @@ Connection to an untouched copy of the target database from before the migration
 | `database` | string |  |  | Database holding the untouched copy. |
 | `schema` | string |  |  | Schema holding the untouched copy. |
 | `sslmode` | string | `disable`, `allow`, `prefer`, `require`, `verify-ca`, `verify-full` | `prefer` | sslmode of the PostgreSQL connection URI. |
+| `owner` | string |  |  | Older name for 'schema'. Read only when 'schema' is absent - the validator asks for one and then for the other, exactly as it does for the target. |
+| `settings` | map |  |  | PostgreSQL session settings applied to the connection to the copy, as name: value - the same block the target takes. A copy which needs a role or a search_path of its own to be read is configured here; the settings of the target are NOT reused, because it is a different database. |
 
 ---
 

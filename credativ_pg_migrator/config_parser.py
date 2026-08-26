@@ -424,11 +424,20 @@ class ConfigParser:
 
     ## Databases
 
+    ## The connections a run opens. 'target_copy' is the untouched copy of the target the
+    ## validator of the mapping workflow compares against; it is configured under
+    ## validation.target_copy rather than at the top level, which is why it is easy to forget
+    ## in an accessor - and forgetting it in one while the other knows it is what made every
+    ## mapping validation report every table as failed.
+    DATABASE_SIDES = ('source', 'target', 'target_copy')
+
     def get_db_config(self, source_or_target):
         if source_or_target == 'target_copy':
             return self.get_validation_target_copy_config()
-        if source_or_target not in ['source', 'target']:
-            raise ValueError(f"Invalid source_or_target: {source_or_target}")
+        if source_or_target not in self.DATABASE_SIDES:
+            raise ValueError(
+                f"Invalid source_or_target: {source_or_target}. "
+                f"The connections of a run are {', '.join(self.DATABASE_SIDES)}.")
         return self.config[source_or_target]
 
     def get_db_type(self, source_or_target):
@@ -1822,15 +1831,24 @@ class ConfigParser:
 
     def get_db_session_settings(self, source_or_target):
         """
-        The session settings written for one side of the migration, as name: value.
+        The session settings written for one connection of the run, as name: value.
 
         They belong to the connection they were written for: the role and the search_path of
         the target must never be set on the connection to the source, and a PostgreSQL source
         can carry settings of its own.
+
+        'target_copy' is the third connection - the untouched copy of the target which the
+        validator of the mapping workflow compares against, configured under
+        validation.target_copy. It was refused here while get_db_config() next to it already
+        answered for it, so the validator could not build that connection at all: every table
+        of every mapping validation was reported as failed with 'Invalid source_or_target:
+        target_copy', which is a failure of the validation and not a measurement of the table.
         """
-        if source_or_target not in ('source', 'target'):
-            raise ValueError(f"Invalid source_or_target: {source_or_target}")
-        return (self.config.get(source_or_target) or {}).get('settings') or {}
+        if source_or_target not in self.DATABASE_SIDES:
+            raise ValueError(
+                f"Invalid source_or_target: {source_or_target}. "
+                f"The connections of a run are {', '.join(self.DATABASE_SIDES)}.")
+        return (self.get_db_config(source_or_target) or {}).get('settings') or {}
 
     def get_target_db_session_settings(self):
         return self.get_db_session_settings('target')

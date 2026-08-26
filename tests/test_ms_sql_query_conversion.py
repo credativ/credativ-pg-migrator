@@ -47,6 +47,11 @@ class RecordingLog:
     def get_connectivity(self, direction):
         return {'db_type': 'postgresql'}
 
+    def get_source_db_name(self):
+        ## the database the statements are read from - a 'db..table' naming it is a
+        ## reference to the migrated database itself, not to a remote one
+        return 'migdb'
+
     def get_remote_objects_substitution(self):
         return {}
 

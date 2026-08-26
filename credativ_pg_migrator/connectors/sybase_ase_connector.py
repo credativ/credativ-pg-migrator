@@ -29,6 +29,7 @@ import sqlglot
 from credativ_pg_migrator.connectors.tsql_parser import TsqlParser
 from credativ_pg_migrator.query_conversion import outer_joins as query_outer_joins
 from credativ_pg_migrator.query_conversion import money_literals as query_money_literals
+from credativ_pg_migrator.query_conversion import object_references as query_object_references
 from credativ_pg_migrator.query_conversion.outer_joins import outer_join_warnings
 from sqlglot import exp, TokenType
 from sqlglot.dialects import TSQL
@@ -5035,6 +5036,23 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_function_name}"();
             parsed_code = parsed_code.transform(replace_cast_types)
 
             self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: convert_statement_code: Double quoted columns: {parsed_code.sql(dialect='postgres')}")
+
+            ## The database in front of a table name - 'ccd..t', 'ccd.dbo.t'. Where it names the
+            ## database being migrated it says nothing the migration does not know, and it is
+            ## dropped so that the schema mapping below gives the table the schema of the
+            ## target like any other. Left in, it reached the target as 'ccd.."t"', which is a
+            ## syntax error, or as 'ccd."ccd"."t"', which is the database written in front of
+            ## the schema that replaced it. A reference to ANOTHER database is left as it
+            ## stands and reported - see object_references.py.
+            unresolved_references = query_object_references.resolve_tsql_table_references(
+                parsed_code, self.config_parser.get_source_db_name(), settings['source_schema_name'])
+            if unresolved_references:
+                self.config_parser.print_log_message('WARNING',
+                    query_object_references.unresolved_reference_message(
+                        'sybase_ase_connector: convert_statement_code',
+                        settings.get('view_name') or settings.get('statement_id') or 'the statement',
+                        unresolved_references))
+            self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: convert_statement_code: Resolved database qualifiers: {parsed_code.sql(dialect='postgres')}")
 
             # replace source schema with target schema
             parsed_code = parsed_code.transform(replace_schema_names)

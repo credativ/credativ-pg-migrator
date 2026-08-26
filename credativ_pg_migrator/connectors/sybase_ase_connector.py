@@ -763,14 +763,38 @@ class SybaseASEConnector(DatabaseConnector):
                 # 'invalid input syntax for type timestamp: "b'\x00\x00...<\x8e'"'.
                 'TIMESTAMP': 'BYTEA',
                 'BIGINT': 'BIGINT',
-                'UNSIGNED BIGINT': 'BIGINT',
                 'INTEGER': 'INTEGER',
                 'INT': 'INTEGER',
                 'INT8': 'BIGINT',
-                'UNSIGNED INT': 'INTEGER',
-                'UINT': 'INTEGER',
-                'TINYINT': 'SMALLINT',
                 'SMALLINT': 'SMALLINT',
+
+                # The unsigned integers of ASE hold twice what the signed type of the same
+                # width holds, so each of them is migrated to the NEXT type up - PostgreSQL
+                # has no unsigned integer at all. 'uint' used to be mapped to INTEGER, which
+                # holds barely half of its range: everything above 2147483647 was refused by
+                # the target, and a refused row is dropped by the row-by-row retry of the
+                # batch, so the table simply ended up short.
+                #
+                # 'usmallint' and 'ubigint' were not mapped at all, and an unmapped type
+                # falls through to TEXT without a word - an unsigned smallint column reached
+                # the target as text.
+                #
+                # The catalog spells them 'usmallint' / 'uint' / 'ubigint' (systypes.name);
+                # the SQL spellings are kept next to them so that a routine or a view which
+                # writes 'unsigned int' is converted as well.
+                #
+                # What this does NOT carry over is the lower bound: the target accepts a
+                # negative value which the source would have refused. Preserving it needs a
+                # domain or a CHECK per column - see
+                # development/SYBASE_NUMERIC_TYPE_MAPPING.md.
+                'TINYINT': 'SMALLINT',                  # 0 .. 255
+                'USMALLINT': 'INTEGER',                 # 0 .. 65535
+                'UNSIGNED SMALLINT': 'INTEGER',
+                'UINT': 'BIGINT',                       # 0 .. 4294967295
+                'UNSIGNED INT': 'BIGINT',
+                # 2**64-1 has twenty digits and no integer type of PostgreSQL holds it
+                'UBIGINT': 'NUMERIC(20,0)',             # 0 .. 18446744073709551615
+                'UNSIGNED BIGINT': 'NUMERIC(20,0)',
 
                 'BLOB': 'BYTEA',
 

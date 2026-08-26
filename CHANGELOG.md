@@ -2,7 +2,11 @@
 
 ## 0.17.0 - 2026.08.25
 
-- 2026.08.25
+- 2026.08.26
+
+  - Fix - Sybase ASE: **the unsigned integers keep their range.** PostgreSQL has no unsigned integer, so each of them is migrated to the next type up: `usmallint` to `INTEGER`, `uint` to `BIGINT`, `ubigint` to `NUMERIC(20,0)` - twenty digits, which no integer type of PostgreSQL holds. `uint` was mapped to `INTEGER`, which holds barely half of its range, and every row above 2147483647 was refused by the target and dropped by the row-by-row retry of the batch, so the table simply ended up short. `usmallint` and `ubigint` - the names `systypes` really returns - were not mapped at all, and an unmapped type falls through to `TEXT` without a word: an unsigned smallint column reached the target as text. Both spellings are mapped now, the one of the catalog and the `unsigned int` of a routine or a view. The lower bound is not carried over - the target accepts a negative value the source refuses; see `development/SYBASE_NUMERIC_TYPE_MAPPING.md` for the options which were weighed.
+
+  - Fix - Sybase ASE: **`MONEY` and `SMALLMONEY` keep their four decimal places** - they were mapped to `INTEGER`, which silently dropped the decimals of every amount. They are `NUMERIC(19,4)` and `NUMERIC(10,4)`. (Repaired on 2026-08-10 and never written down; the release notes said nothing, so a user on 0.15.0 had no way to tell it was known.)
 
   - New - **The closing summary has two blocks which name rather than count.** The rest of it counts - `Indexes 77 | 75 | 2` says two indexes are missing and nothing at all about which two, and the answer is in the protocol tables, one query away, which is not where somebody reads a migration report from. **`[ DETAILED MIGRATION REPORT ]`** names every table with its row counts and how long it took, every object which did not arrive with what the target said about it, and every object which was never attempted - which is not the same thing and is not reported as if it were. **`[ PARTITIONING ]`** says what each table was partitioned by on the source, what it is partitioned by on the target and how many partitions each side has; a table which the source partitions and the target does not is named as flattened, because the summary is where a reader looks for what a run changed.
 

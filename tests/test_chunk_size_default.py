@@ -126,12 +126,33 @@ def test_no_example_recommends_it_in_a_comment_either(path):
 ## ------------------------------------------------------------- the documentation
 
 
-def test_the_user_guide_explains_what_chunking_is_for():
+def chunking_section():
     guide = open(os.path.join(REPO, 'docs', 'user_guide.md'), encoding='utf-8').read()
     assert '### 8.2 Chunked reading of large tables' in guide
-    for source in ('Sybase ASE', 'SQL Anywhere', 'IBM DB2 for i'):
-        assert source in guide.split('### 8.2')[1].split('### 8.3')[0], (
-            f"the per-source table does not say what {source} does with chunk_size")
+    return guide.split('### 8.2')[1].split('### 8.3')[0]
+
+
+@pytest.mark.parametrize('source', [
+    'Oracle', 'PostgreSQL', 'MS SQL Server', 'MySQL', 'MariaDB', 'SQLite', 'Informix',
+    'SQL Anywhere', 'Sybase ASE', 'IBM DB2 LUW', 'IBM DB2 for i', 'IBM DB2 for z/OS',
+])
+def test_the_guide_says_what_every_source_does_with_chunk_size(source):
+    """All twelve, so that a reader can look their own up rather than infer it."""
+    assert source in chunking_section(), (
+        f"the guide does not say what {source} does with chunk_size")
+
+
+def test_the_guide_separates_where_it_works_from_where_it_does_nothing():
+    section = chunking_section()
+    assert 'Where it can be used, and where it must not be' in section
+    assert 'The setting does nothing' in section
+    assert 'It depends on the server' in section
+
+
+def test_the_guide_still_warns_about_the_two_costs():
+    section = chunking_section()
+    assert 'slower' in section.lower()
+    assert 'read twice or missed' in section
 
 
 def test_the_schema_description_warns_rather_than_recommends():

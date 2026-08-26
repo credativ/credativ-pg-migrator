@@ -150,7 +150,7 @@ for every source.
 | `use_aliases_as_target_names` | ibm_db2_i (the key decision there), ibm_db2_zos |
 | `validate_objects` | all |
 | `batch_size`, `parallel_workers` | all; per-table in informix, advanced_options |
-| `chunk_size` | **in no example on purpose** - the default `-1` (no chunking) is right for almost every migration, several sources ignore the setting and one pages an unordered result. Section 8.2 of [../user_guide.md](../user_guide.md) says what it is for |
+| `chunk_size` | **in no example on purpose** - the default `-1` (no chunking) is right for almost every migration, it is normally slower where it works, and Sybase ASE, DB2 for i and DB2 for z/OS ignore it entirely. Section 8.2 of [../user_guide.md](../user_guide.md) says which sources implement it and when it is worth setting |
 | `table_settings` | informix, ibm_db2_zos, ibm_db2_i, advanced_options, mapping |
 | `data_types_substitution` | sybase_ase, mssql, oracle, sqlite |
 | `default_values_substitution` | mysql, mariadb, mssql, sybase_ase |

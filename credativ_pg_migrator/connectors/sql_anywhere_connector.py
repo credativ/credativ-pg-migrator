@@ -378,7 +378,6 @@ class SQLAnywhereConnector(SqlAnywhereQueryConversion, DatabaseConnector):
                         self.config_parser.print_log_message('DEBUG2',
                                                             f"Worker {worker_id}: Table {source_schema_name}.{source_table_name}: Processing column {col['column_name']} ({order_num}) with data type {col['data_type']}")
                         insert_columns_list.append(f'''"{self.config_parser.convert_names_case(col['column_name'])}"''')
-                        orderby_columns_list.append(f'''"{col['column_name']}"''')
 
                         # if col['data_type'].lower() == 'datetime':
                         #     select_columns_list.append(f"TO_CHAR({col['column_name']}, '%Y-%m-%d %H:%M:%S') as {col['column_name']}")
@@ -387,6 +386,21 @@ class SQLAnywhereConnector(SqlAnywhereQueryConversion, DatabaseConnector):
                         #     select_columns_list.append(f"cast(`{col['column_name']}` as char(4000)) as `{col['column_name']}`")
                         # else:
                         select_columns_list.append(f'''"{col['column_name']}"''')
+
+                        ## A long column cannot be sorted on - SQL Anywhere refuses the sort -
+                        ## and this list is the order the chunks are paged by when the table has
+                        ## no primary key. Only the ORDER BY leaves the column out: it is
+                        ## selected, inserted and migrated like every other one, which is what
+                        ## Oracle and Sybase ASE do with theirs.
+                        if col['data_type'].lower() in ('long varchar', 'long nvarchar',
+                                                        'long binary', 'text', 'ntext',
+                                                        'image', 'xml', 'st_geometry'):
+                            self.config_parser.print_log_message('DEBUG2',
+                                f"sql_anywhere_connector: migrate_table: Worker {worker_id}: Table "
+                                f"{source_schema_name}.{source_table_name}: column {col['column_name']} "
+                                f"({col['data_type']}) cannot be sorted on and is left out of the ORDER BY.")
+                            continue
+                        orderby_columns_list.append(f'''"{col['column_name']}"''')
 
                     select_columns = ', '.join(select_columns_list)
                     orderby_columns = ', '.join(orderby_columns_list)
@@ -413,7 +427,32 @@ class SQLAnywhereConnector(SqlAnywhereQueryConversion, DatabaseConnector):
                     self.config_parser.print_log_message('DEBUG2', f"sql_anywhere_connector: migrate_table: Worker {worker_id}: Primary key columns for {source_schema_name}.{source_table_name}: {primary_key_columns}")
                     if primary_key_columns:
                         orderby_columns = primary_key_columns
-                    order_by_clause = f""" ORDER BY {orderby_columns}"""
+
+                    ## 'TOP n START AT m' takes a window out of the result, and which rows are in
+                    ## that window is only defined when the result is ordered. The clause was
+                    ## built here and never added to the statement, so every chunk paged an
+                    ## UNORDERED result: the server was free to answer the rows in a different
+                    ## order for each chunk, and rows were then read twice or missed altogether.
+                    ## It was not visible in the log either - the statement was written there
+                    ## before the clause was built.
+                    ##
+                    ## The order is added only where the statement really pages: a table read in
+                    ## one pass from the first row needs no order, and sorting it would cost the
+                    ## whole table for nothing. That is the ordinary case, because chunking is
+                    ## off by default.
+                    is_paging = chunk_start_row_number > 1 or total_chunks > 1
+                    if is_paging and orderby_columns:
+                        order_by_clause = f""" ORDER BY {orderby_columns}"""
+                        query += order_by_clause
+                    elif is_paging:
+                        ## Nothing can be sorted on - a table of long columns only, without a
+                        ## primary key. Ordering it is not possible and paging it is therefore
+                        ## not reliable; saying so is better than a sort the server refuses.
+                        self.config_parser.print_log_message('WARNING',
+                            f"sql_anywhere_connector: migrate_table: Worker {worker_id}: Table "
+                            f"{source_schema_name}.{source_table_name} is read in {total_chunks} chunks and has "
+                            f"neither a primary key nor a column which can be sorted on, so the chunks cannot be "
+                            f"ordered - rows may be read twice or missed. Migrate this table with chunk_size: -1.")
 
                     self.config_parser.print_log_message('DEBUG', f"sql_anywhere_connector: migrate_table: Worker {worker_id}: Fetching data with cursor using query: {query}")
 

@@ -28,6 +28,7 @@ from tabulate import tabulate
 import sqlglot
 from credativ_pg_migrator.connectors.tsql_parser import TsqlParser
 from credativ_pg_migrator.query_conversion import outer_joins as query_outer_joins
+from credativ_pg_migrator.query_conversion import money_literals as query_money_literals
 from credativ_pg_migrator.query_conversion.outer_joins import outer_join_warnings
 from sqlglot import exp, TokenType
 from sqlglot.dialects import TSQL
@@ -367,8 +368,10 @@ class SybaseASEConnector(DatabaseConnector):
 
     # A money literal of Sybase - $1000, $19.99, $-5 - is a number written with a currency
     # sign in front of it. PostgreSQL has no such literal and reads '$1000' in a statement
-    # as the positional parameter number 1000: 'there is no parameter $1000'.
-    MONEY_LITERAL_PATTERN = re.compile(r"""(?<![A-Za-z0-9_$@#'"])\$\s*([-+]?)\s*(\d+(?:\.\d*)?|\.\d+)""")
+    # as the positional parameter number 1000: 'there is no parameter $1000'. The pattern is
+    # shared with the statement path, which needs the same one - see
+    # query_conversion/money_literals.py and prepare_query_for_parsing() below.
+    MONEY_LITERAL_PATTERN = query_money_literals.MONEY_LITERAL
 
     @classmethod
     def _convert_money_literals(cls, sql_text):
@@ -376,13 +379,17 @@ class SybaseASEConnector(DatabaseConnector):
         Rewrite the money literals of an expression into plain numbers. The MONEY of the
         source is migrated as NUMERIC(19,4), so the number alone is the whole value. What
         stands inside a string literal is data ('costs $5') and is left untouched.
+
+        This is the converter for ONE expression - a column default, the condition of a check
+        constraint, the check of a domain. A whole statement is converted in
+        prepare_query_for_parsing(), which also protects the comments and the quoted
+        identifiers.
         """
         if not sql_text or '$' not in str(sql_text):
             return sql_text
         parts = re.split(r"('(?:[^']|'')*')", str(sql_text))
         for position in range(0, len(parts), 2):
-            parts[position] = cls.MONEY_LITERAL_PATTERN.sub(
-                lambda match: f"{match.group(1) if match.group(1) == '-' else ''}{match.group(2)}", parts[position])
+            parts[position] = query_money_literals.convert_money_literals(parts[position])
         return ''.join(parts)
 
     @staticmethod
@@ -1769,6 +1776,14 @@ class SybaseASEConnector(DatabaseConnector):
                                 f"sybase_ase_connector: convert_funcproc_code: The member {member_name} of the procedure group "
                                 f"{settings.get('funcproc_name')} could not be converted - it is missing in the target.")
                     return "\n\n".join(converted_members) + "\n" if converted_members else ''
+
+            ## The money literals go first, while the double quoted strings are still double
+            ## quoted and the mask therefore still recognises them as literals. A '$0' left in
+            ## the body of a routine is not merely an unknown column: the body is handed to
+            ## PostgreSQL inside a dollar quoted string, where '$0' is a reference to a
+            ## parameter the function does not have.
+            funcproc_code = query_money_literals.convert_money_literals(
+                funcproc_code, self.sql_without_literals_and_comments)
 
             # Convert double-quoted string literals to single-quoted strings
             # Sybase often allows "string" where PostgreSQL expects 'string' (which would otherwise parse as an identifier)
@@ -5055,6 +5070,12 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_function_name}"();
 
           'noholdlock' - a read hint which a parser reads as the alias of the table.
 
+          '$0' - a money literal. No parser of another dialect reads one: sqlglot takes it
+          for an identifier, the conversion quotes it, and the target answers 'column "$0"
+          does not exist' - or, for a number large enough to look like a placeholder,
+          'there is no parameter $1000'. MONEY is migrated as NUMERIC(19,4), so the number
+          alone is the whole value.
+
           "text" - with quoted_identifier off, a double quoted literal is a STRING in ASE and
           an identifier everywhere else.
 
@@ -5069,6 +5090,10 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_function_name}"();
         prepared = query_outer_joins.mark_tsql_outer_joins(
             query_code, self.sql_without_literals_and_comments)
         prepared = re.sub(r'\bnoholdlock\b', '', prepared, flags=re.IGNORECASE)
+        ## before the rewrite of the double quotes below, so that a '$' inside a double quoted
+        ## string is still protected as a literal by the mask
+        prepared = query_money_literals.convert_money_literals(
+            prepared, self.sql_without_literals_and_comments)
 
         def single_quote(match):
             return "'" + match.group(1).replace("'", "''") + "'"

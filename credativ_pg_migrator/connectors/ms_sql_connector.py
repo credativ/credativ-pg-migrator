@@ -22,6 +22,7 @@ from credativ_pg_migrator.database_connector import DatabaseConnector, first_lin
 from credativ_pg_migrator.migrator_logging import MigratorLogger
 from credativ_pg_migrator.connectors.tsql_parser import TsqlParser
 from credativ_pg_migrator.query_conversion import outer_joins as query_outer_joins
+from credativ_pg_migrator.query_conversion import money_literals as query_money_literals
 from credativ_pg_migrator.query_conversion.outer_joins import outer_join_warnings
 from credativ_pg_migrator.jvm_helper import detach_thread_from_jvm
 from credativ_pg_migrator.text_decoding import TextDecoder
@@ -1474,6 +1475,12 @@ class MsSQLConnector(DatabaseConnector):
           code; this connector had nothing, so the identical statement converted from one
           source of the family and was reported as unreadable from the other.
 
+          '$0' - a money literal. No parser of another dialect reads one: sqlglot takes it
+          for an identifier, the conversion quotes it, and the target answers 'column "$0"
+          does not exist' - or, for a number large enough to look like a placeholder,
+          'there is no parameter $1000'. MONEY is migrated as NUMERIC(19,4), so the number
+          alone is the whole value. The same shared code as in sybase_ase.
+
         It is used by convert_statement_code() - so the view path and the query path are given
         one preparation - and by the query conversion, which has to classify a statement
         before it converts it: a statement which cannot be parsed would be reported as one the
@@ -1482,8 +1489,10 @@ class MsSQLConnector(DatabaseConnector):
         """
         if not query_code:
             return query_code
-        return query_outer_joins.mark_tsql_outer_joins(
+        prepared = query_outer_joins.mark_tsql_outer_joins(
             query_code, self.sql_without_literals_and_comments)
+        return query_money_literals.convert_money_literals(
+            prepared, self.sql_without_literals_and_comments)
 
     ## The source test of §8.1. SET NOEXEC ON makes the server compile every statement behind
     ## it - the names are resolved and the plan is made - and run none of them. It is a

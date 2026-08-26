@@ -1016,6 +1016,10 @@ The tool integrates a comprehensive Mapping Workflow managed by the central orch
 - Systematic orchestration of data loads that intelligently drops and recreates target indexes, primary keys, and constraints to maximize transfer performance and mapping integrity.
 - Detailed tracking of mapped objects into the migration protocols.
 
+For the full description - how the matching decides, how the configuration is written, which
+migrator tables are used and which options the workflow ignores - see the
+[Schema Mapping Workflow](workflow/mapping.md) documentation.
+
 ### 8.5 Data Anonymization Workflow
 
 The tool includes a pluggable anonymization engine designed to obscure sensitive data during migration without modifying core ETL pipelines. It natively supports Python in-memory transformations and can offload logic directly to the PostgreSQL engine.

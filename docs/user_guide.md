@@ -1020,35 +1020,53 @@ If you are not hitting that, leave `chunk_size` at `-1`.
   rows and no key — the source is free to return equal rows in a different order for each chunk,
   and rows can then be **read twice or missed altogether**. The row counts of `--validate` are
   what catches it.
-- Ordering by every column of a keyless table is expensive in its own right, chunked or not.
+- Ordering by every column of a keyless table is expensive in its own right.
 
-#### What each source really does
+#### Where it can be used, and where it must not be
 
-| source | how a chunk is fetched | chunking effective? |
-|---|---|---|
-| Oracle | `ORDER BY … OFFSET n ROWS FETCH NEXT m ROWS ONLY` | yes |
-| PostgreSQL | `ORDER BY … LIMIT m OFFSET n` | yes |
-| MS SQL Server | `ORDER BY … OFFSET n ROWS FETCH NEXT m ROWS ONLY` | yes (SQL Server 2012 and newer) |
-| MySQL, MariaDB | `ORDER BY … LIMIT m OFFSET n` | yes |
-| SQLite | `ORDER BY … LIMIT m OFFSET n` | yes |
-| Informix | `SELECT SKIP n … ORDER BY … LIMIT m` | yes |
-| IBM DB2 LUW | `ORDER BY … LIMIT m OFFSET n` | only where the server accepts `LIMIT`/`OFFSET`, which Db2 does through the MySQL compatibility vector — otherwise the statement is refused |
-| SQL Anywhere | `SELECT TOP m START AT k …` — **the `ORDER BY` is built and never added to the statement** | the rows are paged out of an **unordered** result: chunks can overlap and skip. Do not use chunking here |
-| Sybase ASE | no paging clause at all — older ASE has no `LIMIT`/`OFFSET`, so the connector reads the whole table in one pass and marks the table finished | **ignored**: setting it changes nothing |
-| IBM DB2 for i, IBM DB2 for z/OS | the data does not come over a connection at all; it is loaded from the export files of `data_export` | **ignored**: setting it changes nothing |
+**Chunking is implemented and safe to use** — the chunk is a real window over an ordered result:
 
-The two DB2 file-based connectors and Sybase ASE simply do not read the setting — a value in the
-configuration there is harmless but does nothing. SQL Anywhere is the one where a value can
-change the *result*, not only the speed.
+| source | how a chunk is fetched |
+|---|---|
+| Oracle | `ORDER BY … OFFSET n ROWS FETCH NEXT m ROWS ONLY` |
+| PostgreSQL | `ORDER BY … LIMIT m OFFSET n` |
+| MS SQL Server | `ORDER BY … OFFSET n ROWS FETCH NEXT m ROWS ONLY` — needs SQL Server 2012 or newer |
+| MySQL, MariaDB | `ORDER BY … LIMIT m OFFSET n` |
+| SQLite | `ORDER BY … LIMIT m OFFSET n` |
+| Informix | `SELECT SKIP n … ORDER BY … LIMIT m` |
+| SQL Anywhere | `SELECT TOP m START AT k … ORDER BY …` |
+
+Even here, read the two caveats above: it is slower, and a table without a unique order can lose
+or duplicate rows across a chunk boundary.
+
+**The setting does nothing** — it is read, and no statement changes. Harmless, but do not expect
+it to help with a table that is too large to read in one pass:
+
+| source | why |
+|---|---|
+| Sybase ASE | older ASE has no `LIMIT`/`OFFSET`. The connector reads the whole table in one pass whatever `chunk_size` says, and marks the table finished so the orchestrator does not loop and copy it again |
+| IBM DB2 for i | the data never comes over the connection — it is loaded from the export files named in `data_export` |
+| IBM DB2 for z/OS | the same |
+
+**It depends on the server**:
+
+| source | why |
+|---|---|
+| IBM DB2 LUW | the connector pages with `LIMIT m OFFSET n`. Db2 accepts that syntax only with the MySQL compatibility vector enabled (`DB2_COMPATIBILITY_VECTOR`); without it the statement is refused and the table fails. Try one table before setting it for a whole migration |
+
+> **Note for anyone upgrading.** Until 0.16.0 the SQL Anywhere connector built its `ORDER BY` and
+> never added it to the statement, so chunks were paged out of an *unordered* result and rows
+> could be read twice or missed. If you migrated from SQL Anywhere with `chunk_size` set, the row
+> counts of that migration are worth re-checking.
 
 #### If you do need it
 
 - Set it larger than `batch_size`. A smaller value is refused with a `WARNING` and chunking is
   switched off.
-- Prefer tables which have a primary key. `migrate_indexes` has to be on for the migrator to know
-  about it — the key is read from the `indexes` protocol table.
-- Set it per table rather than globally, with `table_settings[].chunk_size`, so that only the one
-  table which needs it pays for it.
+- **Use it on the one table that needs it**, with `table_settings[].chunk_size`, rather than
+  globally — every other table would pay the cost for nothing.
+- **Prefer tables which have a primary key.** `migrate_indexes` has to be on for the migrator to
+  know about it: the key is read from the `indexes` protocol table.
 - Run `--validate` afterwards. The row-count check is what shows a chunk boundary that lost or
   duplicated rows.
 

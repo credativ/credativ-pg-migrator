@@ -639,7 +639,7 @@
         "chunk_size": {
           "type": "integer",
           "default": -1,
-          "description": "Copies one table with several SELECTs of this many rows instead of one. It is NOT a performance setting: every chunk repeats the sort and re-reads the rows it skips, so a chunked table is normally SLOWER than an unchunked one, and the more chunks the worse. It is for a source whose driver or server builds the whole result set of one SELECT before the first row arrives, where a single query over a huge table exhausts client memory or the temporary space of the server - chunking bounds what one statement has to hold. The paging needs an order which is unique: the migrator orders by the primary key of the table, or, when it has none, by every non-LOB column - where neither is unique, rows can be read twice or missed between chunks. -1 (the default) copies each table with one SELECT. Must be larger than batch_size - a smaller value disables chunking with a warning. Not every source implements it; see 'Chunked reading of large tables' in docs/user_guide.md for what each one does."
+          "description": "Copies one table with several SELECTs of this many rows instead of one. It is NOT a performance setting: every chunk repeats the sort and re-reads the rows it skips, so a chunked table is normally SLOWER than an unchunked one, and the more chunks the worse. It is for a source whose driver or server builds the whole result set of one SELECT before the first row arrives, where a single query over a huge table exhausts client memory or the temporary space of the server - chunking bounds what one statement has to hold. The paging needs an order which is unique: the migrator orders by the primary key of the table, or, when it has none, by every non-LOB column - where neither is unique, rows can be read twice or missed between chunks. -1 (the default) copies each table with one SELECT. Must be larger than batch_size - a smaller value disables chunking with a warning. IMPLEMENTED for Oracle, PostgreSQL, MS SQL Server, MySQL, MariaDB, SQLite, Informix and SQL Anywhere. IGNORED - the setting changes no statement - by Sybase ASE and by DB2 for i and DB2 for z/OS, which load their data from export files. For DB2 LUW it depends on the server: the connector pages with LIMIT/OFFSET, which Db2 accepts only with the MySQL compatibility vector enabled. See 'Chunked reading of large tables' in docs/user_guide.md."
         },
         "names_case_handling": {
           "type": "string",
@@ -923,7 +923,7 @@
           },
           "chunk_size": {
             "type": "integer",
-            "description": "Overrides migration.chunk_size for these tables. Read the warnings there first - chunking is a workaround for a source which cannot stream one large result set, not a way to go faster."
+            "description": "Overrides migration.chunk_size for these tables, which is how it should normally be used - only the one table which cannot be read in a single pass then pays the cost. Read the warnings on migration.chunk_size first, including which sources implement it at all."
           },
           "migrate_data": {
             "type": "boolean",

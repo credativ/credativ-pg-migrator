@@ -2255,8 +2255,8 @@ class MigratorTables:
         table_name_constraints = self.config_parser.get_protocol_name_constraints()
         table_name_target_columns_alterations = self.config_parser.get_protocol_name_target_columns_alterations()
 
-        constraints_query = f"""SELECT c.constraint_columns, c.referenced_table_name, c.referenced_columns,
-                        c.referenced_table_schema
+        constraints_query = f"""SELECT c.constraint_columns, c.source_referenced_table_name, c.referenced_columns,
+                        c.source_referenced_table_schema
                     FROM "{self.protocol_schema}".{table_name_constraints} c
                     WHERE c.constraint_type = 'FOREIGN KEY'
                     AND upper(c.target_schema_name) = upper(%s)
@@ -2276,12 +2276,12 @@ class MigratorTables:
         cursor.close()
 
         already_yielded = set()
-        for constraint_columns, referenced_table_name, referenced_columns, referenced_table_schema in foreign_keys:
+        for constraint_columns, source_referenced_table_name, referenced_columns, source_referenced_table_schema in foreign_keys:
             # The constraint stores the source name of the referenced table, the alterations
             # the target name - these differ when aliases are used as target names.
-            referenced_target_names = [(referenced_table_name or '').upper()]
+            referenced_target_names = [(source_referenced_table_name or '').upper()]
             if self.config_parser.get_use_aliases_as_target_names():
-                alias_dict = self.get_alias_for_table(referenced_table_schema, referenced_table_name)
+                alias_dict = self.get_alias_for_table(source_referenced_table_schema, source_referenced_table_name)
                 if alias_dict and alias_dict.get('target_alias_name'):
                     referenced_target_names.append(alias_dict['target_alias_name'].upper())
 
@@ -3912,8 +3912,9 @@ class MigratorTables:
             constraint_type TEXT,
             constraint_owner TEXT,
             constraint_columns TEXT,
-            referenced_table_schema TEXT,
-            referenced_table_name TEXT,
+            source_referenced_table_schema TEXT,
+            source_referenced_table_name TEXT,
+            target_referenced_table_schema TEXT,
             target_referenced_table_name TEXT,
             referenced_columns TEXT,
             constraint_sql TEXT,
@@ -3944,20 +3945,21 @@ class MigratorTables:
             'constraint_type': row[9],
             'constraint_owner': row[10],
             'constraint_columns': row[11],
-            'referenced_table_schema': row[12],
-            'referenced_table_name': row[13],
-            'target_referenced_table_name': row[14],
-            'referenced_columns': row[15],
-            'constraint_sql': row[16],
-            'delete_rule': row[17],
-            'update_rule': row[18],
-            'constraint_comment': row[19],
-            'constraint_status': row[20],
-            'task_created': row[21],
-            'task_started': row[22],
-            'task_completed': row[23],
-            'success': row[24],
-            'message': row[25]
+            'source_referenced_table_schema': row[12],
+            'source_referenced_table_name': row[13],
+            'target_referenced_table_schema': row[14],
+            'target_referenced_table_name': row[15],
+            'referenced_columns': row[16],
+            'constraint_sql': row[17],
+            'delete_rule': row[18],
+            'update_rule': row[19],
+            'constraint_comment': row[20],
+            'constraint_status': row[21],
+            'task_created': row[22],
+            'task_started': row[23],
+            'task_completed': row[24],
+            'success': row[25],
+            'message': row[26]
         }
 
     def insert_constraint(self, settings):
@@ -3972,25 +3974,32 @@ class MigratorTables:
             target_constraint_name, constraint_name,
             constraint_type,
             constraint_owner, constraint_columns,
-            referenced_table_schema, referenced_table_name, target_referenced_table_name,
+            source_referenced_table_schema, source_referenced_table_name,
+            target_referenced_table_schema, target_referenced_table_name,
             referenced_columns, constraint_sql,
             delete_rule, update_rule, constraint_comment,
             constraint_status)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
         params = (settings['source_table_id'], settings['source_schema_name'], settings['source_table_name'],
                     settings['target_schema_name'], settings['target_table_name'], settings.get('target_alias_name', ''),
                     ## the names the target really has - 'constraint_name' and
-                    ## 'referenced_table_name' stay the spelling of the source
+                    ## 'source_referenced_table_name' stay the spelling of the source
                     self.config_parser.convert_names_case(settings['constraint_name']),
                     settings['constraint_name'],
                     settings['constraint_type'] if 'constraint_type' in settings else '',
                     settings['constraint_owner'] if 'constraint_owner' in settings else '',
                     settings['constraint_columns'] if 'constraint_columns' in settings else '',
-                    settings['referenced_table_schema'] if 'referenced_table_schema' in settings else '',
-                    settings['referenced_table_name'] if 'referenced_table_name' in settings else '',
-                    self.config_parser.convert_names_case(settings.get('referenced_table_name') or ''),
+                    settings.get('source_referenced_table_schema') or '',
+                    settings.get('source_referenced_table_name') or '',
+                    ## The schema the referenced table has in the TARGET. It used to be missing
+                    ## altogether, so everything downstream assumed the referenced table lay in
+                    ## the schema of the referencing one - the REFERENCES clause was built that
+                    ## way and the worker had to look the table up again to find out otherwise.
+                    settings.get('target_referenced_table_schema') or '',
+                    settings.get('target_referenced_table_name')
+                        or self.config_parser.convert_names_case(settings.get('source_referenced_table_name') or ''),
                     settings['referenced_columns'] if 'referenced_columns' in settings else '',
                     settings['constraint_sql'] if 'constraint_sql' in settings else '',
                     settings['delete_rule'] if 'delete_rule' in settings else '',

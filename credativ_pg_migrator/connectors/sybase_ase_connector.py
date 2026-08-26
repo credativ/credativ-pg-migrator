@@ -1853,22 +1853,38 @@ class SybaseASEConnector(DatabaseConnector):
             ## body used them ('sp_changelog_delete()' with locvar_row_id inside)
             header_match = re.search(r'CREATE\s+(?:OR\s+REPLACE\s+)?(?:PROC|PROCEDURE|FUNCTION)\s+([a-zA-Z0-9_\.]+)(.*?)(\bAS\b)', header_str, flags=re.IGNORECASE | re.DOTALL)
 
-            func_schema = ""
+            ## The routine is created in the schema of the TARGET, always. The qualifier the
+            ## source wrote in its own header - 'CREATE PROCEDURE dbo.acc2035c_...' - used to
+            ## be carried over as the schema of the generated routine, and only a header
+            ## without one fell back to the target schema. So a schema qualified routine was
+            ## created in a schema of the source which the target does not have, and
+            ## PostgreSQL answered 'schema "dbo" does not exist'. Everything else about the
+            ## routine already used the target schema: the protocol records it there and the
+            ## COMMENT ON of the orchestrator is written for it, so a routine created in the
+            ## qualifier of the source could not even be commented.
             proc_name = settings.get('funcproc_name', '')
             params_str = ""
+            source_qualifier = ""
 
             if header_match:
                  full_name = header_match.group(1)
                  params_str = header_match.group(2).strip()
-                 if '.' in full_name:
-                     parts = full_name.split('.')
-                     func_schema = parts[0]
-                     if not proc_name: proc_name = parts[1]
-                 else:
-                     if not proc_name: proc_name = full_name
+                 ## 'owner.routine' and 'database.owner.routine' alike - the name is the last
+                 ## part of it, and everything in front is the qualifier of the source. Taking
+                 ## parts[1] made the OWNER the name of a routine written the second way.
+                 parts = [part for part in full_name.split('.') if part]
+                 if not proc_name and parts:
+                     proc_name = parts[-1]
+                 if len(parts) > 1:
+                     source_qualifier = '.'.join(parts[:-1])
 
-            if not func_schema:
-                 func_schema = settings.get('target_schema_name', 'public')
+            func_schema = settings.get('target_schema_name') or 'public'
+
+            if source_qualifier and source_qualifier.lower() != func_schema.lower():
+                 self.config_parser.print_log_message('DEBUG',
+                     f"sybase_ase_connector: convert_funcproc_code: {proc_name} is written "
+                     f"'{source_qualifier}.{proc_name}' in the source - it is created in the schema of the "
+                     f"target, '{func_schema}'.")
 
             pg_params_str = ""
             output_params = []

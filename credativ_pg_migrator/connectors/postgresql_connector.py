@@ -2029,9 +2029,13 @@ class PostgreSQLConnector(DatabaseConnector):
         constraint_type = settings['constraint_type']
         constraint_owner = self.config_parser.convert_names_case(settings['constraint_owner'])
         constraint_columns = self.config_parser.convert_names_case(settings['constraint_columns'])
-        #referenced_table_schema = target_schema_name
-        # referenced_table_schema = self.config_parser.convert_names_case(settings['referenced_table_schema'])
-        referenced_table_schema = settings['referenced_table_schema']
+        ## The schema the REFERENCES clause names. 'referenced_table_schema' is the schema of
+        ## the SOURCE and must never be written into a statement for the target - it was read
+        ## into a local variable here and then not used at all, so every foreign key was built
+        ## as if the referenced table lay in the schema of the referencing one. The planner
+        ## decides where the referenced table lands and passes it; without it the old
+        ## assumption is kept, which is right for the one-schema migrations it was written for.
+        target_referenced_table_schema = settings.get('target_referenced_table_schema') or target_schema_name
         referenced_table_name = self.config_parser.convert_names_case(settings['referenced_table_name'])
         referenced_columns = self.config_parser.convert_names_case(settings['referenced_columns'])
         delete_rule = settings['delete_rule'] if 'delete_rule' in settings else 'NO ACTION'
@@ -2072,7 +2076,7 @@ class PostgreSQLConnector(DatabaseConnector):
             if constraint_type == 'FOREIGN KEY':
                 create_constraint_query = (
                     f'ALTER TABLE "{target_schema_name}"."{target_table_name}" ADD CONSTRAINT "{constraint_name}_tab_{target_table_name}" '
-                    f'FOREIGN KEY ({constraint_columns}) REFERENCES "{target_schema_name}"."{referenced_table_name}" ({referenced_columns})'
+                    f'FOREIGN KEY ({constraint_columns}) REFERENCES "{target_referenced_table_schema}"."{referenced_table_name}" ({referenced_columns})'
                 )
                 delete_action = self.normalize_referential_action(delete_rule)
                 if delete_action:

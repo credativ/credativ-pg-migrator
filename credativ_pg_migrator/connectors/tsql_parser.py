@@ -2256,6 +2256,132 @@ class TsqlParser:
                 return text[:match.start()].strip(), text[match.start():].strip()
         return text.strip(), ''
 
+    ## 'SELECT @variable = ...' - how Transact-SQL assigns to a variable. It is written like a
+    ## query and is not one, which is why the statement converter must not be given it.
+    SELECT_ASSIGNMENT = re.compile(r'(?i)^\s*SELECT\s+@[\w@]+\s*=(?!=)')
+
+    def is_select_assignment(self, content):
+        """Whether a SELECT command assigns to variables rather than answering with rows."""
+        return bool(self.SELECT_ASSIGNMENT.match(re.sub(r'\s+', ' ', content or '')))
+
+    ## A local variable of Transact-SQL. '@@name' is a global one and is not matched - the
+    ## connectors convert those before the parser runs. The same rule Pass 9 renames by.
+    VARIABLE_REFERENCE = re.compile(r'(?<!@)@([a-zA-Z0-9_]+)')
+
+    def variables_as_identifiers(self, text):
+        """
+        The '@variables' of a statement written as the identifiers they become in the target,
+        so that the statement converter reads them as names.
+
+        Every parser of the Transact-SQL family reads '@id' as a PARAMETER of the statement,
+        and the generator for PostgreSQL writes a parameter as '$id'. So every statement of a
+        routine which named a variable came back from the conversion with '$id' in it -
+        'UPDATE ... WHERE "customer_id" = $cid', 'SELECT $OptIn = 1' - which is not PL/pgSQL
+        and which Pass 9 could no longer rename, because the '@' it looks for was gone.
+        Renaming them to the name they get anyway ('locvar_cid') hands the converter an
+        ordinary identifier instead.
+
+        What stands inside a string literal or a comment is text - 'user@host' is data - so
+        the rename is applied only where the statement is SQL.
+
+        Returns the text and the map of the identifiers it introduced, for
+        variables_back_from_identifiers() below.
+        """
+        if not text or '@' not in text:
+            return text, {}
+
+        masked, _ = self.mask_comments_and_literals(text, False)
+        names = {}
+        pieces = []
+        position = 0
+        for match in self.VARIABLE_REFERENCE.finditer(masked):
+            identifier = f"locvar_{match.group(1)}"
+            names[identifier.lower()] = identifier
+            pieces.append(text[position:match.start()])
+            pieces.append(identifier)
+            position = match.end()
+        pieces.append(text[position:])
+        return ''.join(pieces), names
+
+    def variables_back_from_identifiers(self, text, names):
+        """
+        The variables of a converted statement written the way the DECLARE block writes them.
+
+        The conversion quotes the names it does not know, and a quoted name is NOT folded:
+        '"locvar_OptOut"' is a different name from the 'locvar_OptOut' of the DECLARE block,
+        which PostgreSQL folds to lower case. The quotes are therefore taken off again and the
+        spelling of the declaration is restored, so that the routine reads as it was declared.
+        """
+        if not text or 'locvar_' not in text.lower():
+            return text
+
+        def restore(match):
+            found = match.group(1) or match.group(2)
+            return names.get(found.lower(), found)
+
+        return re.sub(r'"(locvar_[A-Za-z0-9_]+)"|\b(locvar_[A-Za-z0-9_]+)\b', restore, text,
+                      flags=re.IGNORECASE)
+
+    def convert_statement_with_variables(self, statement):
+        """
+        One statement converted with the statement converter, with its variables carried
+        through the conversion as identifiers rather than as parameters.
+        """
+        prepared, names = self.variables_as_identifiers(statement)
+        converted = self.apply_identifier_case(self.view_converter({**self.settings, 'view_code': prepared}))
+        if not converted or not converted.strip():
+            return converted
+        return self.variables_back_from_identifiers(converted, names)
+
+    def convert_assignment_query(self, values_text, from_clause, expected_values):
+        """
+        The value expressions of a SELECT assignment, converted with the statement converter.
+
+        The assignment itself is not a statement the converter can read, but everything the
+        values are made of is: the schema of the source in front of a table, the functions of
+        the source, the string concatenation written with '+'. They are converted as the
+        SELECT they would be without their targets, and handed back as the list of converted
+        values and the converted FROM clause.
+
+        Answers None when there is no converter, when the conversion fails, or when the
+        converted statement no longer carries one value per target - in which case the caller
+        keeps what the source wrote, which is what happened before anything was converted here
+        at all.
+        """
+        if not self.view_converter or not self.settings:
+            return None
+
+        statement = f"SELECT {values_text}"
+        if from_clause:
+            statement = f"{statement} {from_clause}"
+
+        try:
+            converted = self.convert_statement_with_variables(statement)
+        except Exception as e:
+            self.log(f"Failed to convert the values of a SELECT assignment: {e}")
+            return None
+
+        if not converted or not converted.strip():
+            self.log("Conversion of the values of a SELECT assignment returned nothing - the original is kept")
+            return None
+
+        converted = converted.strip().rstrip(';').strip()
+        head = re.match(r'(?is)^SELECT\s+(.*)$', converted)
+        if not head:
+            self.log(f"The converted values of a SELECT assignment are not a SELECT: {converted[:120]}")
+            return None
+
+        converted_values, converted_from = self.split_off_from_clause(head.group(1))
+        values = [value.strip() for value in self.split_outside_parens(converted_values, ',')]
+        if len(values) != expected_values:
+            self.log(f"The conversion changed the number of values of a SELECT assignment "
+                     f"({expected_values} -> {len(values)}) - the original is kept")
+            return None
+        if bool(from_clause) != bool(converted_from):
+            self.log("The conversion changed the FROM clause of a SELECT assignment - the original is kept")
+            return None
+        return values, converted_from
+
     def pass_8_process_select_assignments(self):
         """
         Pass 8: Processes select assignments.
@@ -2283,15 +2409,13 @@ class TsqlParser:
             # Simplistic check:
             # Does it look like an assignment?
             # SELECT @var = ...
-            pass_check = False
-
             # Normalize spaces for check
             normalized = re.sub(r'\s+', ' ', original_content)
 
-            # Regex: ^SELECT\s+@\w+\s*=\s*
-            # Matches SELECT @... = ...
-            if re.match(r'^SELECT\s+@[\w@]+\s*=', normalized, re.IGNORECASE):
-                pass_check = True
+            ## The same question Pass 8d asks before it decides not to hand the statement to
+            ## the statement converter - one rule, so that a statement cannot fall between the
+            ## two and be converted by neither.
+            pass_check = self.is_select_assignment(original_content)
 
             if pass_check:
                 # Transform
@@ -2306,20 +2430,50 @@ class TsqlParser:
                 ## statement is the SELECT ... INTO of PL/pgSQL, which also sets the row count
                 ## the code behind it usually asks for.
                 assignments_text, from_clause = self.split_off_from_clause(cleaned)
+
+                ## The values are read apart from their targets whether the statement has a
+                ## FROM clause or not, because both shapes need the conversion Pass 8d gives
+                ## every other statement and neither may be handed to it whole - see
+                ## is_select_assignment(). What the values are made of is converted here, in
+                ## the one place which knows which part of the statement is a target and which
+                ## is a value.
+                assignment_pairs = []
+                for part in self.split_outside_parens(assignments_text, ','):
+                    pair = re.match(r'(?s)^\s*(@[\w@]+|locvar_[\w]+)\s*=(?!=)\s*(\S.*?)\s*$', part)
+                    if not pair:
+                        assignment_pairs = []
+                        break
+                    assignment_pairs.append((pair.group(1), pair.group(2)))
+
+                if assignment_pairs:
+                    converted = self.convert_assignment_query(
+                        ', '.join(value for _, value in assignment_pairs),
+                        from_clause,
+                        len(assignment_pairs))
+                    if converted:
+                        converted_values, converted_from = converted
+                        assignment_pairs = [(name, converted_values[index])
+                                            for index, (name, _) in enumerate(assignment_pairs)]
+                        from_clause = converted_from
+
+                ## An assignment which reads from a table is a query, not an assignment of a
+                ## value: 'select @price = list_price from products where ...' became
+                ## 'locvar_price := list_price FROM products WHERE ...', which PostgreSQL
+                ## cannot read at all - the value of an assignment has no FROM clause. Such a
+                ## statement is the SELECT ... INTO of PL/pgSQL, which also sets the row count
+                ## the code behind it usually asks for.
                 if from_clause:
-                    assignment_pairs = []
-                    for part in self.split_outside_parens(assignments_text, ','):
-                        pair = re.match(r'(?s)^\s*(@[\w@]+|locvar_[\w]+)\s*=(?!=)\s*(\S.*?)\s*$', part)
-                        if not pair:
-                            assignment_pairs = []
-                            break
-                        assignment_pairs.append((pair.group(1), pair.group(2)))
                     if assignment_pairs:
                         targets = ', '.join(name for name, _ in assignment_pairs)
                         values = ', '.join(value for _, value in assignment_pairs)
                         cmd_obj['content'] = f"SELECT {values} INTO {targets} {from_clause};"
                         continue
                     self.log(f"SELECT assignment with a FROM clause which could not be read: {original_content}")
+
+                elif assignment_pairs:
+                    ## every pair is an assignment of its own, in the order the source wrote them
+                    cmd_obj['content'] = ' '.join(f"{name} := {value};" for name, value in assignment_pairs)
+                    continue
 
                 # 2. Replace , with ; outside of parens/quotes, but stop replacing when hitting a FROM clause
                 cleaned = self.replace_commas_outside_parens(cleaned, stop_word="from")
@@ -2628,10 +2782,8 @@ class TsqlParser:
             declaration = re.match(r'(?is)^(.*?\bCURSOR\b\s*(?:\([^)]*\)\s*)?(?:IS|FOR)\s+)(SELECT\b.*?)(;?)\s*$', cursor['content'])
             if not declaration:
                 continue
-            temp_settings = self.settings.copy()
-            temp_settings['view_code'] = declaration.group(2)
             try:
-                converted_query = self.apply_identifier_case(self.view_converter(temp_settings))
+                converted_query = self.convert_statement_with_variables(declaration.group(2))
                 if converted_query and converted_query.strip():
                     cursor['content'] = f"{declaration.group(1)}{converted_query.strip().rstrip(';')};"
             except Exception as e:
@@ -2644,11 +2796,19 @@ class TsqlParser:
             for cmd_obj in commands:
                 original_content = cmd_obj['content']
 
-                temp_settings = self.settings.copy()
-                temp_settings['view_code'] = original_content
+                ## 'SELECT @a = 1, @b = 2' is not a query - it is how Transact-SQL assigns to
+                ## its variables, and Pass 8 turns it into the assignments of PL/pgSQL. Handing
+                ## it to the statement converter reads '@a' as a parameter of the statement and
+                ## writes it as the '$a' of PostgreSQL, so the routine held
+                ## 'SELECT $OptIn = 1, $OptOut = 2, ...' - which is not a statement of any
+                ## dialect - and Pass 8 no longer recognised the assignment it was meant to
+                ## convert, because the '@' it looks for was gone. The values of such a
+                ## statement still need the conversion, and Pass 8 asks for it itself.
+                if command_kind == 'SELECT' and self.is_select_assignment(original_content):
+                    continue
 
                 try:
-                    converted = self.apply_identifier_case(self.view_converter(temp_settings))
+                    converted = self.convert_statement_with_variables(original_content)
 
                     if not converted or not converted.strip():
                         self.log(f"Conversion of a {command_kind} command returned nothing - the original is kept")
@@ -2721,12 +2881,13 @@ class TsqlParser:
         """
         self.log("Running Pass 9: Rename Variables")
 
-        def replacement_func(match):
-            return "locvar_" + match.group(1)
-
         def apply_rename(content):
-            # Regex: (?<!@)@([a-zA-Z0-9_]+)
-            return re.sub(r'(?<!@)@([a-zA-Z0-9_]+)', replacement_func, content, flags=re.IGNORECASE)
+            ## The rename is applied where the line is SQL and nowhere else. It used to be a
+            ## plain re.sub over the whole line, so an '@' inside a string literal was renamed
+            ## as if it were a variable: 'mail to admin@example.com' was written into the
+            ## target as 'mail to adminlocvar_example.com'. That is data, and a routine which
+            ## rewrites the text it inserts is worse than one which does not compile.
+            return self.variables_as_identifiers(content)[0]
 
         # Arrays to process:
         # header_lines, body_lines (remaining), insert_commands, update_commands, select_commands, if_commands

@@ -668,7 +668,7 @@ class Verdict:
 def check_repartitioning(entry, columns, unique_keys, target_version_num=None,
                          table_exists=True, table_is_partition=False, facts=None,
                          first_value=None, last_value=None, existing_target_names=(),
-                         bounds_were_read=False):
+                         bounds_were_read=False, bounds_can_be_read=True):
     """
     Whether one `target_partitioning` entry can be carried out - §4.4 of the design.
 
@@ -684,6 +684,10 @@ def check_repartitioning(entry, columns, unique_keys, target_version_num=None,
     last_value          - the smallest and the largest value of the partitioning column, when
                           they were read; `bounds_were_read` says whether they were
     existing_target_names - the names the target schema already holds, for the collision check
+    bounds_can_be_read  - whether this source CAN be asked for the values a column holds at all.
+                          A DDL-only source cannot: there is no instance to ask, and an entry
+                          which generates its partitions from a date_range is refused rather
+                          than left to fail when they are worked out
 
     Returns a Verdict. Everything it answers is answerable before anything is created, and
     everything it refuses is a run which otherwise fails somewhere in the middle - most of them
@@ -743,7 +747,8 @@ def check_repartitioning(entry, columns, unique_keys, target_version_num=None,
     _check_the_rows_fit(verdict, entry, table_name, method, partitioning_columns, facts)
     _check_what_references_it(verdict, table_name, facts, target_version_num)
     _check_the_partitions(verdict, entry, table_name, method, partitioning_columns,
-                          first_value, last_value, existing_target_names, bounds_were_read)
+                          first_value, last_value, existing_target_names, bounds_were_read,
+                          bounds_can_be_read)
     return verdict
 
 
@@ -996,7 +1001,8 @@ def _check_what_references_it(verdict, table_name, facts, target_version_num):
 
 
 def _check_the_partitions(verdict, entry, table_name, method, partitioning_columns,
-                          first_value, last_value, existing_target_names, bounds_were_read):
+                          first_value, last_value, existing_target_names, bounds_were_read,
+                          bounds_can_be_read=True):
     """
     The partitions the entry would really produce: how many, what they are called, and whether
     there would be any at all.
@@ -1029,6 +1035,19 @@ def _check_the_partitions(verdict, entry, table_name, method, partitioning_colum
         ## partitions out would only say it again in the words of the generator
         return
 
+    if not bounds_can_be_read:
+        ## a source with no instance behind it - the two DDL-only Db2 connectors. The calendar
+        ## of a date_range is worked out from the values the column really holds, and there is
+        ## nothing to ask. Blocking, because what it produces otherwise is a partitioned table
+        ## with no partitions under it, which refuses every row of the migration
+        verdict.issues.append(
+            f"target_partitioning for {table_name} generates its partitions from a date_range, "
+            f"which needs the smallest and the largest value of {partitioning_columns[0]} - and "
+            f"this source has no database to ask: its structure comes from DDL files and its "
+            f"data from CSV files. The table would be created partitioned with nothing under it "
+            f"and every row would be refused. Take the entry out and partition the table after "
+            f"the migration, or migrate from an instance")
+        return
     if not bounds_were_read:
         verdict.warnings.append(
             f"the smallest and the largest value of {table_name}.{partitioning_columns[0]} could "

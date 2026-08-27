@@ -16,6 +16,7 @@
 
 from credativ_pg_migrator.database_connector import DatabaseConnector, first_line
 from credativ_pg_migrator.connectors.db2_query_conversion import Db2QueryConversion
+from credativ_pg_migrator.connectors import db2_partitioning
 from credativ_pg_migrator.migrator_logging import MigratorLogger
 import ibm_db_dbi  ## install ibm_db package to use this connector
 import traceback
@@ -28,11 +29,12 @@ class IbmDb2LuwConnector(Db2QueryConversion, DatabaseConnector):
 
     ## What this connector does not read out of Db2 for LUW - see
     ## DatabaseConnector.OBJECT_KINDS_NOT_READ.
+    ## `table_partitioning` stood here until 2026-08-27 and is read now, out of SYSCAT - see
+    ## fetch_table_partitioning(). It is still answered as not read for a migration configured
+    ## with `system_catalog: SYSIBM`, whose views describe none of the three mechanisms: that
+    ## answer is object_kind_not_read() below, because it depends on the source and not on the
+    ## connector.
     OBJECT_KINDS_NOT_READ = {
-        'table_partitioning': (
-            'Db2 for LUW has table partitioning by range (SYSCAT.DATAPARTITIONS), database '
-            'partitioning across nodes (DPF) and multi-dimensional clustering, which all say '
-            'partition and are three different things. This connector reads none of them.'),
         'user_defined_types': ('Db2 has distinct types (CREATE DISTINCT TYPE), and also '
                                'structured, array, row and cursor types, all in SYSCAT.DATATYPES '
                                'with METATYPE telling them apart. This connector reads none of '
@@ -1802,6 +1804,504 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
             self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: get_top_n_tables: Error fetching top {top_n} tables by row count: {e}")
 
         return top_tables
+
+    ## ---------------------------------------------------------------- partitioning
+
+    ## §2.4 of development/PARTITIONING_STRATEGY.md puts the Db2 family third, and calls LUW
+    ## the case where three mechanisms all say "partition" and only one of them is one: table
+    ## partitioning by range, which maps; DPF, which spreads the rows over physical nodes and
+    ## has no counterpart at all; and MDC, which is a storage layout. Each gets a sentence of
+    ## its own, because a table can have all three at once.
+    ##
+    ## Everything here is SYSCAT. A migration configured with `system_catalog: SYSIBM` reads
+    ## the standard views, which do not describe any of the three - and it says so rather than
+    ## answering that the table is not partitioned.
+
+    DATE_RANGE_TYPES = db2_partitioning.DATE_RANGE_TYPES
+
+    def partitioning_is_readable(self):
+        """
+        Whether the catalogue this migration was pointed at describes partitioning at all.
+
+        SYSCAT does; SYSIBM is the standard-conforming set of views, which has no counterpart
+        for DATAPARTITIONS, for PARTITION_MODE or for a dimension index. P2-8: a source read
+        through it reports the scheme as NOT read, and never as one which is not there.
+        """
+        return self.config_parser.get_system_catalog() in ('SYSCAT', 'NONE')
+
+    PARTITIONING_NOT_IN_SYSIBM = (
+        'this migration reads the source through SYSIBM, the standard views, which describe '
+        'neither table partitioning (SYSCAT.DATAPARTITIONS), nor DPF '
+        '(SYSCAT.TABLES.PARTITION_MODE), nor multi-dimensional clustering. Set '
+        'source.system_catalog: SYSCAT to have the partitioning of this source read')
+
+    def object_kind_not_read(self, kind):
+        """
+        What this connector cannot read out of THIS source - which for partitioning depends on
+        the catalogue the migration was pointed at rather than on the connector.
+        """
+        if kind == 'table_partitioning' and not self.partitioning_is_readable():
+            return self.PARTITIONING_NOT_IN_SYSIBM
+        return super().object_kind_not_read(kind)
+
+    def fetch_partitioning_candidates(self, schema):
+        """
+        The tables of one schema worth asking about, in one query - the ones which have a data
+        partition, a distribution key or a dimension, so that a schema of three hundred
+        ordinary tables costs one round trip rather than three hundred.
+
+        A data partition of Db2 is not a table: it has no row in SYSCAT.TABLES of its own, no
+        row in the migration, and nothing asks about it.
+        """
+        if not self.partitioning_is_readable():
+            return set()
+        query = f"""
+            SELECT DISTINCT TABNAME FROM SYSCAT.DATAPARTITIONS
+            WHERE TABSCHEMA = upper('{schema}')
+            UNION
+            SELECT TABNAME FROM SYSCAT.TABLES
+            WHERE TABSCHEMA = upper('{schema}') AND TYPE = 'T'
+              AND coalesce(PARTITION_MODE, ' ') <> ' '
+            UNION
+            SELECT TABNAME FROM SYSCAT.INDEXES
+            WHERE TABSCHEMA = upper('{schema}') AND INDEXTYPE IN ('DIM', 'BLOK')
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            names = {row[0].strip() for row in cursor.fetchall() if row[0]}
+            cursor.close()
+            return names
+        except Exception as e:
+            self.config_parser.print_log_message(
+                'WARNING', f"ibm_db2_luw_connector: fetch_partitioning_candidates: the "
+                           f"partitioned tables of {schema} could not be listed ({e}) - every "
+                           f"table is asked instead.")
+            return None
+
+    def fetch_table_partitioning(self, settings):
+        """
+        The partitioning of one Db2 for LUW table, out of SYSCAT.
+
+        See the contract in DatabaseConnector.fetch_table_partitioning(). Beyond it this
+        connector answers `target_key_definition`, a `target_bound` per partition, `notes` and
+        `blockers`, because Db2 does not write a bound the way PostgreSQL writes one - its
+        upper end is INCLUSIVE by default and PostgreSQL's is never inclusive - and because two
+        of the three things Db2 calls partitioning have no counterpart at all.
+        """
+        source_schema_name = settings['source_schema_name']
+        source_table_name = settings['source_table_name']
+        if not self.partitioning_is_readable():
+            return {}
+
+        notes = []
+        blockers = []
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            partitions = self._data_partitions(cursor, source_schema_name, source_table_name)
+            columns = self._partitioning_expression(cursor, source_schema_name, source_table_name)
+            distribution = self._distribution(cursor, source_schema_name, source_table_name)
+            dimensions = self._clustering_dimensions(cursor, source_schema_name, source_table_name)
+            column_types = self._column_types(cursor, source_schema_name, source_table_name)
+            cursor.close()
+        except Exception as e:
+            self.config_parser.print_log_message(
+                'ERROR', f"ibm_db2_luw_connector: fetch_table_partitioning: the partitioning of "
+                         f"{source_schema_name}.{source_table_name} could not be read: {e}")
+            return {}
+
+        engine_specific = {}
+        if distribution.get('mode'):
+            engine_specific['distribution'] = distribution
+        if dimensions:
+            engine_specific['clustering_dimensions'] = dimensions
+        if partitions:
+            engine_specific['tablespaces'] = sorted(
+                {partition['tablespace'] for partition in partitions if partition.get('tablespace')})
+
+        notes.extend(self._what_db2_means_by_partition(
+            source_table_name, partitions, distribution, dimensions, engine_specific))
+
+        if not partitions:
+            ## DPF or MDC and no table partitioning: the table is not partitioned in the sense
+            ## PostgreSQL means, and saying it is would be the wrong answer to a different
+            ## question. The notes above are what there is to say about it, and the analysis
+            ## prints them for a table which is not partitioned as readily as for one which is.
+            return {'is_partitioned': False, 'is_partition': False, 'method': '', 'columns': [],
+                    'key_definition': '', 'level': 1, 'partitions': [], 'partition_count': 0,
+                    'engine_specific': engine_specific, 'notes': notes,
+                    'blockers': []} if notes else {}
+
+        target_key_definition = ''
+        try:
+            target_key_definition = db2_partitioning.key_definition(
+                'RANGE', columns, self.config_parser.convert_names_case)
+        except db2_partitioning.UntranslatableScheme as e:
+            blockers.append(
+                f"{source_table_name} is partitioned by range on the source and the same scheme "
+                f"cannot be built on PostgreSQL: {e}. Set source_partitioning: flatten for this "
+                f"table, or write a scheme of your own with target_partitioning")
+
+        if target_key_definition:
+            blockers.extend(self._translate_the_bounds(
+                source_table_name, columns, partitions, column_types, notes))
+
+        return {
+            'is_partitioned': True,
+            ## a data partition of Db2 is not a table of the schema, so nothing this connector
+            ## is asked about is ever one
+            'is_partition': False,
+            'parent_table': '',
+            'parent_schema': '',
+            'partition_bound': '',
+            'method': 'RANGE',
+            'columns': columns,
+            'key_definition': f"RANGE ({', '.join(columns)})" if columns else 'RANGE',
+            'target_key_definition': target_key_definition,
+            'level': 1,
+            ## Db2 for LUW has one level of table partitioning and no sub-partitions
+            'levels_below': [],
+            'partitions': [{
+                'name': partition['name'],
+                'bound': partition['bound_text'],
+                'target_bound': partition.get('target_bound', ''),
+                'is_default': False,
+                'is_partitioned': False,
+                'rows': partition.get('rows'),
+            } for partition in partitions],
+            'partition_count': len(partitions),
+            'engine_specific': engine_specific,
+            'notes': notes,
+            'blockers': blockers,
+        }
+
+    def _data_partitions(self, cursor, schema, table):
+        """
+        The data partitions of one table, in the order their ranges run in.
+
+        LOWVALUE and HIGHVALUE hold the literal as Db2 writes it, and LOWINCLUSIVE /
+        HIGHINCLUSIVE say whether the end itself is in the partition - which is the whole of the
+        difference between a Db2 bound and a PostgreSQL one. STATUS is the attach / detach
+        state; a partition which is not attached holds rows the table cannot see.
+        """
+        cursor.execute(f"""
+            SELECT DATAPARTITIONNAME, SEQNO, LOWVALUE, LOWINCLUSIVE, HIGHVALUE, HIGHINCLUSIVE,
+                   TBSPACEID, STATUS
+            FROM SYSCAT.DATAPARTITIONS
+            WHERE TABSCHEMA = upper('{schema}') AND TABNAME = '{table}'
+            ORDER BY SEQNO
+        """)
+        partitions = []
+        for row in cursor.fetchall():
+            low = (row[2] or '').strip()
+            high = (row[4] or '').strip()
+            low_inclusive = (row[3] or 'Y').strip().upper() != 'N'
+            high_inclusive = (row[5] or 'Y').strip().upper() != 'N'
+            partitions.append({
+                'name': (row[0] or '').strip(),
+                'low': low, 'low_inclusive': low_inclusive,
+                'high': high, 'high_inclusive': high_inclusive,
+                'status': (row[7] or '').strip(),
+                'tablespace': row[6],
+                ## SYSCAT.DATAPARTITIONS carries no row count; the estimate of the whole table
+                ## is what the analysis has, and a per-partition number is reported as unknown
+                ## rather than invented
+                'rows': None,
+                ## the bound as Db2 says it, for the report and the protocol - the one the
+                ## target is given is worked out from it and is not the same sentence
+                'bound_text': (f"STARTING FROM {low or 'MINVALUE'} "
+                               f"{'INCLUSIVE' if low_inclusive else 'EXCLUSIVE'} "
+                               f"ENDING AT {high or 'MAXVALUE'} "
+                               f"{'INCLUSIVE' if high_inclusive else 'EXCLUSIVE'}"),
+            })
+        return partitions
+
+    def _partitioning_expression(self, cursor, schema, table):
+        """
+        The columns the table is partitioned by, in key order.
+
+        SYSCAT.DATAPARTITIONEXPRESSION holds an EXPRESSION and not only a column name - Db2
+        allows a generated expression as the key - and an expression is answered as it stands,
+        so that a report shows what is really there rather than a column name which does not
+        exist.
+        """
+        cursor.execute(f"""
+            SELECT DATAPARTITIONEXPRESSION
+            FROM SYSCAT.DATAPARTITIONEXPRESSION
+            WHERE TABSCHEMA = upper('{schema}') AND TABNAME = '{table}'
+            ORDER BY DATAPARTITIONKEYSEQ
+        """)
+        return [(row[0] or '').strip().strip('"') for row in cursor.fetchall() if (row[0] or '').strip()]
+
+    def _distribution(self, cursor, schema, table):
+        """
+        DPF: whether the rows of the table are spread over the physical nodes of the instance,
+        and by which columns. `SYSCAT.COLUMNS.PARTKEYSEQ` numbers the distribution key.
+        """
+        cursor.execute(f"""
+            SELECT PARTITION_MODE FROM SYSCAT.TABLES
+            WHERE TABSCHEMA = upper('{schema}') AND TABNAME = '{table}'
+        """)
+        row = cursor.fetchone()
+        mode = (row[0] or '').strip().upper() if row and row[0] else ''
+        if not mode:
+            return {}
+        cursor.execute(f"""
+            SELECT COLNAME FROM SYSCAT.COLUMNS
+            WHERE TABSCHEMA = upper('{schema}') AND TABNAME = '{table}' AND PARTKEYSEQ > 0
+            ORDER BY PARTKEYSEQ
+        """)
+        return {'mode': mode, 'columns': [(row[0] or '').strip() for row in cursor.fetchall()]}
+
+    def _clustering_dimensions(self, cursor, schema, table):
+        """
+        MDC: the dimensions the rows of the table are clustered by. A dimension is a block index
+        - INDEXTYPE 'DIM' for one dimension, 'BLOK' for the composite one over all of them.
+        """
+        cursor.execute(f"""
+            SELECT i.INDNAME, c.COLNAME
+            FROM SYSCAT.INDEXES i
+            JOIN SYSCAT.INDEXCOLUSE c ON c.INDSCHEMA = i.INDSCHEMA AND c.INDNAME = i.INDNAME
+            WHERE i.TABSCHEMA = upper('{schema}') AND i.TABNAME = '{table}'
+              AND i.INDEXTYPE = 'DIM'
+            ORDER BY i.INDNAME, c.COLSEQ
+        """)
+        return sorted({(row[1] or '').strip() for row in cursor.fetchall() if row[1]})
+
+    def _column_types(self, cursor, schema, table):
+        """
+        The type of every column, which is what says whether an INCLUSIVE upper bound can be
+        turned into the exclusive one PostgreSQL needs.
+        """
+        cursor.execute(f"""
+            SELECT COLNAME, TYPENAME, "LENGTH", "SCALE"
+            FROM SYSCAT.COLUMNS
+            WHERE TABSCHEMA = upper('{schema}') AND TABNAME = '{table}'
+        """)
+        types = {}
+        for row in cursor.fetchall():
+            name = (row[0] or '').strip()
+            type_name = (row[1] or '').strip().upper()
+            if row[3] is not None and int(row[3]) > 0:
+                type_name = f"{type_name}({row[2]},{row[3]})"
+            types[name] = type_name
+        return types
+
+    def _what_db2_means_by_partition(self, table_name, partitions, distribution, dimensions,
+                                     engine_specific):
+        """
+        The three mechanisms which all say "partition", each with its own sentence - §4.2 of the
+        design. A table can have all three at once, which is why this is not one line.
+        """
+        notes = []
+        if distribution.get('mode'):
+            key = ', '.join(distribution.get('columns') or []) or 'a key the catalogue does not name'
+            spread = ('spread over the physical database partitions of the instance by a hash of '
+                      f"({key})" if distribution['mode'] == 'H' else
+                      'replicated to every database partition of the instance')
+            notes.append(
+                f"{table_name} is DATABASE partitioned on the source (DPF, PARTITION_MODE "
+                f"'{distribution['mode']}'): its rows are {spread}. That is not table "
+                f"partitioning and PostgreSQL has no counterpart for it at all - the target is "
+                f"one server holding all of the rows. Nothing about it is carried over, and "
+                f"nothing about the table needs changing for it")
+        if dimensions:
+            notes.append(
+                f"{table_name} is multi-dimensionally clustered on the source (MDC) by "
+                f"{', '.join(dimensions)}: a storage layout which decides which rows share a "
+                f"block, not a partitioning of the table. The nearest PostgreSQL things are "
+                f"CLUSTER and a BRIN index over the same columns, and neither of them is this - "
+                f"nothing of it is carried over")
+        detached = [partition['name'] for partition in partitions
+                    if partition.get('status') and partition['status'].strip() not in ('', 'A')]
+        if detached:
+            notes.append(
+                f"the data partition(s) {', '.join(detached)} of {table_name} are not in the "
+                f"attached state on the source (STATUS is set), so whether their rows are part "
+                f"of the table depends on where Db2 is in an ATTACH or DETACH. The migration "
+                f"reads the table and takes the rows the source shows it")
+        tablespaces = engine_specific.get('tablespaces') or []
+        if len(tablespaces) > 1:
+            notes.append(
+                f"the data partitions of {table_name} are spread over {len(tablespaces)} table "
+                f"spaces. The placement is NOT carried over: every partition of the target is "
+                f"created in the default tablespace")
+        return notes
+
+    def _translate_the_bounds(self, table_name, columns, partitions, column_types, notes):
+        """
+        The bound of every partition, written the way PostgreSQL writes it, set on the partition
+        itself. Returns the blockers - the bounds which have no counterpart.
+
+        The one which needs converting rather than copying is the upper end: Db2's default is
+        INCLUSIVE and PostgreSQL's `TO` is always exclusive, so a partition ENDING AT
+        '2024-12-31' becomes one which stops before '2025-01-01' - and where the type has no
+        next value it is refused instead of moved.
+        """
+        blockers = []
+        type_name = column_types.get(columns[0], '') if columns else ''
+        inclusive_ends = 0
+        for partition in partitions:
+            if len(columns) > 1:
+                blockers.append(
+                    f"{table_name} is partitioned by ({', '.join(columns)}) on the source. This "
+                    f"migrator carries over a Db2 range scheme over ONE column: a bound of more "
+                    f"than one has to be converted end by end, and the type of each of them "
+                    f"decides whether it can be. Write the scheme with target_partitioning, or "
+                    f"set source_partitioning: flatten for this table")
+                break
+            try:
+                partition['target_bound'] = db2_partitioning.range_bound(
+                    partition['low'], partition['low_inclusive'],
+                    partition['high'], partition['high_inclusive'], type_name)
+                if partition['high_inclusive'] and not db2_partitioning.is_unbounded(partition['high']):
+                    inclusive_ends += 1
+            except db2_partitioning.UntranslatableScheme as e:
+                blockers.append(
+                    f"the data partition {partition['name']} of {table_name} cannot be given to "
+                    f"PostgreSQL as it stands: {e}")
+        if inclusive_ends and not blockers:
+            notes.append(
+                f"{inclusive_ends} partition(s) of {table_name} end AT a value INCLUSIVE, which "
+                f"is Db2's default and which PostgreSQL cannot say - its upper bound is always "
+                f"exclusive. Each of them is carried over as the exclusive bound which holds the "
+                f"same rows: ENDING AT '2024-12-31' INCLUSIVE becomes TO ('2025-01-01'). The "
+                f"partitions hold what they held")
+        if partitions and not blockers:
+            last = partitions[-1]
+            if not db2_partitioning.is_unbounded(last['high']):
+                notes.append(
+                    f"the partitions of {table_name} end at {last['name']}, whose bound is "
+                    f"{last.get('target_bound', '')}. The source has no MAXVALUE partition and "
+                    f"the target is given none either, so a row past that bound is refused - "
+                    f"which is what the source does today as well. Write a target_partitioning "
+                    f"entry with a future: window if the migration is the moment to change that")
+        return blockers
+
+    def fetch_partitioning_facts(self, settings):
+        """
+        Everything about one Db2 for LUW table which decides whether it CAN be partitioned -
+        read before anything is created, which is the moment the answer is still free.
+
+        See DatabaseConnector.fetch_partitioning_facts() for the shape. Every number comes from
+        SYSCAT and from the statistics RUNSTATS has already gathered: nothing here reads a row
+        of the table, and a column nobody has run RUNSTATS over has a null fraction which is
+        *not known* rather than zero.
+        """
+        source_schema_name = settings['source_schema_name']
+        source_table_name = settings['source_table_name']
+        if not self.partitioning_is_readable():
+            return None
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            row_estimate = self._row_estimate(cursor, source_schema_name, source_table_name)
+            columns = self._column_facts(cursor, source_schema_name, source_table_name, row_estimate)
+            unique_keys = self._unique_keys(cursor, source_schema_name, source_table_name)
+            referenced_by = self._referencing_foreign_keys(cursor, source_schema_name, source_table_name)
+            cursor.close()
+        except Exception as e:
+            self.config_parser.print_log_message(
+                'WARNING', f"ibm_db2_luw_connector: fetch_partitioning_facts: the facts of "
+                           f"{source_schema_name}.{source_table_name} could not be read ({e}) - "
+                           f"the checks which need them are reported as NOT made rather than as "
+                           f"passed.")
+            return None
+
+        return {
+            'columns': columns,
+            'unique_keys': unique_keys,
+            ## Db2 has no exclusion constraint and no table inheritance - absences of the
+            ## engine, which are not the same as things this connector did not read
+            'exclusion_constraints': [],
+            'referenced_by': referenced_by,
+            'inherits_from_a_plain_table': False,
+            'is_a_plain_inheritance_parent': False,
+            'row_estimate': row_estimate,
+            'date_range_types': self.DATE_RANGE_TYPES,
+        }
+
+    def _row_estimate(self, cursor, schema, table):
+        """SYSCAT.TABLES.CARD - what RUNSTATS gathered, and -1 where it has not run."""
+        cursor.execute(f"""
+            SELECT CARD FROM SYSCAT.TABLES
+            WHERE TABSCHEMA = upper('{schema}') AND TABNAME = '{table}'
+        """)
+        row = cursor.fetchone()
+        if not row or row[0] is None or int(row[0]) < 0:
+            return None
+        return int(row[0])
+
+    def _column_facts(self, cursor, schema, table, row_estimate):
+        """
+        Every column and what PostgreSQL will be able to do with it.
+
+        NUMNULLS is RUNSTATS's and is -1 where nobody has gathered it; GENERATED marks a
+        generated column, which PostgreSQL refuses in a partition key.
+        """
+        cursor.execute(f"""
+            SELECT COLNAME, TYPENAME, "LENGTH", "SCALE", "NULLS", GENERATED, NUMNULLS
+            FROM SYSCAT.COLUMNS
+            WHERE TABSCHEMA = upper('{schema}') AND TABNAME = '{table}'
+            ORDER BY COLNO
+        """)
+        columns = {}
+        for row in cursor.fetchall():
+            name = (row[0] or '').strip()
+            type_name = (row[1] or '').strip().upper()
+            if row[3] is not None and int(row[3]) > 0:
+                type_name = f"{type_name}({row[2]},{row[3]})"
+            num_nulls = row[6]
+            can_be_a_key = type_name not in db2_partitioning.TYPES_WITHOUT_AN_OPERATOR_CLASS
+            columns[name] = {
+                'type_name': type_name,
+                'not_null': (row[4] or '').strip().upper() == 'N',
+                ## 'A' is ALWAYS and 'D' is BY DEFAULT - both are generated
+                'is_generated': (row[5] or '').strip().upper() in ('A', 'D'),
+                'has_btree_opclass': can_be_a_key,
+                'has_hash_opclass': can_be_a_key,
+                ## -1 is "RUNSTATS has not been run" and is answered as not known, never as 0
+                'null_fraction': (float(num_nulls) / row_estimate
+                                  if num_nulls is not None and int(num_nulls) >= 0 and row_estimate
+                                  else None),
+            }
+        return columns
+
+    def _unique_keys(self, cursor, schema, table):
+        """
+        The primary key, every unique constraint and every unique index which is not one - §3.1
+        applies to all three alike.
+
+        SYSCAT.INDEXES answers all of them: UNIQUERULE is 'P' for the index behind a primary
+        key, 'U' for a unique one and 'D' for one which allows duplicates.
+        """
+        cursor.execute(f"""
+            SELECT i.INDNAME, i.UNIQUERULE, c.COLNAME
+            FROM SYSCAT.INDEXES i
+            JOIN SYSCAT.INDEXCOLUSE c ON c.INDSCHEMA = i.INDSCHEMA AND c.INDNAME = i.INDNAME
+            WHERE i.TABSCHEMA = upper('{schema}') AND i.TABNAME = '{table}'
+              AND i.UNIQUERULE IN ('P', 'U')
+            ORDER BY i.INDNAME, c.COLSEQ
+        """)
+        keys = {}
+        for row in cursor.fetchall():
+            name = (row[0] or '').strip()
+            key = keys.setdefault(name, {'name': name, 'columns': [],
+                                         'is_primary': (row[1] or '').strip().upper() == 'P'})
+            key['columns'].append((row[2] or '').strip())
+        return list(keys.values())
+
+    def _referencing_foreign_keys(self, cursor, schema, table):
+        """§3.5: a foreign key pointing AT a partitioned table needs PostgreSQL 12."""
+        cursor.execute(f"""
+            SELECT CONSTNAME, TABNAME FROM SYSCAT.REFERENCES
+            WHERE REFTABSCHEMA = upper('{schema}') AND REFTABNAME = '{table}'
+            ORDER BY CONSTNAME
+        """)
+        return [{'name': (row[0] or '').strip(), 'table': (row[1] or '').strip()}
+                for row in cursor.fetchall()]
 
     def target_table_exists(self, target_schema_name, target_table_name):
         exists = False

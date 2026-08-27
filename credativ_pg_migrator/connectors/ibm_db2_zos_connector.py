@@ -16,6 +16,7 @@
 
 from credativ_pg_migrator.database_connector import DatabaseConnector, first_line
 from credativ_pg_migrator.connectors.db2_query_conversion import Db2QueryConversion
+from credativ_pg_migrator.connectors import db2_partitioning
 from credativ_pg_migrator.migrator_logging import MigratorLogger
 from credativ_pg_migrator.migrator_tables import MigratorTables
 import psycopg2
@@ -38,11 +39,9 @@ class IbmDb2ZosConnector(Db2QueryConversion, DatabaseConnector):
     ## What this connector does not read out of Db2 for z/OS - see
     ## DatabaseConnector.OBJECT_KINDS_NOT_READ.
     OBJECT_KINDS_NOT_READ = {
-        'table_partitioning': (
-            'Db2 for z/OS has partitioned table spaces, partition-by-range and partition-by-growth. '
-            'The DDL parser of this connector already matches the PARTITION BY clause out of the '
-            'CREATE TABLE text, and it is written into the table comment instead of being reported '
-            'as a scheme.'),
+        ## `table_partitioning` stood here until 2026-08-27. The DDL parser had always
+        ## matched the PARTITION BY clause out of the CREATE TABLE text and written it into the
+        ## table COMMENT; it is read as a scheme now - see fetch_table_partitioning().
         'user_defined_types': ('Db2 for z/OS has distinct types (CREATE DISTINCT TYPE), kept in '
                                'SYSIBM.SYSDATATYPES. This connector does not read them.'),
     }
@@ -104,7 +103,7 @@ class IbmDb2ZosConnector(Db2QueryConversion, DatabaseConnector):
     def fetch_all_tables(self, schema_name: str) -> dict:
         tables = {}
         if self.connectivity == self.config_parser.const_connectivity_ddl():
-            query = f"""SELECT source_schema_name, source_table_name, source_partition_columns, source_partition_ranges
+            query = f"""SELECT source_schema_name, source_table_name, source_table_comment
                         FROM "{self.protocol_schema}"."ddl_tables"
                         WHERE upper(trim(source_schema_name)) = upper(trim('{schema_name}'))
                         ORDER BY id"""
@@ -119,13 +118,118 @@ class IbmDb2ZosConnector(Db2QueryConversion, DatabaseConnector):
                         'id': i,
                         'schema_name': row[0],
                         'table_name': row[1],
-                        'comment': f"Partition: {row[2]}, Ranges: {row[3]}" if row[2] else None
+                        ## the comment of the table, which is what a comment is. The
+                        ## partitioning of the source used to be written here as free text -
+                        ## §2.4 of development/PARTITIONING_STRATEGY.md - so a partitioned table
+                        ## reached the target with a COMMENT ON saying how Db2 partitioned it,
+                        ## and the comment the DDL really carried reached nothing at all. The
+                        ## scheme is read as a scheme now, by fetch_table_partitioning().
+                        'comment': row[2]
                     }
                 cursor.close()
             except Exception as e:
                 self.config_parser.print_log_message('ERROR', f"ibm_db2_zos_connector: fetch_all_tables: ({schema_name}): {e}")
                 raise
         return tables
+
+    ## ---------------------------------------------------------------- partitioning
+
+    ## §2.4 of development/PARTITIONING_STRATEGY.md calls this connector's share of the work
+    ## "re-pointing what is already parsed": the DDL parser has always matched the PARTITION BY
+    ## clause out of the CREATE TABLE text, and what became of it was the table's COMMENT. It is
+    ## read as a scheme now. There is no catalogue to ask - the extract IS the catalogue - so
+    ## everything here comes out of the ddl_tables protocol table, and the translation into
+    ## PostgreSQL's spelling is `db2_partitioning.py`, which the three Db2 connectors share.
+
+    DATE_RANGE_TYPES = db2_partitioning.DATE_RANGE_TYPES
+
+    def fetch_partitioning_candidates(self, schema):
+        """
+        The tables the DDL partitions, in one query over the parsed extract.
+        """
+        query = f"""
+            SELECT source_table_name FROM "{self.protocol_schema}"."ddl_tables"
+            WHERE upper(trim(source_schema_name)) = upper(trim(%s))
+              AND coalesce(source_partition_method, '') <> ''
+        """
+        try:
+            cursor = self.migrator_tables.protocol_connection.connection.cursor()
+            cursor.execute(query, (schema,))
+            names = {row[0] for row in cursor.fetchall() if row[0]}
+            cursor.close()
+            return names
+        except Exception as e:
+            self.config_parser.print_log_message(
+                'WARNING', f"ibm_db2_zos_connector: fetch_partitioning_candidates: the partitioned "
+                           f"tables of {schema} could not be listed ({e}) - every table is asked "
+                           f"instead.")
+            return None
+
+    def fetch_table_partitioning(self, settings):
+        """
+        The partitioning of one table, out of the PARTITION BY clause its DDL carried.
+
+        See the contract in DatabaseConnector.fetch_table_partitioning(). The three fields the
+        parser stored - the method, the columns and what the DDL wrote about the partitions -
+        become the same structure the live Db2 for LUW connector answers, so that the plan, the
+        report, the protocol and the statements are one piece of code for the whole family.
+        """
+        source_schema_name = settings['source_schema_name']
+        source_table_name = settings['source_table_name']
+        query = f"""
+            SELECT source_partition_method, source_partition_columns, source_partition_ranges
+            FROM "{self.protocol_schema}"."ddl_tables"
+            WHERE upper(trim(source_schema_name)) = upper(trim(%s))
+              AND source_table_name = %s
+        """
+        try:
+            cursor = self.migrator_tables.protocol_connection.connection.cursor()
+            cursor.execute(query, (source_schema_name, source_table_name))
+            row = cursor.fetchone()
+            if row is None or not (row[0] or '').strip():
+                cursor.close()
+                return {}
+            cursor.execute(f"""
+                SELECT source_column_name, source_data_type
+                FROM "{self.protocol_schema}"."ddl_columns"
+                WHERE upper(trim(source_schema_name)) = upper(trim(%s))
+                  AND source_table_name = %s
+            """, (source_schema_name, source_table_name))
+            ## the type of the partitioning column is what says whether an INCLUSIVE upper bound
+            ## of Db2 can be written as the exclusive one PostgreSQL needs
+            column_types = {column: data_type for column, data_type in cursor.fetchall()}
+            cursor.close()
+        except Exception as e:
+            self.config_parser.print_log_message(
+                'ERROR', f"ibm_db2_zos_connector: fetch_table_partitioning: the partitioning of "
+                         f"{source_schema_name}.{source_table_name} could not be read: {e}")
+            return {}
+
+        return db2_partitioning.scheme_from_ddl(
+            source_table_name, row[0],
+            [column.strip() for column in (row[1] or '').split(',') if column.strip()],
+            row[2] or '', column_types, self.config_parser.convert_names_case)
+
+    ## There is no source instance to ask: the structure of this migration comes out of `.sql`
+    ## extracts and its rows out of CSV files. See DatabaseConnector.CAN_PROBE_COLUMN_VALUES.
+    CAN_PROBE_COLUMN_VALUES = False
+
+    def probe_column_bounds(self, settings):
+        """
+        Refused rather than attempted - this connector has no source database to ask.
+
+        The base implementation would send a SELECT down a connection which does not exist. A
+        `target_partitioning` entry which generates a range of partitions from a `date_range`
+        needs these two values, and the pre-migration analysis refuses such an entry against
+        this source before anything is created.
+        """
+        raise ValueError(
+            f"the smallest and the largest value of "
+            f"{settings.get('source_table_name')}.{settings.get('column_name')} cannot be read: "
+            f"this migration reads its structure from DDL files and its data from CSV files, "
+            f"and has no source database to ask. A target_partitioning entry which generates "
+            f"its partitions from a date_range cannot be carried out against this source - "
+            f"write the partitions out, or partition the table after the migration")
 
     def fetch_table_columns(self, settings) -> dict:
         self.config_parser.print_log_message('DEBUG', "ibm_db2_zos_connector: fetch_table_columns: fetch_table_columns() called.")
@@ -604,19 +708,23 @@ class IbmDb2ZosConnector(Db2QueryConversion, DatabaseConnector):
 
                 # Extract Partitioning parameters from the trailing text
                 trailing_str = clean_stmt[end_idx+1:]
-                partition_col = None
-                partition_ranges = None
-
-                match_part = re.search(r"PARTITION\s+BY\s*\(\s*([^)]+)\s*\)\s*\(([\s\S]*?)\)\s*(?:IN|;|$)", trailing_str, re.IGNORECASE)
-                if match_part:
-                    partition_col = match_part.group(1).replace(" ASC", "").replace(" DESC", "").strip()
-                    partition_ranges = match_part.group(2).strip()
+                ## The PARTITION BY clause, read by the module the three Db2 connectors share.
+                ## What stood here matched only the older `PARTITION BY (col)` spelling - it did
+                ## not know the word RANGE, the word HASH or partition-by-growth - and its
+                ## bracket for the partition list stopped at the first closing one, so
+                ## `PARTITION 1 ENDING AT (199), PARTITION 2 ENDING AT (299)` came back as one
+                ## partition. The clause is a scheme now and not a string for the table comment.
+                partition_clause = db2_partitioning.parse_partition_clause(trailing_str)
+                partition_method = partition_clause['method'] or None
+                partition_col = ', '.join(partition_clause['columns']) or None
+                partition_ranges = partition_clause['ranges'] or None
 
                 # Register Table
                 self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: parse_ddl_files: Found table: {match_table.group(1)}")
                 migrator_tables.insert_ddl_tables({
                     'source_schema_name': schema_name,
                     'source_table_name': table_name,
+                    'source_partition_method': partition_method,
                     'source_partition_columns': partition_col,
                     'source_partition_ranges': partition_ranges,
                     'source_table_sql': stmt,

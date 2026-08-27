@@ -6605,6 +6605,7 @@ class MigratorTables:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 source_schema_name VARCHAR,
                 source_table_name VARCHAR,
+                source_partition_method VARCHAR,
                 source_partition_columns VARCHAR,
                 source_partition_ranges VARCHAR,
                 source_table_sql TEXT,
@@ -6758,11 +6759,11 @@ class MigratorTables:
         func_run_id = uuid.uuid4()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."ddl_tables"
-            (source_schema_name, source_table_name, source_partition_columns, source_partition_ranges, source_table_sql, source_table_comment)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            (source_schema_name, source_table_name, source_partition_method, source_partition_columns, source_partition_ranges, source_table_sql, source_table_comment)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         """
-        params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_partition_columns'), settings.get('source_partition_ranges'), settings.get('source_table_sql'), settings.get('source_table_comment'))
+        params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_partition_method'), settings.get('source_partition_columns'), settings.get('source_partition_ranges'), settings.get('source_table_sql'), settings.get('source_table_comment'))
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_ddl_tables: ({func_run_id}): inserting: {params}")
         try:
             cursor = self.protocol_connection.connection.cursor()

@@ -741,8 +741,9 @@ def build_comments_catalog(config_parser):
         'columns': {
             'source_schema_name': 'Schema of the table, as the parsed DDL spells it. The ddl_* tables are looked up by exactly this spelling.',
             'source_table_name': 'Name of the table, as the parsed DDL spells it.',
+            'source_partition_method': 'How the DDL partitions the table - RANGE, HASH, or SIZE for the partition-by-growth of Db2 for z/OS, which has no key at all. Empty for a table the DDL does not partition.',
             'source_partition_columns': 'The columns the table is partitioned by, when its DDL partitions it.',
-            'source_partition_ranges': 'The bounds of the partitions stated in the DDL.',
+            'source_partition_ranges': 'What the DDL wrote about the partitions themselves: the partition list for a RANGE scheme, the INTO n PARTITIONS for a HASH one. What it means is read together with the method beside it.',
             'source_table_sql': 'The CREATE TABLE statement as it stands in the DDL file.',
             'source_table_comment': 'The comment which belongs to the table - the COMMENT ON of the DDL, or the comment written above the statement.',
         },

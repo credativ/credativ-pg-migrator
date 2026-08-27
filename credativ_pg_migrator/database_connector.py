@@ -1797,6 +1797,15 @@ class DatabaseConnector(ABC):
         opening, closing = self.IDENTIFIER_QUOTES
         return f"{opening}{str(name).replace(closing, closing + closing)}{closing}"
 
+    ## Whether this source can be asked for the values a column really holds. Every connector
+    ## with a connection can; the two DDL-only ones - Db2 for z/OS and Db2 for i - cannot,
+    ## because there is no source instance at all: the structure comes out of `.sql` extracts
+    ## and the rows out of CSV files. A `target_partitioning` entry which generates its
+    ## partitions from a `date_range` needs the smallest and the largest value of the column,
+    ## and against those two sources it is refused before anything is created rather than
+    ## failing when the partitions are worked out.
+    CAN_PROBE_COLUMN_VALUES = True
+
     def probe_column_bounds(self, settings):
         """
         The smallest and the largest value of one column of the source - what a range of

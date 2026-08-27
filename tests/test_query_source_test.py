@@ -498,6 +498,8 @@ SOURCE_TEST_WITHOUT_MECHANISM = {
                            'written the way PostgreSQL writes it. It has no driver in it at all.',
     'informix_partitioning.py': 'not a connector - the fragmentation of Informix, and the small '
                                 'part of it which is a partitioning. It has no driver in it.',
+    'mysql_partitioning.py': 'not a connector - the partitioning of MySQL and MariaDB, which the '
+                             'two share the way they share mysql_query_conversion.py.',
     'match_schemas.py': 'not a connector - it compares two schemas.',
     'tsql_parser.py': 'not a connector - the parser the Transact-SQL family shares.',
 }

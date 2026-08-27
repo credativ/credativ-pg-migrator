@@ -16,6 +16,7 @@
 
 from credativ_pg_migrator.database_connector import DatabaseConnector
 from credativ_pg_migrator.connectors.mysql_query_conversion import MySqlQueryConversion
+from credativ_pg_migrator.connectors.mysql_partitioning import MySqlPartitioning
 from credativ_pg_migrator.migrator_logging import MigratorLogger
 from credativ_pg_migrator.jvm_helper import detach_thread_from_jvm
 from credativ_pg_migrator import collations
@@ -31,21 +32,20 @@ import sqlglot
 import jaydebeapi
 import pyodbc
 
-class MariaDBConnector(MySqlQueryConversion, DatabaseConnector):
+class MariaDBConnector(MySqlQueryConversion, MySqlPartitioning, DatabaseConnector):
 
     ## MariaDB has neither kind of object - see DatabaseConnector.OBJECT_KINDS_ABSENT.
     OBJECT_KINDS_ABSENT = {
         'user_defined_types': 'MariaDB has no CREATE TYPE: a column takes a built-in type or an ENUM/SET declared on the column itself.',
         'domains': 'MariaDB has no CREATE DOMAIN. A CHECK constraint on the column is the nearest thing it has, and that is migrated with the table it stands on.',
     }
-    ## What this connector does not read out of its source / what the source does
-    ## not have - see DatabaseConnector.OBJECT_KINDS_NOT_READ.
-    OBJECT_KINDS_NOT_READ = {
-        'table_partitioning': (
-            'MariaDB partitions by RANGE, LIST, HASH and KEY, with subpartitions of the first two, '
-            'and keeps the whole scheme in information_schema.PARTITIONS. This connector does not '
-            'read it.'),
-    }
+    ## `table_partitioning` stood here until 2026-08-27 and is read now, out of
+    ## information_schema.PARTITIONS - see MySqlPartitioning, which both connectors of this
+    ## dialect share.
+    OBJECT_KINDS_NOT_READ = {}
+
+    ## What the shared partitioning writes in front of its own messages.
+    PARTITIONING_LOG_NAME = 'mariadb_connector'
 
     ## MariaDB delimits an identifier with a backtick - a double quote there is a string
     ## literal unless ANSI_QUOTES is set, so min("col") would answer the constant.

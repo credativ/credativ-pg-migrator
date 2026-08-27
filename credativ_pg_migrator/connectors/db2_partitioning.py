@@ -52,7 +52,6 @@ than one line saying the table is partitioned.
 it filled up. There is nothing to write into a `PARTITION BY` clause and it is refused.
 """
 
-import datetime
 import re
 
 from credativ_pg_migrator import partitioning
@@ -163,22 +162,21 @@ def successor(value, type_name):
     """
     plain = base_type_of(type_name)
     text = unquote(value)
+    ## the arithmetic itself is `partitioning.next_discrete_value()` - Sybase ASE writes
+    ## `VALUES <= (x)` and means the same thing Db2 means by INCLUSIVE, so the two share it and
+    ## what differs is only which type names of each engine count as a date or a whole number
+    kind = ''
     if plain in DATE_TYPES:
-        literal = text.strip("'")
+        kind = partitioning.DISCRETE_DATE
+    elif plain in INTEGER_TYPES or (plain in DECIMAL_TYPES and scale_of(type_name) == 0):
+        kind = partitioning.DISCRETE_INTEGER
+    if kind:
         try:
-            day = datetime.date.fromisoformat(literal)
+            return partitioning.next_discrete_value(text, kind)
         except ValueError:
             raise UntranslatableScheme(
-                f"the inclusive bound {text} is a DATE this migrator cannot read, so the "
-                f"exclusive bound PostgreSQL needs - the day after it - cannot be worked out")
-        return "'" + (day + datetime.timedelta(days=1)).isoformat() + "'"
-    if plain in INTEGER_TYPES or (plain in DECIMAL_TYPES and scale_of(type_name) == 0):
-        try:
-            return str(int(text.strip("'")) + 1)
-        except ValueError:
-            raise UntranslatableScheme(
-                f"the inclusive bound {text} is not a whole number, so the exclusive bound "
-                f"PostgreSQL needs cannot be worked out")
+                f"the inclusive bound {text} is not a {plain} this migrator can read, so the "
+                f"exclusive bound PostgreSQL needs - the value after it - cannot be worked out")
     raise UntranslatableScheme(
         f"the partition ends AT {text} INCLUSIVE, and PostgreSQL's upper bound is always "
         f"exclusive. Converting it needs the next value of {type_name or 'the column type'}, "

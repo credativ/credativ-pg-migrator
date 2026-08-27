@@ -27,6 +27,7 @@ import sys
 from tabulate import tabulate
 import sqlglot
 from credativ_pg_migrator.connectors.tsql_parser import TsqlParser
+from credativ_pg_migrator.connectors import sybase_partitioning
 from credativ_pg_migrator.query_conversion import outer_joins as query_outer_joins
 from credativ_pg_migrator.query_conversion import money_literals as query_money_literals
 from credativ_pg_migrator.query_conversion import object_references as query_object_references
@@ -197,12 +198,11 @@ class CustomTSQL(TSQL):
 class SybaseASEConnector(DatabaseConnector):
     ## What this connector does not read out of its source / what the source does
     ## not have - see DatabaseConnector.OBJECT_KINDS_NOT_READ.
-    OBJECT_KINDS_NOT_READ = {
-        'table_partitioning': (
-            'Sybase ASE has semantic partitioning since ASE 15 - RANGE, HASH, LIST and ROUND ROBIN '
-            'over segments, kept in syspartitions and syspartitionkeys. This connector does not '
-            'read it.'),
-    }
+    ## `table_partitioning` stood here until 2026-08-27 and is read now, out of syspartitions
+    ## and syspartitionkeys - see fetch_table_partitioning(). What it can and cannot get out of
+    ## a given server it says per table: §2.4 of development/PARTITIONING_STRATEGY.md records
+    ## that these catalogue names were never verified against a live ASE.
+    OBJECT_KINDS_NOT_READ = {}
 
     ## Sybase ASE delimits an identifier with square brackets, which are accepted whatever
     ## quoted_identifier is set to.
@@ -5625,6 +5625,463 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_function_name}"();
     def get_top_fk_dependencies(self, settings):
         top_fk_dependencies = {}
         return top_fk_dependencies
+
+    ## ---------------------------------------------------------------- partitioning
+
+    ## §2.4 of development/PARTITIONING_STRATEGY.md puts sybase_ase in the last group and says two
+    ## things about it which pull in opposite directions: the engagement behind this repository's
+    ## query conversion work is a Sybase ASE one, so it is wanted - and "catalogue names not
+    ## verified against a live server", so what reads it is written from documentation.
+    ##
+    ## That shapes what follows. The reads are in two groups. What §2.4 names - syspartitions and
+    ## syspartitionkeys - is read as one query each, and a failure of either is an error. The
+    ## CONDITION of a partition, which is what a RANGE or a LIST scheme would be built from, has
+    ## no place this migrator can point at with confidence: it is tried, and where it cannot be
+    ## had the scheme is reported in full and refused for BUILDING rather than guessed at. §0.9
+    ## says which of these a live ASE still has to confirm.
+
+    DATE_RANGE_TYPES = sybase_partitioning.DATE_RANGE_TYPES
+
+    ## Data partitions are the ones of the table itself: indid 0 is a heap and indid 1 the
+    ## clustered index, and everything above that is a partition of a secondary index.
+    DATA_PARTITION_INDIDS = '(0, 1)'
+
+    ## Where the condition of a partition might be had, in the order they are tried. Every one of
+    ## these is written from the documentation of ASE and NOT verified against a live server; the
+    ## first which the server accepts is used, and when none is accepted the run says so and
+    ## builds nothing from what it did not get.
+    PARTITION_CONDITION_SOURCES = (
+        ## the column syspartitions is documented to carry the condition in
+        'SELECT p.partitionid, p.condition FROM syspartitions p '
+        'WHERE p.id = {table_id} AND p.indid IN {indids} ORDER BY p.partitionid',
+        ## ASE renders the same thing through its own reporting procedure, whose result set is
+        ## read by the NAMES of its columns rather than by their order - which is what makes it
+        ## worth trying second rather than a second guess at a column name
+        'EXEC sp_helpartition {table_name}',
+    )
+
+    def fetch_partitioning_candidates(self, schema):
+        """
+        The tables of one schema which have more than one data partition, in one query - so that
+        a schema of three hundred ordinary tables costs one round trip rather than three hundred.
+
+        A partition of an ASE table is not a table: it has no row in sysobjects of its own, no
+        row in the migration, and nothing asks about it. An unpartitioned table has exactly one
+        data partition, which is why the count and not the presence is what is tested.
+        """
+        query = f"""
+            SELECT o.name
+            FROM sysobjects o
+            JOIN syspartitions p ON p.id = o.id AND p.indid IN {self.DATA_PARTITION_INDIDS}
+            WHERE user_name(o.uid) = '{schema}' AND o.type = 'U'
+            GROUP BY o.name
+            HAVING count(*) > 1
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            names = {row[0].strip() for row in cursor.fetchall() if row[0]}
+            cursor.close()
+            self.disconnect()
+            return names
+        except Exception as e:
+            self.config_parser.print_log_message(
+                'WARNING', f"sybase_ase_connector: fetch_partitioning_candidates: the partitioned "
+                           f"tables of {schema} could not be listed ({e}) - every table is asked "
+                           f"instead.")
+            return None
+
+    def fetch_table_partitioning(self, settings):
+        """
+        The semantic partitioning of one ASE table, out of syspartitions and syspartitionkeys.
+
+        See the contract in DatabaseConnector.fetch_table_partitioning(). Beyond it this
+        connector answers `target_key_definition`, a `target_bound` per partition, `notes` and
+        `blockers` - and one thing none of the other connectors of this family needs: a scheme
+        whose partition conditions could not be read at all is reported in full and refused for
+        building, because RANGE, LIST and HASH are built from three different things and a HASH
+        built out of a RANGE nobody could read would put every row in the wrong partition without
+        a single step of the run failing.
+        """
+        source_schema_name = settings['source_schema_name']
+        source_table_name = settings['source_table_name']
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            table_id = self._table_id(cursor, source_schema_name, source_table_name)
+            if table_id is None:
+                cursor.close()
+                self.disconnect()
+                return {}
+            partitions = self._data_partitions(cursor, table_id)
+            if len(partitions) < 2:
+                ## one data partition is what every unpartitioned ASE table has
+                cursor.close()
+                self.disconnect()
+                return {}
+            columns = self._partition_key_columns(cursor, table_id)
+            conditions_were_read = self._read_the_conditions(
+                cursor, table_id, source_table_name, partitions)
+            column_types = self._column_types(cursor, table_id)
+            cursor.close()
+            self.disconnect()
+        except Exception as e:
+            self.config_parser.print_log_message(
+                'ERROR', f"sybase_ase_connector: fetch_table_partitioning: the partitioning of "
+                         f"{source_schema_name}.{source_table_name} could not be read: {e}")
+            return {}
+
+        method = sybase_partitioning.method_of(
+            [partition['condition'] for partition in partitions], bool(columns),
+            conditions_were_read)
+        segments = sorted({partition['segment'] for partition in partitions
+                           if partition.get('segment')})
+        notes = sybase_partitioning.what_the_partitioning_is(
+            source_table_name, method, partitions, segments, conditions_were_read)
+        target_key_definition, more_notes, blockers = sybase_partitioning.build_scheme(
+            source_table_name, method, columns, partitions, column_types,
+            self.config_parser.convert_names_case, conditions_were_read)
+        notes.extend(more_notes)
+
+        return {
+            'is_partitioned': True,
+            ## a partition of an ASE table is not a table of the schema, so nothing this
+            ## connector is asked about is ever one
+            'is_partition': False,
+            'parent_table': '',
+            'parent_schema': '',
+            'partition_bound': '',
+            'method': method or 'UNKNOWN',
+            'columns': columns if target_key_definition else [],
+            'key_definition': (f"{method or 'partitioning'} ({', '.join(columns)})" if columns
+                               else (method or 'partitioning')),
+            'target_key_definition': target_key_definition,
+            'level': 1,
+            ## ASE has one level of semantic partitioning and no sub-partitions
+            'levels_below': [],
+            'partitions': [{
+                'name': partition['name'],
+                'bound': partition['condition'] or (method or 'no condition read'),
+                'target_bound': partition.get('target_bound', ''),
+                'is_default': False,
+                'is_partitioned': False,
+                'rows': partition.get('rows'),
+            } for partition in partitions],
+            'partition_count': len(partitions),
+            'engine_specific': {
+                'partitioning_method': method or 'not known',
+                'segments': segments,
+                'conditions_were_read': conditions_were_read,
+                'partitions': [{'name': partition['name'], 'segment': partition['segment'],
+                                'condition': partition['condition'], 'rows': partition['rows']}
+                               for partition in partitions],
+            },
+            'notes': notes,
+            'blockers': blockers,
+        }
+
+    def _table_id(self, cursor, schema, table):
+        """The object id of one table, which is what every catalogue read below joins on."""
+        cursor.execute(f"""
+            SELECT o.id FROM sysobjects o
+            WHERE user_name(o.uid) = '{schema}' AND o.name = '{table}' AND o.type = 'U'
+        """)
+        row = cursor.fetchone()
+        return int(row[0]) if row and row[0] is not None else None
+
+    def _data_partitions(self, cursor, table_id):
+        """
+        The data partitions of one table, in the order ASE numbers them.
+
+        `row_count()` is ASE's own built-in for the rows of a partition and is an estimate out of
+        the allocation pages rather than a count; it is reported as an estimate. A server which
+        refuses it leaves the rows unknown rather than zero.
+        """
+        with_rows = f"""
+            SELECT p.partitionid, p.name, s.name, row_count(db_id(), p.id, p.partitionid)
+            FROM syspartitions p
+            LEFT JOIN syssegments s ON s.segment = p.segment
+            WHERE p.id = {table_id} AND p.indid IN {self.DATA_PARTITION_INDIDS}
+            ORDER BY p.partitionid
+        """
+        without_rows = f"""
+            SELECT p.partitionid, p.name, s.name, NULL
+            FROM syspartitions p
+            LEFT JOIN syssegments s ON s.segment = p.segment
+            WHERE p.id = {table_id} AND p.indid IN {self.DATA_PARTITION_INDIDS}
+            ORDER BY p.partitionid
+        """
+        try:
+            cursor.execute(with_rows)
+            rows = cursor.fetchall()
+        except Exception as e:
+            self.config_parser.print_log_message(
+                'DEBUG', f"sybase_ase_connector: fetch_table_partitioning: the rows per partition "
+                         f"could not be read ({e}) - they are reported as not known.")
+            cursor.execute(without_rows)
+            rows = cursor.fetchall()
+        return [{
+            'id': row[0],
+            'name': self._text_of(row[1]) or f"p{row[0]}",
+            'segment': self._text_of(row[2]),
+            'rows': int(row[3]) if row[3] is not None else None,
+            'condition': '',
+            'target_bound': '',
+        } for row in rows]
+
+    def _partition_key_columns(self, cursor, table_id):
+        """
+        The columns the table is partitioned by, in key order.
+
+        A table with no row here is partitioned BY ROUNDROBIN - it is the one method of the four
+        with no key at all, which is what lets the method be worked out without reading it.
+        """
+        cursor.execute(f"""
+            SELECT c.name
+            FROM syspartitionkeys k
+            JOIN syscolumns c ON c.id = k.id AND c.colid = k.colid
+            WHERE k.id = {table_id} AND k.indid IN {self.DATA_PARTITION_INDIDS}
+            ORDER BY k.colid
+        """)
+        return [self._text_of(row[0]) for row in cursor.fetchall() if self._text_of(row[0])]
+
+    def _read_the_conditions(self, cursor, table_id, table_name, partitions):
+        """
+        The condition of every partition, set on the partitions in place. Answers whether they
+        were read at all.
+
+        This is the read §2.4 warns about, and it is the one the target would be BUILT from - so
+        the answer is a boolean rather than an empty list: a condition which came back empty
+        means the scheme has none, which is HASH, and a read which did not happen means nothing
+        at all. Telling the two apart is the whole reason this method exists.
+        """
+        by_id = {partition['id']: partition for partition in partitions}
+        by_name = {partition['name']: partition for partition in partitions}
+        for query in self.PARTITION_CONDITION_SOURCES:
+            statement = query.format(table_id=table_id, table_name=table_name,
+                                     indids=self.DATA_PARTITION_INDIDS)
+            try:
+                cursor.execute(statement)
+                rows = cursor.fetchall()
+                names = [(column[0] or '').lower() for column in (cursor.description or [])]
+            except Exception as e:
+                self.config_parser.print_log_message(
+                    'DEBUG', f"sybase_ase_connector: fetch_table_partitioning: the conditions of "
+                             f"{table_name} could not be read with `{statement.strip()[:60]}...` "
+                             f"({e}) - trying the next way.")
+                continue
+            if self._apply_conditions(rows, names, by_id, by_name):
+                return True
+            self.config_parser.print_log_message(
+                'DEBUG', f"sybase_ase_connector: fetch_table_partitioning: `{statement.strip()[:60]}"
+                         f"...` answered nothing this migrator could read as a partition "
+                         f"condition - trying the next way.")
+        return False
+
+    @staticmethod
+    def _condition_column_of(names):
+        """
+        Which column of an answer holds the condition, found by its NAME.
+
+        `sp_helpartition` is ASE's own report and its columns stand in an order which differs
+        between releases; reading it by name is what makes it worth asking at all.
+        """
+        for index, name in enumerate(names):
+            if 'condition' in name:
+                return index
+        return None
+
+    @classmethod
+    def _key_column_of(cls, names):
+        """Which column of an answer names the partition it describes."""
+        for index, name in enumerate(names):
+            if name in ('partitionid', 'partition_id', 'name', 'partition_name'):
+                return index
+        return None
+
+    def _apply_conditions(self, rows, names, by_id, by_name):
+        """
+        Set the condition of every partition out of one answer. False where the answer holds
+        none which could be matched to a partition, so that the caller tries the next way.
+        """
+        condition_column = self._condition_column_of(names)
+        key_column = self._key_column_of(names)
+        if condition_column is None or key_column is None:
+            return False
+        matched = False
+        for row in rows:
+            key = row[key_column]
+            partition = None
+            if isinstance(key, str):
+                partition = by_name.get(key.strip())
+            elif key is not None:
+                partition = by_id.get(int(key))
+            if partition is None:
+                continue
+            partition['condition'] = self._text_of(row[condition_column])
+            matched = True
+        return matched
+
+    @staticmethod
+    def _text_of(value):
+        """One catalogue value as text, however the driver answered it."""
+        if value is None:
+            return ''
+        if isinstance(value, bytes):
+            return value.decode('utf-8', errors='replace').strip()
+        return str(value).strip()
+
+    def _column_types(self, cursor, table_id):
+        """
+        The type of every column, which is what says whether an ASE `VALUES <= (x)` can become
+        the exclusive bound PostgreSQL needs.
+        """
+        cursor.execute(f"""
+            SELECT c.name, t.name, c.prec, c.scale
+            FROM syscolumns c
+            LEFT JOIN systypes t ON t.usertype = c.usertype
+            WHERE c.id = {table_id}
+        """)
+        types = {}
+        for row in cursor.fetchall():
+            name = self._text_of(row[0])
+            type_name = self._text_of(row[1]).upper()
+            if row[3] is not None:
+                types[name] = f"{type_name}({row[2] or 0},{row[3]})"
+            else:
+                types[name] = type_name
+        return types
+
+    def fetch_partitioning_facts(self, settings):
+        """
+        Everything about one ASE table which decides whether it CAN be partitioned - read before
+        anything is created, which is the moment the answer is still free.
+
+        See DatabaseConnector.fetch_partitioning_facts() for the shape. Everything comes from the
+        system catalogue: nothing here reads a row of the table. ASE keeps no NULL count of its
+        own, so the null fraction is answered as NOT known for every column and the check which
+        needs it says it was not made rather than that it passed.
+        """
+        source_schema_name = settings['source_schema_name']
+        source_table_name = settings['source_table_name']
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            table_id = self._table_id(cursor, source_schema_name, source_table_name)
+            if table_id is None:
+                cursor.close()
+                self.disconnect()
+                return None
+            row_estimate = self._row_estimate(cursor, table_id)
+            columns = self._column_facts(cursor, table_id)
+            unique_keys = self._unique_keys(cursor, table_id)
+            referenced_by = self._referencing_foreign_keys(cursor, table_id)
+            cursor.close()
+            self.disconnect()
+        except Exception as e:
+            self.config_parser.print_log_message(
+                'WARNING', f"sybase_ase_connector: fetch_partitioning_facts: the facts of "
+                           f"{source_schema_name}.{source_table_name} could not be read ({e}) - "
+                           f"the checks which need them are reported as NOT made rather than as "
+                           f"passed.")
+            return None
+
+        return {
+            'columns': columns,
+            'unique_keys': unique_keys,
+            ## ASE has no exclusion constraint and no table inheritance - absences of the engine,
+            ## which are not the same as things this connector did not read
+            'exclusion_constraints': [],
+            'referenced_by': referenced_by,
+            'inherits_from_a_plain_table': False,
+            'is_a_plain_inheritance_parent': False,
+            'row_estimate': row_estimate,
+            'date_range_types': self.DATE_RANGE_TYPES,
+        }
+
+    def _row_estimate(self, cursor, table_id):
+        """`row_count()` over the whole table - an estimate out of the allocation pages."""
+        try:
+            cursor.execute(f"SELECT row_count(db_id(), {table_id})")
+            row = cursor.fetchone()
+            return int(row[0]) if row and row[0] is not None else None
+        except Exception:
+            return None
+
+    def _column_facts(self, cursor, table_id):
+        """Every column and what PostgreSQL will be able to do with it."""
+        cursor.execute(f"""
+            SELECT c.name, t.name, c.prec, c.scale, c.status, c.status2
+            FROM syscolumns c
+            LEFT JOIN systypes t ON t.usertype = c.usertype
+            WHERE c.id = {table_id}
+            ORDER BY c.colid
+        """)
+        columns = {}
+        for row in cursor.fetchall():
+            name = self._text_of(row[0])
+            type_name = self._text_of(row[1]).upper()
+            written = f"{type_name}({row[2] or 0},{row[3]})" if row[3] is not None else type_name
+            status = int(row[4]) if row[4] is not None else 0
+            status2 = int(row[5]) if row[5] is not None else 0
+            can_be_a_key = type_name not in sybase_partitioning.TYPES_WITHOUT_AN_OPERATOR_CLASS
+            columns[name] = {
+                'type_name': written,
+                ## bit 0x08 of syscolumns.status is ASE's "nulls allowed"
+                'not_null': not bool(status & 0x08),
+                ## a computed column of ASE is a generated column of the target, which
+                ## PostgreSQL refuses in a partition key. status2 bit 0x01 marks one
+                'is_generated': bool(status2 & 0x01),
+                'has_btree_opclass': can_be_a_key,
+                'has_hash_opclass': can_be_a_key,
+                ## ASE keeps no NULL count, so this is NOT known for every column - and the
+                ## check which needs it says it was not made
+                'null_fraction': None,
+            }
+        return columns
+
+    def _unique_keys(self, cursor, table_id):
+        """
+        The primary key, every unique constraint and every unique index which is not one - §3.1
+        applies to all three alike. `sysindexes.status & 2` is ASE's unique index.
+        """
+        cursor.execute(f"""
+            SELECT i.name, i.indid, i.status,
+                   index_col(object_name(i.id), i.indid, 1),
+                   index_col(object_name(i.id), i.indid, 2),
+                   index_col(object_name(i.id), i.indid, 3),
+                   index_col(object_name(i.id), i.indid, 4),
+                   index_col(object_name(i.id), i.indid, 5),
+                   index_col(object_name(i.id), i.indid, 6),
+                   index_col(object_name(i.id), i.indid, 7),
+                   index_col(object_name(i.id), i.indid, 8)
+            FROM sysindexes i
+            WHERE i.id = {table_id} AND i.indid > 0 AND i.status & 2 = 2
+            ORDER BY i.indid
+        """)
+        keys = []
+        for row in cursor.fetchall():
+            columns = [self._text_of(value) for value in row[3:] if self._text_of(value)]
+            if not columns:
+                continue
+            keys.append({'name': self._text_of(row[0]),
+                         'columns': columns,
+                         ## 2048 is ASE's "this index carries a primary key constraint"
+                         'is_primary': bool(int(row[2] or 0) & 2048)})
+        return keys
+
+    def _referencing_foreign_keys(self, cursor, table_id):
+        """§3.5: a foreign key pointing AT a partitioned table needs PostgreSQL 12."""
+        cursor.execute(f"""
+            SELECT o.name, object_name(r.tableid)
+            FROM sysreferences r
+            JOIN sysobjects o ON o.id = r.constrid
+            WHERE r.reftabid = {table_id}
+            ORDER BY o.name
+        """)
+        return [{'name': self._text_of(row[0]), 'table': self._text_of(row[1])}
+                for row in cursor.fetchall()]
 
     def target_table_exists(self, target_schema_name, target_table_name):
         """

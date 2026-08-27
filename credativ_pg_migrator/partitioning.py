@@ -71,6 +71,35 @@ def version_text(version_num):
     return str(version_num // 10000)
 
 
+## The kinds of value which have a next one, so that a bound written INCLUSIVE by a source can
+## be given to PostgreSQL, whose upper bound is always exclusive. Everything else - a decimal
+## with a scale, a text, a timestamp, a float - has no next value a bound written without a
+## precision could name.
+DISCRETE_DATE = 'date'
+DISCRETE_INTEGER = 'integer'
+
+
+def next_discrete_value(value, kind):
+    """
+    The value after this one, for the two kinds which have one.
+
+    Db2 says `ENDING AT (x) INCLUSIVE` and Sybase ASE says `VALUES <= (x)`, and both mean that x
+    is IN the partition; PostgreSQL's `TO (b)` means b is not. Converting the one into the other
+    is the same arithmetic for both, so it stands here once - what differs between the two
+    sources is only which of their type names count as a date and which as a whole number.
+
+    Raises ValueError where the value is not one this kind can count in; the caller turns that
+    into the refusal its own source needs to word.
+    """
+    text = str(value or '').strip().strip("'")
+    if kind == DISCRETE_DATE:
+        day = datetime.date.fromisoformat(text)
+        return "'" + (day + datetime.timedelta(days=1)).isoformat() + "'"
+    if kind == DISCRETE_INTEGER:
+        return str(int(text) + 1)
+    raise ValueError(f"{kind or 'this type'} has no next value")
+
+
 def split_top_level_commas(text):
     """
     Split on the commas which are not inside brackets or a string literal.

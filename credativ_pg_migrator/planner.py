@@ -733,6 +733,13 @@ class Planner:
         """
         if self.partitioning_plan is None:
             self.partitioning_plan = self.build_partitioning_plan()
+            ## recorded HERE and not from check_partitioning(), because the analysis is not
+            ## always the place the plan is first built. A source read from DDL has its
+            ## extracts parsed AFTER the analysis, so the plan the analysis built was empty
+            ## and the one the run uses is built later - and the two protocol tables stayed
+            ## empty for every such migration, which left the [ PARTITIONING ] block of the
+            ## summary saying "-" about a z/OS ORDERS really partitioned by range.
+            self.record_partitioning(self.partitioning_plan)
         return self.partitioning_plan
 
     def build_partitioning_plan(self):
@@ -971,7 +978,6 @@ class Planner:
             blocking_issues.extend(decision.issues)
 
         blocking_issues.extend(self.check_repartitioning(plan))
-        self.record_partitioning(plan)
         return blocking_issues
 
     def check_preserved_keys(self, plan):
@@ -1286,6 +1292,38 @@ class Planner:
                     'WARNING', f"planner: record_partitioning: the target scheme of "
                                f"{decision.table_name} could not be recorded: {e}")
 
+    def record_target_partitioning(self, source_table_name, target_table_name, table_id,
+                                   columns, statements):
+        """
+        The scheme a `target_partitioning` entry gave the target, in the protocol table the
+        summary reads. The partitions are named by the statements which create them, which is
+        the only place the generated names exist.
+        """
+        if self.migrator_tables is None:
+            return
+        names = []
+        for statement in statements or []:
+            match = re.search(r'CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?"?[^".\s]*"?\.?"?([^".\s(]+)"?',
+                              str(statement), re.IGNORECASE)
+            names.append(match.group(1) if match else '')
+        try:
+            self.migrator_tables.insert_target_table_partitioning({
+                'target_schema_name': self.target_schema_name,
+                'target_table_name': target_table_name,
+                'target_table_id': table_id,
+                'target_table_partitioning_level': 1,
+                'target_partition_columns': ', '.join(
+                    self.config_parser.convert_names_case(column) for column in columns or []),
+                'target_partition_ranges': '; '.join(
+                    name for name in names if name) or '; '.join(
+                        f"partition_{index}" for index in range(1, len(statements or []) + 1)),
+            })
+        except Exception as e:
+            self.config_parser.print_log_message(
+                'WARNING', f"planner: record_target_partitioning: the scheme "
+                           f"target_partitioning gave {source_table_name} could not be "
+                           f"recorded: {e}")
+
     def repartitioning_entry(self, source_table_name):
         """
         The `target_partitioning` entry which names one table, or None.
@@ -1567,6 +1605,15 @@ class Planner:
                             'INFO', f"planner: stdwf_prepare_tables: {table_info['table_name']} is "
                                     f"partitioned by target_partitioning:{clause}, "
                                     f"{len(statements)} partition(s).")
+                        ## the target's scheme, recorded here rather than in
+                        ## record_partitioning(): a scheme the source never had has no bounds
+                        ## until they are worked out, and they are worked out here. Without
+                        ## this the protocol table held nothing for exactly the tables the
+                        ## configuration asked to partition, and the summary counted their
+                        ## partitions out of the statements instead of reading them.
+                        self.record_target_partitioning(
+                            table_info['table_name'], target_table_name, table_info.get('id'),
+                            columns, statements)
 
                 self.config_parser.print_log_message( 'INFO', f"planner: stdwf_prepare_tables: Counting rows in source table {table_info['table_name']}...")
                 self.source_connection.connect()

@@ -92,9 +92,33 @@ def partitioning_lines(source=(), target=(), tables=()):
     return made.partitioning_summary_lines(cursor)
 
 
-def test_a_migration_with_nothing_partitioned_prints_no_block_at_all():
-    """An empty block is noise in a report which is read at the end of every run."""
-    assert partitioning_lines(tables=[('customers', 'customers', False, None, None, None, True)]) == []
+def test_a_migration_with_nothing_partitioned_says_so_in_one_line():
+    """
+    It printed NOTHING until 2026-08-27, on the reasoning that an empty block is noise in a
+    report read at the end of every run. It is the wrong trade: a reader who configured
+    `target_partitioning` and finds no block cannot tell whether the entry was carried out,
+    whether the feature ran at all, or whether the block failed to build - and those are three
+    different answers. One line settles it.
+    """
+    lines = partitioning_lines(tables=[('customers', 'customers', False, None, None, None, True)])
+    body = '\n'.join(lines)
+    assert '[ PARTITIONING ]' in body
+    assert 'No table of this migration is partitioned' in body
+
+
+def test_the_partitioning_block_says_when_it_could_not_be_built():
+    """
+    P2-8. It returned [] on any failure, so the block was simply absent - and it was absent
+    from every summary of every run for a while, because the cursor it is handed had been
+    closed by the block above it. A report which cannot be built has to say so.
+    """
+    made, _ = report_for({})
+    cursor = MagicMock()
+    cursor.execute.side_effect = Exception('cursor already closed')
+    body = '\n'.join(made.partitioning_summary_lines(cursor))
+    assert '[ PARTITIONING ]' in body
+    assert 'could not be built' in body
+    assert 'cursor already closed' in body
 
 
 def test_a_preserved_scheme_is_shown_on_both_sides():
@@ -285,3 +309,17 @@ def test_a_protocol_table_which_is_not_there_does_not_stop_the_report():
 @pytest.mark.parametrize('value, expected', [(None, '-'), (0, '0'), (1234567, '1,234,567')])
 def test_a_row_count_is_written_so_it_can_be_read(value, expected):
     assert MigratorTables.thousands(value) == expected
+
+
+def test_a_scheme_with_no_key_columns_is_not_written_as_an_empty_key_list():
+    """
+    Informix ROUND ROBIN has no key columns and neither has a strategy this migrator does not
+    know the name of. `ROUND ROBIN ()` reads like a key list which failed to load.
+    """
+    lines = partitioning_lines(
+        source=[('order_items', 'ROUND ROBIN', '', 'f1: a; f2: b', 1)],
+        tables=[('order_items', 'order_items', False, None, None, None, True)])
+    body = '\n'.join(lines)
+    assert 'ROUND ROBIN ()' not in body
+    assert 'ROUND ROBIN' in body
+    assert 'FLATTENED into one table' in body

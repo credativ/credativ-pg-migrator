@@ -508,7 +508,25 @@ payments | LIST (method)                           |     3 | -                  
 The source scheme is shown in the names the source has and the target scheme in the names the
 target has — the two columns are of two different databases. A scheme of more than one level is
 written as the levels it has, so a reader who sees only the first one still knows the table is
-two levels deep. `summary.report_filename` writes the whole summary into a file.
+two levels deep.
+
+A migration in which nothing is partitioned on either side gets the block all the same, saying
+so in one line — a reader who configured `target_partitioning` and finds no block cannot tell
+whether the entry was carried out, whether the feature ran at all, or whether the block failed
+to build, and those are three different answers. A block which could not be built says that too,
+with what the migration database answered.
+
+The `[ OBJECTS MIGRATION RESULTS ]` table above it carries a **Partitioned Tables** row. It
+counts the tables the SOURCE was partitioned by — not partitions, and not the tables
+`target_partitioning` created — and its Details column says how many of them were carried over,
+how many were flattened, and how many schemes the configuration added. Its Success and Failed
+columns read `-`: nothing sets a success flag on what was read from the source, and a `0` under
+Failed would read as "none failed", which is a claim that row is in no position to make.
+
+**`summary.report_filename`** writes the two blocks which name rather than count — `[ PARTITIONING ]`
+and `[ DETAILED MIGRATION REPORT ]` — into a file of their own instead of into the log, and the
+log says where they went. This is the report to reach for on a schema large enough that the
+partitioning block is hundreds of lines long.
 
 **In the migration database**, `<protocol>_source_table_partitioning` holds one row per level of
 the source scheme — with the bounds as the source wrote them and a

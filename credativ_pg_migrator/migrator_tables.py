@@ -4909,6 +4909,9 @@ class MigratorTables:
         Nothing is printed for a migration in which nothing is partitioned on either side -
         an empty block is noise in a report which is read at the end of every run.
         """
+        ## what could not be read while building this block. A block which is quietly less
+        ## than it should be is worse than one which says so - see P2-8.
+        problems = []
         source_scheme = {}
         try:
             cursor.execute(f'''
@@ -4922,8 +4925,10 @@ class MigratorTables:
                 source_scheme.setdefault(root, []).append(
                     {'method': method or '', 'columns': columns or '', 'ranges': ranges or '',
                      'level': level})
-        except Exception:
+        except Exception as e:
             self.protocol_connection.connection.rollback()
+            problems.append(f"the scheme of the SOURCE could not be read ({e}), so the "
+                            f"'Source scheme' column below is blank for every table")
 
         target_partitions = {}
         target_levels = {}
@@ -4935,8 +4940,10 @@ class MigratorTables:
             for table_name, ranges, level in cursor.fetchall():
                 target_partitions[table_name] = len([part for part in (ranges or '').split(';') if part.strip()])
                 target_levels[table_name] = level or 1
-        except Exception:
+        except Exception as e:
             self.protocol_connection.connection.rollback()
+            problems.append(f"the scheme of the TARGET could not be read ({e}), so the number "
+                            f"of partitions below is counted from the statements instead")
 
         rows = []
         try:
@@ -4947,9 +4954,15 @@ class MigratorTables:
                 ORDER BY source_table_name
             ''')
             rows = cursor.fetchall()
-        except Exception:
+        except Exception as e:
+            ## returning [] here made the whole block vanish without a word - a reader cannot
+            ## tell a migration in which nothing was partitioned from one whose partitioning
+            ## report could not be built, and those are not the same thing (P2-8).
             self.protocol_connection.connection.rollback()
-            return []
+            return ['', '[ PARTITIONING ]', '-' * 110,
+                    f"this block could not be built: the tables of the migration could not be "
+                    f"read ({e}). What each table was partitioned by is in the "
+                    f"{self.config_parser.get_protocol_name_tables()} protocol table.", '']
 
         report = []
         for source_table, target_table, partitioned, method, columns, partitions_sql, success in rows:
@@ -4962,7 +4975,11 @@ class MigratorTables:
                 ## first one does not know the table is two levels deep
                 seen, key_parts = set(), []
                 for level in levels:
-                    key = f"{level['method']} ({level['columns']})"
+                    ## a scheme with no key columns - Informix ROUND ROBIN, a strategy this
+                    ## migrator does not know the name of - is written as what it is and not
+                    ## as `ROUND ROBIN ()`, which reads like a key list that failed to load
+                    key = (f"{level['method']} ({level['columns']})" if level['columns']
+                           else str(level['method']))
                     if key not in seen:
                         seen.add(key)
                         key_parts.append(key)
@@ -4989,9 +5006,18 @@ class MigratorTables:
             })
 
         if not report:
-            return []
+            ## Nothing partitioned on either side. Said once, rather than left out: a reader who
+            ## configured `target_partitioning` and finds no block at all cannot tell whether
+            ## the entry was carried out, and the answer "it was not" is the one worth having.
+            if not problems:
+                return ['', '[ PARTITIONING ]', '-' * 110,
+                        'No table of this migration is partitioned - neither carried over from '
+                        'the source nor created by target_partitioning.', '']
+            return ['', '[ PARTITIONING ]', '-' * 110] + \
+                [f"  ! {problem}" for problem in problems] + ['']
 
         lines = ['', '[ PARTITIONING ]', '-' * 110]
+        lines.extend(f"  ! {problem}" for problem in problems)
         width_table = max([len('Table')] + [len(str(item['table'])) for item in report])
         width_source = max([len('Source scheme')] + [len(str(item['source'])) for item in report])
         width_target = max([len('Target scheme')] + [len(str(item['target'])) for item in report])
@@ -5254,7 +5280,13 @@ class MigratorTables:
             ('Sequences', self.config_parser.get_protocol_name_sequences(),
              "CASE WHEN source_is_identity IS TRUE THEN 'from identity column' ELSE 'from sequence object' END"),
             ('Tables', self.config_parser.get_protocol_name_tables(), None),
-            ('Table Partitions', self.config_parser.get_protocol_name_source_table_partitioning(), None),
+            ## the rows of this table are one per LEVEL of one partitioned table, so what it
+            ## counts is tables-with-a-scheme and never partitions. It was called "Table
+            ## Partitions", which invited exactly the wrong reading: a run which created 58
+            ## partitions from `target_partitioning` showed `Table Partitions 0 | 0 | 0`,
+            ## because the table it counts holds what the SOURCE was partitioned by.
+            ('Partitioned Tables',
+             self.config_parser.get_protocol_name_source_table_partitioning(), None),
             ('Columns', self.config_parser.get_protocol_name_columns(), None),
             ('Altered Columns', self.config_parser.get_protocol_name_target_columns_alterations(), 'reason'),
             ('Indexes', self.config_parser.get_protocol_name_indexes(), 'index_type, index_owner'),
@@ -5331,6 +5363,36 @@ class MigratorTables:
                     except Exception:
                         self.protocol_connection.connection.rollback()
 
+                if obj_name == 'Partitioned Tables' and not self.config_parser.is_dry_run():
+                    ## `success` is never set on the rows of this table - it records what was
+                    ## READ, not what was done - so the Success and Failed columns above stand
+                    ## at 0 whatever happened. What did happen is in the tables protocol and in
+                    ## the [ PARTITIONING ] block, and the counts belong beside the row which
+                    ## invites the question.
+                    try:
+                        cursor.execute(f'''
+                            SELECT count(*) FILTER (WHERE partitioned IS TRUE),
+                                   count(*) FILTER (WHERE partitioned IS TRUE AND source_table_name IN (
+                                       SELECT source_table_name FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_source_table_partitioning()}"))
+                            FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_tables()}"
+                        ''')
+                        partitioned_on_target, preserved = cursor.fetchone()
+                        flattened = max(0, total - (preserved or 0))
+                        created = (partitioned_on_target or 0) - (preserved or 0)
+                        details.append(f"carried over to the target: {preserved or 0}")
+                        if flattened:
+                            details.append(f"FLATTENED into one table: {flattened}")
+                        if created:
+                            details.append(f"created by target_partitioning: {created}")
+                        ## where the block really is: with report_filename set it is not
+                        ## "below" at all, it is in that file
+                        report_file = self.config_parser.get_summary_report_filename()
+                        details.append(f"see the [ PARTITIONING ] block in {report_file}"
+                                       if report_file else
+                                       "see the [ PARTITIONING ] block below")
+                    except Exception:
+                        self.protocol_connection.connection.rollback()
+
                 if obj_name == 'Tables':
                     cursor.execute(f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{table_name}" WHERE source_table_rows_limited = 0 OR source_table_rows_limited IS NULL""")
                     empty_tables = cursor.fetchone()[0]
@@ -5370,6 +5432,11 @@ class MigratorTables:
                     lines.append(f"{obj_name:<24} | {'?':>6} | {'-':>7} | {'-':>6} | {details_str}")
                     continue
                 if obj_name == 'Altered Columns':
+                    lines.append(f"{obj_name:<24} | {total:>6} | {'-':>7} | {'-':>6} | {details_str}")
+                elif obj_name == 'Partitioned Tables':
+                    ## `success` is not set on the rows of this table - it records what was
+                    ## READ - and a 0 in a Failed column reads as "none failed", which is a
+                    ## claim this row is in no position to make
                     lines.append(f"{obj_name:<24} | {total:>6} | {'-':>7} | {'-':>6} | {details_str}")
                 else:
                     lines.append(f"{obj_name:<24} | {total:>6} | {success_count:>7} | {error_count:>6} | {details_str}")
@@ -5914,8 +5981,15 @@ class MigratorTables:
         ## the log says where they went - the same arrangement the validation report has.
         detailed = []
         try:
+            ## a cursor of its own. The name `cursor` has been rebound and closed several times
+            ## by the blocks above - the last of them is the remote-object substitutions - so
+            ## what arrived here was a CLOSED cursor, and the partitioning block failed on it
+            ## and returned nothing. It failed silently, which is why the block was simply
+            ## absent from every summary rather than reported as broken.
+            cursor = self.protocol_connection.connection.cursor()
             detailed.extend(self.partitioning_summary_lines(cursor))
             detailed.extend(self.detailed_report_lines(cursor))
+            cursor.close()
         except Exception as e:
             lines.append("")
             lines.append(f"[ ERROR: the detailed report could not be built: {e} ]")

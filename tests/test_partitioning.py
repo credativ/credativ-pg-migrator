@@ -872,6 +872,22 @@ def test_the_analysis_of_a_schema_with_nothing_partitioned_says_that():
                for _level, message in made.messages)
 
 
+def test_an_entry_is_not_refused_as_missing_when_the_table_list_was_not_read():
+    """
+    A source read from DDL has no table list during the analysis - its extracts are parsed into
+    the migration afterwards. An empty list is not a schema which holds nothing, and answering
+    "the source schema does not hold CURRENCY_RATES" about a schema which does hold it refuses
+    the entry for a reason that is not true, and hides the reason which is: there is no
+    instance to ask for the values the column holds, which is what a date_range needs.
+    """
+    made = planner_with({}, repartitioned=['CURRENCY_RATES'])
+    made.source_connection.fetch_table_names.return_value = {}
+    made.source_connection.CAN_PROBE_COLUMN_VALUES = False
+    issues = made.check_partitioning()
+    assert not any('the source schema does not hold' in issue for issue in issues)
+    assert any('no database to ask' in issue for issue in issues)
+
+
 def test_a_source_whose_partitioning_was_not_read_is_not_told_it_has_none():
     """
     P2-8: "not read" and "there is none" must never look alike. A Db2 LUW migration which

@@ -939,3 +939,26 @@ def test_the_create_table_of_a_preserved_db2_table_and_its_partitions():
         'CREATE TABLE "migtest"."accounts_p3" PARTITION OF "migtest"."accounts" '
         'FOR VALUES FROM (300) TO (MAXVALUE)',
     ]
+
+
+def test_a_ddl_source_says_its_partitioning_is_not_parsed_yet():
+    """
+    The DDL of Db2 for z/OS and Db2 for i is parsed into `ddl_tables` AFTER the analysis runs,
+    so at the point the analysis asks there is nothing in it. That is "not read", and P2-8 says
+    it must not look like "there is none": the report said "no table of the source schema is
+    partitioned" about a schema whose ORDERS is partitioned by range over ORDER_DATE in its own
+    CREATE TABLE, and said it before the clause had been looked at.
+    """
+    from credativ_pg_migrator.connectors.ibm_db2_zos_connector import IbmDb2ZosConnector
+
+    made = IbmDb2ZosConnector.__new__(IbmDb2ZosConnector)
+    made.protocol_schema = 'migration'
+    made.migrator_tables = MagicMock()
+    cursor = made.migrator_tables.protocol_connection.connection.cursor.return_value
+
+    cursor.fetchone.return_value = None          ## ddl_tables is still empty
+    assert made.object_kind_not_read('table_partitioning') == \
+        IbmDb2ZosConnector.PARTITIONING_NOT_PARSED_YET
+
+    cursor.fetchone.return_value = (1,)          ## the DDL has been parsed
+    assert made.object_kind_not_read('table_partitioning') is None

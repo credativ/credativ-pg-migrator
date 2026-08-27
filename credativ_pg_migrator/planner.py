@@ -494,6 +494,14 @@ class Planner:
             self.handle_error(e, "Pre-migration analysis")
             return []
         finally:
+            ## The partitioning plan is read once and kept, so that the report and the run
+            ## cannot disagree. The one built HERE was built before the DDL of the source
+            ## existed in the migration, so it says nothing is partitioned - and keeping it
+            ## would make the run agree with a report which established nothing: the z/OS
+            ## ORDERS, partitioned by range over ORDER_DATE in its own CREATE TABLE, arrived
+            ## as one ordinary table. It is thrown away and read again once the DDL is parsed.
+            self.partitioning_plan = None
+            self.partitioning_table_ids = {}
             self.source_connection.disconnect()
             self.target_connection.disconnect()
 

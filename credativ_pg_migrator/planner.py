@@ -734,11 +734,14 @@ class Planner:
             if scheme:
                 schemes[table_name] = scheme
 
-        ## a partition of a selected table which the filters left out is still part of the
-        ## scheme, so its own partitioning has to be read as well - otherwise a sub-partitioned
-        ## partition comes out with no children
-        pending = [name for scheme in schemes.values()
-                   for name in (partition.get('name') for partition in scheme.get('partitions') or [])]
+        ## a partition which is ITSELF partitioned and which the filters left out is still part
+        ## of the scheme, so its own partitioning has to be read as well - otherwise a
+        ## sub-partitioned partition comes out with no children. A partition which is not
+        ## partitioned is not asked about: everything the plan needs of it is in the row its
+        ## parent already answered, and asking would be one catalogue query per partition -
+        ## 960 of them for one Oracle table of §2.2.
+        pending = [partition.get('name') for scheme in schemes.values()
+                   for partition in scheme.get('partitions') or [] if partition.get('is_partitioned')]
         while pending:
             table_name = pending.pop()
             if not table_name or table_name in schemes:
@@ -750,7 +753,8 @@ class Planner:
             if not scheme:
                 continue
             schemes[table_name] = scheme
-            pending.extend(partition.get('name') for partition in scheme.get('partitions') or [])
+            pending.extend(partition.get('name') for partition in scheme.get('partitions') or []
+                           if partition.get('is_partitioned'))
 
         repartitioned = {entry.get('table_name') for entry in self.config_parser.get_target_partitioning()
                          if entry.get('table_name')}
@@ -793,10 +797,23 @@ class Planner:
             self.config_parser.print_log_message(
                 'INFO', "planner: check_partitioning: no table of the source schema is partitioned.")
         elif partitioned or parts or orphans or repartitioned:
+            ## §4.2's headline: a number a reader can act on, before the detail underneath it.
+            ## A scheme of more than one level is worth counting on its own - §2.2 is about
+            ## what it costs to reproduce one.
+            deep = len([decision for decision in partitioned if decision.source_level_count > 1])
+            ## the partitions of the source: the ones which are tables of the schema in their
+            ## own right where they are - postgresql - and the ones the catalogue counts where
+            ## they are not, which is every other source
+            partition_count = len(parts) or sum(
+                decision.scheme.get('partition_count', 0) or 0 for decision in partitioned)
+            headline = (f"{len(partitioned)} of {len(plan)} table(s) are partitioned on the "
+                        f"source, holding {partition_count} partition(s)")
+            if deep:
+                headline += f"; {deep} of them are partitioned on more than one level"
+            headline += (f". {len(repartitioned)} table(s) are partitioned by "
+                         f"target_partitioning.")
             self.config_parser.print_log_message(
-                'INFO', f"planner: check_partitioning: {len(partitioned)} partitioned table(s) of "
-                        f"the source, holding {len(parts)} partition(s); "
-                        f"{len(repartitioned)} table(s) are partitioned by target_partitioning.")
+                'INFO', f"planner: check_partitioning: {headline}")
             rows = [["Table", "Source scheme", "Partitions", "What happens"]]
             for decision in sorted(partitioned + repartitioned + orphans,
                                    key=lambda item: item.table_name):
@@ -815,6 +832,13 @@ class Planner:
             self.config_parser.print_log_message(
                 'INFO', "planner: check_partitioning: no table of the source schema is partitioned.")
 
+        ## §3.1 for a scheme which is carried over rather than asked for. It is not the
+        ## smaller case: Oracle keeps a primary key which does not contain the partitioning
+        ## column in a GLOBAL index, which is legal and ordinary there and has no counterpart
+        ## here, so a table which has run that way for years is refused - now, rather than at
+        ## the end of the run when the constraint is added to a table already holding the data
+        self.check_preserved_keys(plan)
+
         for decision in sorted(plan.values(), key=lambda item: item.table_name):
             for warning in decision.warnings:
                 self.config_parser.print_log_message('WARNING', f"planner: check_partitioning: {warning}.")
@@ -823,6 +847,20 @@ class Planner:
         blocking_issues.extend(self.check_repartitioning(plan))
         self.record_partitioning(plan)
         return blocking_issues
+
+    def check_preserved_keys(self, plan):
+        """
+        The primary key, every unique constraint and every unique index of each table whose
+        scheme is carried over, against the partitioning columns - §3.1.
+
+        One read per preserved table, and there are few of them: §4.2's headline is 12 of 340.
+        A source whose keys cannot be read has the check reported as one which was NOT made,
+        never as one which passed.
+        """
+        for decision in plan.values():
+            if decision.action != partitioning.PRESERVE:
+                continue
+            partitioning.check_preserved_keys(decision, self.read_unique_keys(decision.table_name))
 
     def check_repartitioning(self, plan):
         """
@@ -1055,7 +1093,26 @@ class Planner:
                         'source_partition_ranges': '; '.join(
                             f"{partition.get('name')}: {partition.get('bound')}"
                             for partition in scheme.get('partitions') or []),
+                        ## what only this source has, and which nothing reads back: the
+                        ## INTERVAL expression, the sub-partitioning which is not carried over,
+                        ## the tablespaces the partitions sit in. §5.1 of the design
+                        'source_partitioning_engine_specific': scheme.get('engine_specific') or {},
                     })
+                    ## the levels under it whose partitions are not relations of their own, so
+                    ## nothing walked into them - one row each, which is what the level column
+                    ## is for. They are recorded because the source has them, and they are not
+                    ## built: §2.2
+                    for level in scheme.get('levels_below') or []:
+                        self.migrator_tables.insert_source_table_partitioning({
+                            'source_schema_name': self.source_schema_name,
+                            'source_table_name': decision.table_name,
+                            'source_table_id': (self.partitioning_table_ids or {}).get(decision.table_name),
+                            'source_table_partitioning_level': level.get('level', 2),
+                            'source_partitioning_method': level.get('method', ''),
+                            'source_root_table_name': decision.root_table or decision.table_name,
+                            'source_partition_columns': ', '.join(level.get('columns') or []),
+                            'source_partition_ranges': '',
+                        })
                 except Exception as e:
                     self.config_parser.print_log_message(
                         'WARNING', f"planner: record_partitioning: the scheme of {decision.table_name} "
@@ -1065,12 +1122,23 @@ class Planner:
             try:
                 self.migrator_tables.insert_target_table_partitioning({
                     'target_schema_name': self.target_schema_name,
+                    ## the name the tables protocol holds for the same table, which is what the
+                    ## summary joins the two rows on - names_case_handling is applied when the
+                    ## object is created, not when it is recorded
                     'target_table_name': decision.table_name,
                     'target_table_id': (self.partitioning_table_ids or {}).get(decision.table_name),
-                    'target_table_partitioning_level': 1,
-                    'target_partition_columns': ', '.join(scheme.get('columns') or []),
+                    ## how deep the scheme the target really got is - which is as deep as the
+                    ## source for a PostgreSQL one and one level for an Oracle composite, and
+                    ## the difference is what the summary reports as not carried over
+                    'target_table_partitioning_level': decision.target_level_count or 1,
+                    'target_partition_columns': ', '.join(
+                        self.config_parser.convert_names_case(column)
+                        for column in scheme.get('columns') or []),
+                    ## the bound the target was given, which is not always the one the source
+                    ## wrote - the source's own spelling is in the source partitioning table
                     'target_partition_ranges': '; '.join(
-                        f"{partition.name}: {partition.bound}" for partition in decision.partitions),
+                        f"{self.config_parser.convert_names_case(partition.name)}: {partition.bound}"
+                        for partition in decision.partitions),
                 })
             except Exception as e:
                 self.config_parser.print_log_message(
@@ -1094,7 +1162,12 @@ class Planner:
         with `no partition of relation … found for row`, so it is said out loud here.
         """
         columns = partitioning.partitioning_columns_of(entry)
-        quoted = ', '.join(f'"{column}"' for column in columns)
+        ## the entry is written in the names of the SOURCE and the clause is written in the
+        ## names of the target: an Oracle entry names ORDER_DATE and names_case_handling: lower
+        ## gives the target order_date, so an unquoted copy of the entry names a column which is
+        ## not there. §4.4 of development/PARTITIONING_STRATEGY.md
+        quoted = ', '.join(f'"{self.config_parser.convert_names_case(column)}"'
+                           for column in columns)
         clause = f" PARTITION BY {str(entry.get('partition_by') or '').upper()} ({quoted})"
 
         date_range = entry.get('date_range')
@@ -1148,7 +1221,10 @@ class Planner:
                 'partition_bound': partition.bound,
                 'key_definition': partition.key_definition,
             }))
-        return f" PARTITION BY {decision.key_definition}", statements
+        ## the key as the TARGET has to be given it - the same string for a PostgreSQL source
+        ## and not for any other, because Oracle holds ORDER_DATE where the target holds
+        ## order_date
+        return f" PARTITION BY {decision.target_key_definition}", statements
 
     def stdwf_prepare_tables(self):
         self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_tables: Preparing tables...")
@@ -1296,7 +1372,12 @@ class Planner:
                     create_partitions_sql = json.dumps(partition_statements)
                     table_partitioned = True
                     table_partitioned_by = partitioning_decision.method
-                    table_partitioning_columns = ', '.join(partitioning_decision.scheme.get('columns') or [])
+                    ## the row describes the TARGET table, so its columns are named as the
+                    ## target names them - Oracle holds ORDER_DATE where the target holds
+                    ## order_date, and the summary prints this beside the scheme of the source
+                    table_partitioning_columns = ', '.join(
+                        self.config_parser.convert_names_case(column)
+                        for column in partitioning_decision.scheme.get('columns') or [])
                     self.config_parser.print_log_message(
                         'INFO', f"planner: stdwf_prepare_tables: {table_info['table_name']} keeps the "
                                 f"partitioning of the source: {partitioning_decision.key_definition}, "
@@ -1321,7 +1402,8 @@ class Planner:
                         create_partitions_sql = json.dumps(statements)
                         table_partitioned = True
                         table_partitioned_by = str(entry.get('partition_by') or '').upper()
-                        table_partitioning_columns = ', '.join(columns)
+                        table_partitioning_columns = ', '.join(
+                            self.config_parser.convert_names_case(column) for column in columns)
                         self.config_parser.print_log_message(
                             'INFO', f"planner: stdwf_prepare_tables: {table_info['table_name']} is "
                                     f"partitioned by target_partitioning:{clause}, "

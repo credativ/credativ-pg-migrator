@@ -22,6 +22,7 @@ from credativ_pg_migrator.database_connector import DatabaseConnector, first_lin
 from credativ_pg_migrator.migrator_logging import MigratorLogger
 from credativ_pg_migrator.constants import MigratorConstants
 from credativ_pg_migrator import collations
+from credativ_pg_migrator import partitioning
 import traceback
 import re
 import json
@@ -3673,41 +3674,13 @@ class PostgreSQLConnector(DatabaseConnector):
 
     @staticmethod
     def split_top_level_commas(text):
-        """Split on the commas which are not inside brackets or a string literal."""
-        parts = []
-        depth = 0
-        in_literal = False
-        current = []
-        index = 0
-        while index < len(text):
-            char = text[index]
-            if in_literal:
-                current.append(char)
-                if char == "'":
-                    if index + 1 < len(text) and text[index + 1] == "'":
-                        current.append(text[index + 1])
-                        index += 2
-                        continue
-                    in_literal = False
-                index += 1
-                continue
-            if char == "'":
-                in_literal = True
-                current.append(char)
-            elif char in '([':
-                depth += 1
-                current.append(char)
-            elif char in ')]':
-                depth -= 1
-                current.append(char)
-            elif char == ',' and depth == 0:
-                parts.append(''.join(current))
-                current = []
-            else:
-                current.append(char)
-            index += 1
-        parts.append(''.join(current))
-        return parts
+        """
+        Split on the commas which are not inside brackets or a string literal.
+
+        The split itself is `partitioning.split_top_level_commas()`: Oracle's HIGH_VALUE needs
+        exactly the same one, and a second copy of it is a second thing to get wrong.
+        """
+        return partitioning.split_top_level_commas(text)
 
     ## The types a `date_range` can be counted in. Everything else - a text column holding
     ## something which looks like a date, a number - has no calendar, and asking for monthly

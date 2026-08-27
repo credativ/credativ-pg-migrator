@@ -16,6 +16,7 @@
 
 from credativ_pg_migrator.database_connector import DatabaseConnector
 from credativ_pg_migrator.connectors.oracle_query_conversion import OracleQueryConversion
+from credativ_pg_migrator.connectors import oracle_partitioning
 from credativ_pg_migrator.migrator_logging import MigratorLogger
 import oracledb  ## pip install python-oracledb
 import traceback
@@ -35,14 +36,10 @@ class OracleConnector(OracleQueryConversion, DatabaseConnector):
         'named them - only the schema in front of them is re-pointed. They are written '
         'without quotes, so PostgreSQL folds them to lower case')
     ## What this connector does not read out of its source / what the source does
-    ## not have - see DatabaseConnector.OBJECT_KINDS_NOT_READ.
-    OBJECT_KINDS_NOT_READ = {
-        'table_partitioning': (
-            'Oracle partitions by RANGE, LIST, HASH, INTERVAL, REFERENCE and SYSTEM, composite '
-            'schemes included, and keeps the scheme in ALL_PART_TABLES, ALL_PART_KEY_COLUMNS and '
-            'ALL_TAB_PARTITIONS. This connector does not read it, so a partitioned table is '
-            'migrated as one ordinary table.'),
-    }
+    ## not have - see DatabaseConnector.OBJECT_KINDS_NOT_READ. `table_partitioning` stood here
+    ## until 2026-08-27 and is read now: ALL_PART_TABLES, ALL_PART_KEY_COLUMNS,
+    ## ALL_SUBPART_KEY_COLUMNS and ALL_TAB_PARTITIONS, in fetch_table_partitioning().
+    OBJECT_KINDS_NOT_READ = {}
 
     def __init__(self, config_parser, source_or_target):
         if source_or_target != 'source':
@@ -2860,6 +2857,574 @@ class OracleConnector(OracleQueryConversion, DatabaseConnector):
         else:
             self.config_parser.print_log_message('DEBUG2', f"oracle_connector: get_top_fk_dependencies: Top {top_n} tables by foreign key count: {top_fk_dependencies}")
         return top_fk_dependencies
+
+    ## ---------------------------------------------------------------- partitioning
+
+    ## §2.4 of development/PARTITIONING_STRATEGY.md puts oracle second, behind postgresql, and
+    ## says why: the richest scheme of the twelve sources, the loudest demand, and the only one
+    ## where every case of §4.2 - composite, INTERVAL, REFERENCE, SYSTEM, global indexes -
+    ## appears in a single database. What is read here is the catalogue; what is done with it
+    ## is `migration.source_partitioning` and `target_partitioning`, and the translation into
+    ## PostgreSQL's spelling is `oracle_partitioning.py`, which has no driver in it.
+
+    ## The types a `date_range` can be counted in on an Oracle source. The comparison strips a
+    ## precision, so TIMESTAMP(6) and TIMESTAMP(9) WITH TIME ZONE are both found here.
+    DATE_RANGE_TYPES = ('DATE', 'TIMESTAMP', 'TIMESTAMP WITH TIME ZONE',
+                        'TIMESTAMP WITH LOCAL TIME ZONE')
+
+    ## Oracle types which the migration gives a PostgreSQL type that cannot carry a partition
+    ## key at all: XMLTYPE becomes `xml`, which has no default operator class of any kind. A
+    ## column whose type this account cannot resolve to a built-in - an object type, a VARRAY,
+    ## a nested table - is refused on the same grounds and found by DATA_TYPE_OWNER instead.
+    TYPES_WITHOUT_AN_OPERATOR_CLASS = ('XMLTYPE',)
+
+    def fetch_partitioning_candidates(self, schema):
+        """
+        The tables of one schema which Oracle partitions, in one query - so that a schema of
+        three hundred ordinary tables costs one round trip rather than three hundred.
+
+        A partition of an Oracle table is not a table: it does not appear in ALL_TABLES, it has
+        no row of its own in the migration, and nothing asks about it. That is the difference
+        from PostgreSQL, where a partition is a relation and the connector has to answer for it.
+        """
+        query = "SELECT table_name FROM all_part_tables WHERE owner = :owner"
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query, {'owner': (schema or '').upper()})
+            names = {row[0] for row in cursor.fetchall()}
+            cursor.close()
+            return names
+        except Exception as e:
+            self.config_parser.print_log_message(
+                'WARNING', f"oracle_connector: fetch_partitioning_candidates: the partitioned "
+                           f"tables of {schema} could not be listed ({e}) - every table is asked "
+                           f"instead.")
+            return None
+
+    ## ALL_PART_TABLES as recent releases hold it. INTERVAL arrived with 11g,
+    ## REF_PTN_CONSTRAINT_NAME with 11g and AUTOLIST with 12.2, and a release without one of
+    ## them answers ORA-00904 for the whole statement - hence the second query, which reads what
+    ## every release has and says which of the three it could not read.
+    PART_TABLES_QUERY = """
+        SELECT partitioning_type, subpartitioning_type, partition_count,
+               def_subpartition_count, def_tablespace_name,
+               interval, ref_ptn_constraint_name, autolist
+        FROM all_part_tables
+        WHERE owner = :owner AND table_name = :table_name
+    """
+    PART_TABLES_QUERY_WITHOUT_THE_RECENT_COLUMNS = """
+        SELECT partitioning_type, subpartitioning_type, partition_count,
+               def_subpartition_count, def_tablespace_name,
+               NULL, NULL, NULL
+        FROM all_part_tables
+        WHERE owner = :owner AND table_name = :table_name
+    """
+
+    def fetch_table_partitioning(self, settings):
+        """
+        The partitioning of one Oracle table, read out of ALL_PART_TABLES,
+        ALL_PART_KEY_COLUMNS, ALL_SUBPART_KEY_COLUMNS and ALL_TAB_PARTITIONS.
+
+        See the contract in DatabaseConnector.fetch_table_partitioning(). Beyond it this
+        connector answers `target_key_definition`, a `target_bound` per partition, `notes` and
+        `blockers`, because Oracle does not write its scheme the way PostgreSQL writes it and
+        because several of its mechanisms have no counterpart at all.
+
+        **Only the first level is carried over** - §2.2 of the design, which is an argument and
+        not an oversight: a range of 60 months sub-partitioned by hash into 16 is 960 relations
+        on the target, each with its own relcache entry, statistics and indexes, and autovacuum
+        with 960 tables to think about instead of 60. What the hash level buys on Oracle - I/O
+        spread over devices, partition-wise joins on the sub-key - is not what it buys here. The
+        segments left behind are counted and said out loud.
+        """
+        source_schema_name = settings['source_schema_name']
+        source_table_name = settings['source_table_name']
+        binds = {'owner': (source_schema_name or '').upper(),
+                 'table_name': (source_table_name or '').upper()}
+        notes = []
+        blockers = []
+
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            recent_columns_were_read = True
+            try:
+                cursor.execute(self.PART_TABLES_QUERY, binds)
+            except Exception:
+                recent_columns_were_read = False
+                cursor.execute(self.PART_TABLES_QUERY_WITHOUT_THE_RECENT_COLUMNS, binds)
+            row = cursor.fetchone()
+            if row is None:
+                cursor.close()
+                return {}
+
+            method = (row[0] or '').strip().upper()
+            sub_method = (row[1] or '').strip().upper()
+            partition_count = int(row[2]) if row[2] is not None else 0
+            sub_count = int(row[3]) if row[3] is not None else 0
+            default_tablespace = row[4]
+            interval_expression = row[5]
+            reference_constraint = row[6]
+            autolist = (row[7] or '').strip().upper() == 'YES'
+
+            columns = self._partition_key_columns(cursor, binds, 'all_part_key_columns')
+            sub_columns = (self._partition_key_columns(cursor, binds, 'all_subpart_key_columns')
+                           if sub_method and sub_method != 'NONE' else [])
+            partitions = self._table_partitions(cursor, binds)
+            global_indexes = self._global_indexes(cursor, binds)
+            cursor.close()
+        except Exception as e:
+            self.config_parser.print_log_message(
+                'ERROR', f"oracle_connector: fetch_table_partitioning: the partitioning of "
+                         f"{source_schema_name}.{source_table_name} could not be read: {e}")
+            return {}
+
+        if not recent_columns_were_read:
+            notes.append(
+                f"{source_table_name}: ALL_PART_TABLES on this release has no INTERVAL, "
+                f"REF_PTN_CONSTRAINT_NAME or AUTOLIST column, so it was NOT read whether this "
+                f"scheme extends itself. If it does, the target will not")
+
+        engine_specific = {
+            'partitioning_type': method,
+            'partition_count': partition_count,
+            'default_tablespace': default_tablespace,
+            'tablespaces': sorted({partition['tablespace'] for partition in partitions
+                                   if partition.get('tablespace')}),
+        }
+        if sub_method and sub_method != 'NONE':
+            engine_specific['subpartitioning'] = {
+                'method': sub_method, 'columns': sub_columns,
+                'default_count': sub_count,
+                'segments': sum(partition.get('subpartition_count') or 0 for partition in partitions),
+            }
+        if interval_expression:
+            engine_specific['interval'] = interval_expression
+        if reference_constraint:
+            engine_specific['reference_constraint'] = reference_constraint
+        if autolist:
+            engine_specific['autolist'] = True
+        if global_indexes:
+            engine_specific['global_indexes'] = global_indexes
+
+        notes.extend(self._what_the_scheme_costs(
+            source_table_name, method, sub_method, sub_columns, sub_count, partitions,
+            interval_expression, autolist, global_indexes, engine_specific))
+
+        target_key_definition = ''
+        try:
+            target_key_definition = oracle_partitioning.key_definition(
+                method, columns, self.config_parser.convert_names_case)
+        except oracle_partitioning.UntranslatableScheme as e:
+            named = method or 'a method the catalogue does not name'
+            ## the two methods which have no key to write into a PARTITION BY clause get the
+            ## sentence which says WHY rather than the one which says that they are not among
+            ## the three - §4.2 is a report a user has to be able to act on
+            why = self.WHY_A_METHOD_CANNOT_BE_CARRIED_OVER.get(method) or str(e)
+            blockers.append(
+                f"{source_table_name} is partitioned by {named} on the source and the same "
+                f"scheme cannot be built on PostgreSQL: {why}. Set source_partitioning: flatten "
+                f"for this table, or write a scheme of your own with target_partitioning")
+
+        if target_key_definition:
+            blockers.extend(self._translate_the_bounds(source_table_name, method, columns,
+                                                       partitions, notes))
+
+        return {
+            'is_partitioned': True,
+            ## a partition of an Oracle table is not a table of the schema, so nothing this
+            ## connector is asked about is ever one
+            'is_partition': False,
+            'parent_table': '',
+            'parent_schema': '',
+            'partition_bound': '',
+            'method': method,
+            'columns': columns,
+            'key_definition': f"{method} ({', '.join(columns)})" if columns else method,
+            'target_key_definition': target_key_definition,
+            'level': 1,
+            ## a sub-partition of Oracle is not a table of the schema, so nothing walks into the
+            ## second level and finds it - the catalogue row is the only place which says it is
+            ## there. It is recorded so that the report and the protocol say what the source
+            ## really has, and it is NOT built - §2.2
+            'levels_below': ([{'level': 2, 'method': sub_method, 'columns': sub_columns,
+                               'partition_count': engine_specific['subpartitioning']['segments']}]
+                             if sub_method and sub_method != 'NONE' else []),
+            'partitions': [{
+                'name': partition['name'],
+                'bound': partition['high_value_text'],
+                'target_bound': partition.get('target_bound', ''),
+                'is_default': partition.get('is_default', False),
+                ## §2.2: the second level is not carried over, so nothing walks into it
+                'is_partitioned': False,
+                'rows': partition.get('rows'),
+            } for partition in partitions],
+            'partition_count': len(partitions),
+            'engine_specific': engine_specific,
+            'notes': notes,
+            'blockers': blockers,
+        }
+
+    def _partition_key_columns(self, cursor, binds, view_name):
+        """The key columns of one level, in the order Oracle numbers them."""
+        cursor.execute(f"""
+            SELECT column_name
+            FROM {view_name}
+            WHERE owner = :owner AND name = :table_name AND object_type = 'TABLE'
+            ORDER BY column_position
+        """, binds)
+        return [row[0] for row in cursor.fetchall()]
+
+    def _table_partitions(self, cursor, binds):
+        """
+        The partitions of the first level, in the order their bounds run in.
+
+        HIGH_VALUE is a LONG, which is why it is selected and never compared: Oracle refuses a
+        LONG in a WHERE clause, and the driver answers it as text.
+        """
+        cursor.execute("""
+            SELECT partition_name, high_value, partition_position, num_rows,
+                   tablespace_name, subpartition_count
+            FROM all_tab_partitions
+            WHERE table_owner = :owner AND table_name = :table_name
+            ORDER BY partition_position
+        """, binds)
+        partitions = []
+        for row in cursor.fetchall():
+            high_value = row[1]
+            if isinstance(high_value, bytes):
+                high_value = high_value.decode('utf-8', errors='replace')
+            high_value = (high_value or '').strip()
+            partitions.append({
+                'name': row[0],
+                'high_value_text': high_value,
+                'position': int(row[2]) if row[2] is not None else None,
+                ## NUM_ROWS is the optimizer's, gathered by DBMS_STATS - an estimate, and NULL
+                ## where nobody has gathered it. Reported as unknown rather than as zero.
+                'rows': int(row[3]) if row[3] is not None else None,
+                'tablespace': row[4],
+                'subpartition_count': int(row[5]) if row[5] is not None else 0,
+                'is_default': high_value.upper() == oracle_partitioning.DEFAULT_LIST_VALUE,
+            })
+        return partitions
+
+    def _global_indexes(self, cursor, binds):
+        """
+        The indexes of a partitioned table which Oracle did not partition with it - §3.2:
+        PostgreSQL has none, and a global UNIQUE index over a column outside the partition key
+        is the one which cannot be reproduced at all.
+        """
+        try:
+            cursor.execute("""
+                SELECT index_name, uniqueness
+                FROM all_indexes
+                WHERE table_owner = :owner AND table_name = :table_name AND partitioned = 'NO'
+                ORDER BY index_name
+            """, binds)
+            return [{'name': row[0], 'is_unique': (row[1] or '').upper() == 'UNIQUE'}
+                    for row in cursor.fetchall()]
+        except Exception as e:
+            ## P2-8: None is "not read" and [] is "there are none", and the two must not look
+            ## alike - a table whose global indexes nobody could list is not a table with none
+            self.config_parser.print_log_message(
+                'DEBUG', f"oracle_connector: fetch_table_partitioning: the global indexes could "
+                         f"not be read ({e}) - they are reported as not read.")
+            return None
+
+    def _what_the_scheme_costs(self, table_name, method, sub_method, sub_columns, sub_count,
+                               partitions, interval_expression, autolist, global_indexes,
+                               engine_specific):
+        """
+        Everything about an Oracle scheme which a reader has to be told whatever becomes of the
+        table - §4.2 of the design, which is the half of the report a user reads while deciding.
+        """
+        notes = []
+        if sub_method and sub_method != 'NONE':
+            segments = engine_specific['subpartitioning']['segments'] or (
+                len(partitions) * (sub_count or 0))
+            key = f" ({', '.join(sub_columns)})" if sub_columns else ''
+            notes.append(
+                f"{table_name} is sub-partitioned on the source: {method} over "
+                f"{len(partitions)} partition(s), each sub-partitioned by {sub_method}{key} - "
+                f"{segments or 'an unknown number of'} segments in all. Only the first level is "
+                f"carried over. PostgreSQL can express the second and it is almost always the "
+                f"wrong thing to build: every segment is a relation with its own statistics and "
+                f"indexes, and the two things a hash sub-level buys on Oracle - I/O spread over "
+                f"devices and partition-wise joins on the sub-key - are not what it buys here")
+        if interval_expression:
+            notes.append(
+                f"{table_name} is INTERVAL partitioned on the source ({interval_expression}). "
+                f"Oracle creates the next partition BY ITSELF when a row needs one and "
+                f"PostgreSQL does not: the {len(partitions)} partition(s) which exist today are "
+                f"carried over, and after the newest of them every INSERT is refused with 'no "
+                f"partition of relation ... found for row'. Give the table a scheme of your own "
+                f"with target_partitioning and its future: window, or hand the maintenance to "
+                f"pg_partman on the target")
+        if autolist:
+            notes.append(
+                f"{table_name} is an AUTOMATIC LIST on the source: Oracle adds a partition for "
+                f"each new value by itself. PostgreSQL does not - a value no partition lists is "
+                f"refused unless the table has a DEFAULT partition")
+        if global_indexes is None:
+            notes.append(
+                f"the indexes of {table_name} could not be listed, so it was NOT read whether "
+                f"any of them is a GLOBAL index. PostgreSQL has none, and a global UNIQUE index "
+                f"over a column outside the partition key is the one which cannot be reproduced "
+                f"at all")
+        else:
+            ## a global UNIQUE index is the finding - §3.2 - and it is named on its own. The
+            ## ordinary ones are counted rather than listed: PostgreSQL creates each of them as
+            ## a partitioned index over the same columns and finds the same rows, so naming
+            ## twenty of them one by one buries the one line which matters
+            for index in [entry for entry in global_indexes if entry['is_unique']]:
+                notes.append(
+                    f"{table_name} carries the GLOBAL UNIQUE index {index['name']}. PostgreSQL "
+                    f"has no global index: a unique index on a partitioned table is a "
+                    f"partitioned index and must contain every partitioning column. If it does "
+                    f"not, it cannot be created - and this run refuses the table before it "
+                    f"creates anything rather than finding out at the end")
+            ordinary = len([entry for entry in global_indexes if not entry['is_unique']])
+            if ordinary:
+                notes.append(
+                    f"{table_name} carries {ordinary} GLOBAL index(es) which are not unique. "
+                    f"PostgreSQL creates each of them as a partitioned index over the same "
+                    f"columns - the same rows are found, and the index is one relation per "
+                    f"partition rather than one")
+        tablespaces = engine_specific.get('tablespaces') or []
+        if len(tablespaces) > 1:
+            notes.append(
+                f"the partitions of {table_name} are spread over the tablespaces "
+                f"{', '.join(tablespaces)}. The placement is NOT carried over: every partition "
+                f"of the target is created in the default tablespace")
+        return notes
+
+    def _translate_the_bounds(self, table_name, method, columns, partitions, notes):
+        """
+        The bound of every partition, written the way PostgreSQL writes it, set on the partition
+        itself. Returns the blockers - the bounds which have no counterpart.
+
+        A range scheme is translated in one pass because a PostgreSQL range partition is written
+        with both of its ends and an Oracle one only with its upper: the lower bound of a
+        partition is the HIGH_VALUE of the one below it, and MINVALUE opens the first.
+        """
+        blockers = []
+        previous_high = None
+        a_bound_carries_a_time = False
+        for position, partition in enumerate(partitions):
+            try:
+                if method == 'RANGE':
+                    ## the lower bound of a partition is the HIGH_VALUE of the one below it,
+                    ## whether or not this one could be written - so that a second failure is
+                    ## this partition's own and not a consequence of the first
+                    lower, previous_high = previous_high, partition['high_value_text']
+                    partition['target_bound'] = oracle_partitioning.range_bound(
+                        lower, partition['high_value_text'], len(columns))
+                    a_bound_carries_a_time = a_bound_carries_a_time or any(
+                        oracle_partitioning.has_time_of_day(
+                            oracle_partitioning.to_postgresql_value(value))
+                        for value in oracle_partitioning.high_value_items(partition['high_value_text']))
+                elif method == 'LIST':
+                    partition['target_bound'] = oracle_partitioning.list_bound(
+                        partition['high_value_text'])
+                else:
+                    ## HASH. A method which is none of the three never reaches here: its key
+                    ## definition is refused first, and the caller does not translate bounds
+                    ## for a scheme which has no clause to carry them
+                    partition['target_bound'] = oracle_partitioning.hash_bound(
+                        position, len(partitions))
+            except oracle_partitioning.UntranslatableScheme as e:
+                blockers.append(
+                    f"the partition {partition['name']} of {table_name} cannot be given to "
+                    f"PostgreSQL as it stands: {e}")
+        if method == 'RANGE' and not blockers and partitions:
+            last = partitions[-1]
+            ## an Oracle range scheme which ends in MAXVALUE covers everything above its last
+            ## bound and needs nothing said. One which does not stops taking rows at that bound,
+            ## on the target exactly as it did on the source - and §7 asks for the date to be
+            ## said in advance rather than found when an INSERT is refused
+            highest = oracle_partitioning.high_value_items(last['high_value_text'])
+            if highest and not any(value.strip().upper() == oracle_partitioning.MAXVALUE
+                                   for value in highest):
+                notes.append(
+                    f"the partitions of {table_name} end at {last['name']}, whose bound is "
+                    f"{last.get('target_bound', '')}. The source has no MAXVALUE partition and "
+                    f"the target is given none either, so a row past that bound is refused with "
+                    f"'no partition of relation ... found for row' - which is what the source "
+                    f"does today as well. Write a target_partitioning entry with a future: "
+                    f"window if the migration is the moment to change that")
+
+        if method == 'HASH' and not blockers:
+            notes.append(
+                f"{table_name} is partitioned by HASH into {len(partitions)} on the source, and "
+                f"the target is given {len(partitions)} hash partitions over the same column - "
+                f"but Oracle hashes with its own function and PostgreSQL with its own, so a row "
+                f"which sat in one partition on Oracle sits in another here. Nothing is lost by "
+                f"it: the rows go in through the parent and the target routes each of them")
+        if a_bound_carries_a_time:
+            notes.append(
+                f"a partition bound of {table_name} carries a time of day. An Oracle DATE holds "
+                f"one and the PostgreSQL `date` this migration gives it does not, so a boundary "
+                f"written at 06:00 becomes midnight on the target and the rows of those six "
+                f"hours land in the partition below the one they were in")
+        return blockers
+
+    ## Why the two Oracle methods which are not RANGE, LIST or HASH cannot be carried over -
+    ## §4.2. Neither of them has a key which could be written into a PARTITION BY clause.
+    WHY_A_METHOD_CANNOT_BE_CARRIED_OVER = {
+        'REFERENCE': ('the child is partitioned by the parent\'s key through a foreign key, and '
+                      'its partitions have no bound of their own. PostgreSQL has nothing for it '
+                      '- the child needs its own copy of the parent\'s column, or a scheme of '
+                      'its own'),
+        'SYSTEM': ('the application names the partition on every INSERT and there is no '
+                   'partitioning key at all, so there is nothing to migrate'),
+    }
+
+    def fetch_partitioning_facts(self, settings):
+        """
+        Everything about one Oracle table which decides whether it CAN be partitioned - read
+        before anything is created, which is the moment the answer is still free.
+
+        See DatabaseConnector.fetch_partitioning_facts() for the shape. Every number here comes
+        from the catalogue or from the statistics DBMS_STATS has already gathered: nothing in
+        this method reads a row of the table. An estimate is answered as an estimate - a column
+        nobody has gathered statistics for has a null fraction which is *not known*, and the
+        check which needed it is reported as one which was NOT made.
+        """
+        source_schema_name = settings['source_schema_name']
+        source_table_name = settings['source_table_name']
+        binds = {'owner': (source_schema_name or '').upper(),
+                 'table_name': (source_table_name or '').upper()}
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            row_estimate = self._row_estimate(cursor, binds)
+            columns = self._column_facts(cursor, binds, row_estimate)
+            unique_keys = self._unique_keys(cursor, binds)
+            referenced_by = self._referencing_foreign_keys(cursor, binds)
+            cursor.close()
+        except Exception as e:
+            self.config_parser.print_log_message(
+                'WARNING', f"oracle_connector: fetch_partitioning_facts: the facts of "
+                           f"{source_schema_name}.{source_table_name} could not be read ({e}) - "
+                           f"the checks which need them are reported as NOT made rather than as "
+                           f"passed.")
+            return None
+
+        return {
+            'columns': columns,
+            'unique_keys': unique_keys,
+            ## Oracle has no exclusion constraint and no table inheritance - these are absences
+            ## of the engine, not things this connector did not read
+            'exclusion_constraints': [],
+            'referenced_by': referenced_by,
+            'inherits_from_a_plain_table': False,
+            'is_a_plain_inheritance_parent': False,
+            'row_estimate': row_estimate,
+            'date_range_types': self.DATE_RANGE_TYPES,
+        }
+
+    def _row_estimate(self, cursor, binds):
+        """ALL_TABLES.NUM_ROWS - the optimizer's, and NULL where nobody gathered it."""
+        cursor.execute("""
+            SELECT num_rows FROM all_tables WHERE owner = :owner AND table_name = :table_name
+        """, binds)
+        row = cursor.fetchone()
+        return int(row[0]) if row and row[0] is not None else None
+
+    def _column_facts(self, cursor, binds, row_estimate):
+        """
+        Every column of the table and what PostgreSQL will be able to do with it.
+
+        The null fraction is NUM_NULLS over NUM_ROWS out of ALL_TAB_COL_STATISTICS, which is
+        what DBMS_STATS gathered and may be stale or missing; where either number is absent the
+        fraction is None, which the checks read as "not known" and never as zero.
+        """
+        cursor.execute("""
+            SELECT c.column_name, c.data_type, c.data_type_owner, c.nullable,
+                   c.virtual_column, s.num_nulls
+            FROM all_tab_cols c
+            LEFT JOIN all_tab_col_statistics s
+                ON s.owner = c.owner AND s.table_name = c.table_name
+               AND s.column_name = c.column_name
+            WHERE c.owner = :owner AND c.table_name = :table_name
+              AND c.hidden_column = 'NO'
+            ORDER BY c.column_id
+        """, binds)
+        columns = {}
+        for row in cursor.fetchall():
+            data_type = (row[1] or '').upper()
+            ## a type this account cannot resolve to one of Oracle's own - an object type, a
+            ## VARRAY, a nested table. The migration gives it a composite or an array, and
+            ## neither has a default operator class of its own
+            is_user_defined = bool(row[2])
+            can_be_a_key = not is_user_defined and data_type not in self.TYPES_WITHOUT_AN_OPERATOR_CLASS
+            num_nulls = row[5]
+            columns[row[0]] = {
+                'type_name': data_type,
+                'not_null': (row[3] or '').upper() == 'N',
+                'is_generated': (row[4] or '').upper() == 'YES',
+                'has_btree_opclass': can_be_a_key,
+                'has_hash_opclass': can_be_a_key,
+                'null_fraction': (float(num_nulls) / row_estimate
+                                  if num_nulls is not None and row_estimate else None),
+            }
+        return columns
+
+    def _unique_keys(self, cursor, binds):
+        """
+        The primary key, every unique constraint and every unique index which is not one - §3.1
+        applies to all three alike, and a table can have a key which extends cleanly and three
+        unique indexes which do not.
+        """
+        cursor.execute("""
+            SELECT c.constraint_name, c.constraint_type,
+                   listagg(cc.column_name, ', ') WITHIN GROUP (ORDER BY cc.position) AS columns
+            FROM all_constraints c
+            JOIN all_cons_columns cc
+              ON cc.owner = c.owner AND cc.constraint_name = c.constraint_name
+            WHERE c.owner = :owner AND c.table_name = :table_name
+              AND c.constraint_type IN ('P', 'U')
+            GROUP BY c.constraint_name, c.constraint_type
+            ORDER BY c.constraint_name
+        """, binds)
+        keys = [{'name': row[0],
+                 'columns': [name.strip() for name in (row[2] or '').split(',') if name.strip()],
+                 'is_primary': row[1] == 'P'}
+                for row in cursor.fetchall()]
+
+        cursor.execute("""
+            SELECT i.index_name,
+                   listagg(ic.column_name, ', ') WITHIN GROUP (ORDER BY ic.column_position) AS columns
+            FROM all_indexes i
+            JOIN all_ind_columns ic
+              ON ic.index_owner = i.owner AND ic.index_name = i.index_name
+            WHERE i.table_owner = :owner AND i.table_name = :table_name
+              AND i.uniqueness = 'UNIQUE'
+              AND NOT EXISTS (SELECT 1 FROM all_constraints c
+                               WHERE c.owner = i.owner AND c.constraint_name = i.index_name
+                                 AND c.constraint_type IN ('P', 'U'))
+            GROUP BY i.index_name
+            ORDER BY i.index_name
+        """, binds)
+        keys.extend({'name': row[0],
+                     'columns': [name.strip() for name in (row[1] or '').split(',') if name.strip()],
+                     'is_primary': False}
+                    for row in cursor.fetchall())
+        return keys
+
+    def _referencing_foreign_keys(self, cursor, binds):
+        """§3.5: a foreign key pointing AT a partitioned table needs PostgreSQL 12."""
+        cursor.execute("""
+            SELECT child.constraint_name, child.table_name
+            FROM all_constraints child
+            JOIN all_constraints parent
+              ON parent.owner = child.r_owner AND parent.constraint_name = child.r_constraint_name
+            WHERE child.constraint_type = 'R'
+              AND parent.owner = :owner AND parent.table_name = :table_name
+            ORDER BY child.constraint_name
+        """, binds)
+        return [{'name': row[0], 'table': row[1]} for row in cursor.fetchall()]
 
     def target_table_exists(self, target_schema_name, target_table_name):
         query = """

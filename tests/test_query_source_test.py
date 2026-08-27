@@ -492,6 +492,8 @@ SOURCE_TEST_WITHOUT_MECHANISM = {
     'db2_query_conversion.py': 'the dialect of the three Db2 connectors, which have no source '
                                'mechanism of their own.',
     'sql_anywhere_query_conversion.py': 'the dialect only - see sql_anywhere_connector.py.',
+    'oracle_partitioning.py': 'not a connector - the partitioning of Oracle, written the way '
+                              'PostgreSQL writes it. It has no driver in it at all.',
     'match_schemas.py': 'not a connector - it compares two schemas.',
     'tsql_parser.py': 'not a connector - the parser the Transact-SQL family shares.',
 }

@@ -352,6 +352,47 @@ def test_a_key_which_contains_the_partitioning_columns_raises_nothing():
     assert issues == [] and warnings == []
 
 
+def test_a_preserved_scheme_is_checked_against_the_keys_too():
+    """
+    Not the smaller case, and the one a PostgreSQL source could never show: Oracle keeps a
+    primary key which does not contain the partitioning column in a GLOBAL index, which is legal
+    and ordinary there. PostgreSQL has no global index, so the table would be created, the data
+    would be loaded, and ADD PRIMARY KEY would be refused at the very end of the run.
+    """
+    decision = plan_of()['orders']
+    assert decision.action == partitioning.PRESERVE
+    partitioning.check_preserved_keys(
+        decision, [{'name': 'orders_pk', 'columns': ['order_id'], 'is_primary': True}])
+    assert any('orders_pk' in issue and 'created_at' in issue for issue in decision.issues)
+    ## and it says what can be done about a scheme nobody chose, which is not what it says
+    ## about an entry somebody wrote
+    assert any('source_partitioning: flatten' in issue for issue in decision.issues)
+
+
+def test_a_preserved_key_which_contains_the_partitioning_column_raises_nothing():
+    decision = plan_of()['orders']
+    partitioning.check_preserved_keys(
+        decision, [{'name': 'orders_pk', 'columns': ['order_id', 'created_at'],
+                    'is_primary': True}])
+    assert decision.issues == []
+
+
+def test_a_preserved_table_whose_keys_cannot_be_read_says_the_check_was_not_made():
+    decision = plan_of()['orders']
+    before = len(decision.warnings)
+    partitioning.check_preserved_keys(decision, None)
+    assert decision.issues == []
+    assert any('NOT checked' in warning for warning in decision.warnings[before:])
+
+
+def test_only_a_preserved_table_is_checked_this_way():
+    """A flattened table keeps its key as it is, and a re-partitioned one is checked by §4.4."""
+    decision = plan_of(mode='flatten')['orders']
+    partitioning.check_preserved_keys(
+        decision, [{'name': 'orders_pk', 'columns': ['order_id'], 'is_primary': True}])
+    assert decision.issues == []
+
+
 def test_a_source_whose_keys_cannot_be_read_says_the_check_was_not_made():
     issues, warnings = check(facts=facts_of(unique_keys=None))
     assert issues == []
@@ -642,6 +683,9 @@ def planner_with(schemes, mode='preserve', selected=None, repartitioned=(), vers
         lambda level, message: made.messages.append((level, str(message)))
     made.config_parser.is_object_selected.side_effect = lambda kind, name: (
         (True, None) if selected is None or name in selected else (False, 'excluded'))
+    ## names_case_handling: the target scheme is recorded and written in the names the target
+    ## has, which for a PostgreSQL source are the names the source had
+    made.config_parser.convert_names_case = lambda name: (name or '').lower()
     made.config_parser.get_source_partitioning.side_effect = lambda table_name=None: mode
     made.config_parser.get_target_partitioning.return_value = [
         {'table_name': name, 'partition_by': 'RANGE', 'partitioning_columns': 'ts',
@@ -731,7 +775,10 @@ def test_the_analysis_reports_what_is_there_and_what_will_happen_to_it():
     made = planner_with(ORDERS)
     made.check_partitioning()
     report = '\n'.join(message for _level, message in made.messages)
-    assert '1 partitioned table(s) of the source, holding 4 partition(s)' in report
+    assert '1 of 6 table(s) are partitioned on the source, holding 4 partition(s)' in report
+    ## §4.2's headline counts the schemes of more than one level on their own - §2.2 is about
+    ## what reproducing one costs
+    assert '1 of them are partitioned on more than one level' in report
     assert 'RANGE (created_at)' in report
     assert 'preserved' in report
 

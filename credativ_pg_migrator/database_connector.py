@@ -1910,6 +1910,37 @@ class DatabaseConnector(ABC):
         `migration.source_partitioning` and by `target_partitioning`, and nothing of the source
         scheme is carried over by this method answering.
 
+        **A source which does not write its scheme the way PostgreSQL writes it** answers four
+        more keys, all optional, all absent where the source is PostgreSQL and the two spellings
+        are one. Without them the bound and the key of the source are used as they stand, which
+        is right for exactly one of the twelve sources.
+
+            'target_key_definition': str,   # the PARTITION BY of the target, in the names the
+                                            # migration gives the columns. Absent: use
+                                            # 'key_definition' as it stands
+            'levels_below': [{'level': int, 'method': str, 'columns': [str],
+                              'partition_count': int}],
+                                            # the levels under this one whose partitions are not
+                                            # relations of their own, so nothing walks into them
+                                            # and only the catalogue row says they are there -
+                                            # and which this connector therefore does not carry
+                                            # over. Absent: the walk finds every level
+            'partitions': [{…, 'target_bound': str}]   # the same bound, written as PostgreSQL
+                                            # writes it. Absent: use 'bound' as it stands
+            'notes':    [str],   # facts about the scheme of the source which the reader has to
+                                 # be told whatever becomes of the table - a mechanism with no
+                                 # counterpart, a level which is not carried over, a global
+                                 # index PostgreSQL cannot have
+            'blockers': [str],   # why this scheme CANNOT be built on the target as it stands.
+                                 # Reported only where it would be preserved, because a table
+                                 # which is flattened or re-partitioned does not need it built.
+                                 # Each of them stops the run, and each names what to write
+                                 # instead
+
+        A `notes` entry is said even when the table is flattened; a `blockers` entry is a run
+        which otherwise fails in the middle of creating the partitions, and it is refused before
+        anything is created. See development/PARTITIONING_STRATEGY.md §2.2 and §4.2.
+
         A connector which does not read the partitioning of its source declares it in
         OBJECT_KINDS_NOT_READ under 'table_partitioning'; a source which has no partitioning at
         all declares it in OBJECT_KINDS_ABSENT. An empty answer from a connector which declares

@@ -2986,6 +2986,7 @@ class MigratorTables:
             source_root_table_name TEXT,
             source_partition_columns TEXT,
             source_partition_ranges TEXT,
+            source_partitioning_engine_specific TEXT,
             task_created TIMESTAMP DEFAULT clock_timestamp(),
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
@@ -4925,13 +4926,15 @@ class MigratorTables:
             self.protocol_connection.connection.rollback()
 
         target_partitions = {}
+        target_levels = {}
         try:
             cursor.execute(f'''
-                SELECT target_table_name, target_partition_ranges
+                SELECT target_table_name, target_partition_ranges, target_table_partitioning_level
                 FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_target_table_partitioning()}"
             ''')
-            for table_name, ranges in cursor.fetchall():
+            for table_name, ranges, level in cursor.fetchall():
                 target_partitions[table_name] = len([part for part in (ranges or '').split(';') if part.strip()])
+                target_levels[table_name] = level or 1
         except Exception:
             self.protocol_connection.connection.rollback()
 
@@ -4978,6 +4981,11 @@ class MigratorTables:
                 'table': source_table, 'source': source_text, 'source_count': source_count,
                 'target': target_text, 'created': created, 'partitioned': bool(partitioned),
                 'was_partitioned': bool(levels), 'success': success,
+                ## how deep each side is. A source whose scheme has more levels than the target
+                ## got is not "preserved" - part of it was left behind, on purpose, and the
+                ## summary is where a reader looks for what a run changed
+                'source_levels': len({level['level'] for level in levels}) if levels else 0,
+                'target_levels': target_levels.get(target_table, 1 if partitioned else 0),
             })
 
         if not report:
@@ -4992,7 +5000,10 @@ class MigratorTables:
         lines.append('-' * 110)
         for item in report:
             if item['was_partitioned'] and item['partitioned']:
-                what = 'scheme of the source preserved'
+                dropped = item['source_levels'] - item['target_levels']
+                what = ('scheme of the source preserved' if dropped <= 0 else
+                        f"first {item['target_levels']} level(s) preserved, {dropped} NOT "
+                        f"carried over")
             elif item['was_partitioned']:
                 ## the line which matters most: the source partitioned this table and the
                 ## target does not, so something the source had is not there any more
@@ -6196,11 +6207,12 @@ class MigratorTables:
             'source_root_table_name': row[6],
             'source_partition_columns': row[7],
             'source_partition_ranges': row[8],
-            'task_created': row[9],
-            'task_started': row[10],
-            'task_completed': row[11],
-            'success': row[12],
-            'message': row[13]
+            'source_partitioning_engine_specific': row[9],
+            'task_created': row[10],
+            'task_started': row[11],
+            'task_completed': row[12],
+            'success': row[13],
+            'message': row[14]
         }
 
     def insert_source_table_partitioning(self, settings):
@@ -6209,14 +6221,19 @@ class MigratorTables:
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
             (source_schema_name, source_table_name, source_table_id, source_table_partitioning_level,
-            source_partitioning_method, source_root_table_name, source_partition_columns, source_partition_ranges)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            source_partitioning_method, source_root_table_name, source_partition_columns, source_partition_ranges,
+            source_partitioning_engine_specific)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
+        engine_specific = settings.get('source_partitioning_engine_specific')
         params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_table_id'),
                   settings.get('source_table_partitioning_level'), settings.get('source_partitioning_method'),
                   settings.get('source_root_table_name'), settings.get('source_partition_columns'),
-                  settings.get('source_partition_ranges'))
+                  settings.get('source_partition_ranges'),
+                  ## what only this engine has, written as it came - json.dumps() rather than a
+                  ## str() of the dict, so that whoever reads the protocol back can parse it
+                  json.dumps(engine_specific, default=str) if engine_specific else None)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)

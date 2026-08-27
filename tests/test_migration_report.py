@@ -100,7 +100,7 @@ def test_a_migration_with_nothing_partitioned_prints_no_block_at_all():
 def test_a_preserved_scheme_is_shown_on_both_sides():
     lines = partitioning_lines(
         source=[('orders', 'RANGE', 'order_date', 'orders_2023: x; orders_2024: y', 1)],
-        target=[('orders', 'orders_2023: x; orders_2024: y')],
+        target=[('orders', 'orders_2023: x; orders_2024: y', 1)],
         tables=[('orders', 'orders', True, 'RANGE', 'order_date', None, True)])
     body = '\n'.join(lines)
     assert 'RANGE (order_date)' in body
@@ -117,13 +117,34 @@ def test_a_scheme_of_more_than_one_level_says_so():
         source=[('inventory_movements', 'RANGE', 'moved_at', 'a: x; b: y; c: z', 1),
                 ('inventory_movements', 'HASH', 'product_id', 'p0: x; p1: y', 2),
                 ('inventory_movements', 'HASH', 'product_id', 'q0: x; q1: y', 2)],
-        target=[('inventory_movements', 'a: x; b: y; c: z; p0: x; p1: y; q0: x; q1: y')],
+        target=[('inventory_movements', 'a: x; b: y; c: z; p0: x; p1: y; q0: x; q1: y', 2)],
         tables=[('inventory_movements', 'inventory_movements', True, 'RANGE', 'moved_at', None, True)])
     body = '\n'.join(lines)
     assert 'RANGE (moved_at) / HASH (product_id)' in body
     ## seven partitions on each side - three at the top and two under each of two of them.
     ## Both columns say 7, which is the point: they count the same thing
     assert body.count('     7 |') == 2
+
+
+def test_a_level_the_target_did_not_get_is_not_reported_as_preserved():
+    """
+    An Oracle composite arrives one level deep on purpose - §2.2 of
+    development/PARTITIONING_STRATEGY.md - and the summary is where a reader looks for what a
+    run changed. "scheme of the source preserved" over a scheme which lost a level is the one
+    sentence this block must not print.
+    """
+    lines = partitioning_lines(
+        source=[('ORDERS', 'RANGE', 'ORDER_DATE', 'ORDERS_2023: x; ORDERS_2024: y', 1),
+                ('ORDERS', 'HASH', 'CUSTOMER_ID', '', 2)],
+        target=[('ORDERS', 'orders_2023: x; orders_2024: y', 1)],
+        tables=[('ORDERS', 'ORDERS', True, 'RANGE', 'order_date', None, True)])
+    body = '\n'.join(lines)
+    ## the source scheme in the names Oracle holds, the target scheme in the names the target
+    ## has - the two columns are of two different databases and are written as each has them
+    assert 'RANGE (ORDER_DATE) / HASH (CUSTOMER_ID)' in body
+    assert 'RANGE (order_date)' in body
+    assert 'first 1 level(s) preserved, 1 NOT carried over' in body
+    assert 'scheme of the source preserved' not in body
 
 
 def test_a_flattened_table_is_the_line_which_matters_most():

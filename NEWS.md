@@ -3,6 +3,8 @@
 ## 0.17.0 - 25.08.2026
 
 - Partitioning for PostgreSQL to PostgreSQL migrations: the scheme of the source is carried over as it is, flattened into one ordinary table, or replaced by a scheme the source never had - globally and per table
+- Partitioning for Oracle to PostgreSQL migrations: the scheme of the source is read and reported before anything is created, and a RANGE, LIST or HASH scheme is carried over. What Oracle has and PostgreSQL does not is named rather than quietly dropped - a sub-partitioned second level is not reproduced and the run says how many segments were left behind, an INTERVAL scheme keeps its partitions and the run says that the automatic extension stops, and REFERENCE and SYSTEM partitioning stop the run instead of arriving as something else. Read against a mocked catalogue; not yet run against a live Oracle instance
+- A primary key or unique constraint which does not contain the partitioning columns stops the run before anything is created - now also for a scheme carried over from the source, which is how an Oracle table with a global unique index used to reach the end of a migration and fail there
 - The pre-migration analysis reports what the source partitions and stops the run for a partitioning configuration which cannot be built
 - The closing summary names rather than counts: every table with its row counts and its duration, every object which did not arrive with what the target said about it, what was never attempted, and what each table is partitioned by on both sides. `summary.report_filename` writes it into a file
 

@@ -246,7 +246,8 @@ def build_comments_catalog(config_parser):
             'source_partitioning_method': 'How the source partitions the table on this level - RANGE, LIST, HASH, or what the engine calls it.',
             'source_root_table_name': 'The table at the top of the partitioning tree this level belongs to. A scheme of more than one level is recorded one row per level, and this is what says which rows belong together.',
             'source_partition_columns': 'The columns the source partitions the table by on this level.',
-            'source_partition_ranges': 'The bounds of the partitions of the source on this level.',
+            'source_partition_ranges': 'The bounds of the partitions of the source on this level, as the source writes them.',
+            'source_partitioning_engine_specific': 'What only this engine has, as JSON - the INTERVAL expression of an Oracle scheme which extends itself, the sub-partitioning which is not carried over, the tablespaces the partitions sit in. It is written so that it can be read; nothing in the migration reads it back.',
         },
     }
 

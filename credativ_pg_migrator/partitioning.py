@@ -39,6 +39,7 @@ object, no clock. That is what makes the decision testable without a database, w
 """
 
 import datetime
+import re
 
 ## What a table is doing in this migration.
 NOT_PARTITIONED = 'not partitioned'
@@ -56,6 +57,12 @@ NOT_A_TABLE_OF_ITS_OWN = (PART_OF_PARENT,)
 METHOD_VERSIONS = {'RANGE': 100000, 'LIST': 100000, 'HASH': 110000}
 DEFAULT_PARTITION_VERSION = 110000
 
+## PostgreSQL refuses an identifier longer than this, and truncates the rest of it silently -
+## which turns two partitions of a long table into one name and a collision. It is checked
+## against a name this migrator generates and against one it carries over from a source whose
+## own limit is higher: Oracle allows 128 bytes since 12.2.
+MAX_IDENTIFIER_LENGTH = 63
+
 
 def version_text(version_num):
     """A PostgreSQL server version number as the number a person reads."""
@@ -64,16 +71,64 @@ def version_text(version_num):
     return str(version_num // 10000)
 
 
+def split_top_level_commas(text):
+    """
+    Split on the commas which are not inside brackets or a string literal.
+
+    Every catalogue which writes a partitioning key or a bound writes more than one of them as
+    a comma-separated list, and every one of them can hold a comma which is not a separator -
+    `RANGE (date_trunc('month'::text, created_at))` in pg_get_partkeydef(), and
+    `10, TO_DATE(' 2024-01-01 00:00:00', 'SYYYY-MM-DD HH24:MI:SS')` in Oracle's HIGH_VALUE.
+    Reading those as two values answers columns and bounds which do not exist, so the split
+    lives here, once, rather than in each connector which needs it.
+    """
+    parts = []
+    depth = 0
+    in_literal = False
+    current = []
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if in_literal:
+            current.append(char)
+            if char == "'":
+                if index + 1 < len(text) and text[index + 1] == "'":
+                    current.append(text[index + 1])
+                    index += 2
+                    continue
+                in_literal = False
+            index += 1
+            continue
+        if char == "'":
+            in_literal = True
+            current.append(char)
+        elif char in '([':
+            depth += 1
+            current.append(char)
+        elif char in ')]':
+            depth -= 1
+            current.append(char)
+        elif char == ',' and depth == 0:
+            parts.append(''.join(current))
+            current = []
+        else:
+            current.append(char)
+        index += 1
+    parts.append(''.join(current))
+    return parts
+
+
 class Partition:
     """One partition which has to be created, and everything needed to create it."""
 
     __slots__ = ('name', 'parent', 'bound', 'key_definition', 'level', 'is_default',
-                 'start', 'end')
+                 'start', 'end', 'source_bound')
 
     def __init__(self, name, parent, bound, key_definition='', level=2, is_default=False,
-                 start=None, end=None):
+                 start=None, end=None, source_bound=''):
         self.name = name
         self.parent = parent
+        ## what the target is given - already PostgreSQL, whatever the source wrote
         self.bound = bound
         ## set when the partition is itself partitioned - the scheme has more than one level
         self.key_definition = key_definition
@@ -83,6 +138,10 @@ class Partition:
         ## scheme covers without parsing the bound it has just written
         self.start = start
         self.end = end
+        ## what the source wrote, where the two spellings differ - `VALUES LESS THAN
+        ## (TO_DATE(…))` beside the `FOR VALUES FROM … TO …` it became. The protocol keeps
+        ## both, so that a reader can see what was translated into what
+        self.source_bound = source_bound or bound
 
     def __repr__(self):
         return f'Partition({self.name!r} of {self.parent!r} {self.bound!r})'
@@ -114,11 +173,54 @@ class TableDecision:
 
     @property
     def key_definition(self):
+        """The key as the SOURCE writes it - which is what a report shows."""
         return self.scheme.get('key_definition', '')
+
+    @property
+    def target_key_definition(self):
+        """
+        The key the target is given, which is the same thing for a PostgreSQL source and is
+        not for any other: Oracle holds `ORDER_DATE` and the target may hold `order_date`, and
+        an unquoted RANGE (ORDER_DATE) in the CREATE TABLE of the target names a column which
+        is not there.
+        """
+        return self.scheme.get('target_key_definition') or self.key_definition
 
     @property
     def method(self):
         return self.scheme.get('method', '')
+
+    @property
+    def source_level_count(self):
+        """
+        How many levels the scheme of the source has - the number §4.2's headline reports as
+        "4 of them have more than one level".
+
+        Two sources answer it two ways, and both are right. A connector whose partitions are
+        relations of their own - postgresql - answers one level per call and the walk finds the
+        rest, so the depth is in the partitions the plan collected. A connector whose
+        sub-partitions are not relations at all - oracle - names them in `levels_below`, because
+        there is no walk which could find them.
+        """
+        if not self.scheme.get('is_partitioned'):
+            return 0
+        below = self.scheme.get('levels_below') or []
+        if below:
+            return 1 + len(below)
+        ## a Partition of the first level is level 2 - the parent is level 1
+        return max([partition.level for partition in self.partitions] or [2]) - 1
+
+    @property
+    def target_level_count(self):
+        """
+        How many levels the scheme the TARGET is given has - which is not always as many as the
+        source had. §2.2: an Oracle composite arrives one level deep on purpose.
+        """
+        if self.action == REPARTITION:
+            return 1
+        if self.action != PRESERVE:
+            return 0
+        return max([partition.level for partition in self.partitions] or [2]) - 1
 
     def describe(self):
         """One line for the report."""
@@ -175,7 +277,11 @@ def descendants_of(table_name, schemes, level=2, seen=None):
         found.append(Partition(
             name=name,
             parent=table_name,
-            bound=partition.get('bound', ''),
+            ## a source which does not write its bounds the way PostgreSQL does answers both,
+            ## and the target is given the translation - see the contract in
+            ## DatabaseConnector.fetch_table_partitioning()
+            bound=partition.get('target_bound') or partition.get('bound', ''),
+            source_bound=partition.get('bound', ''),
             ## a partition which is itself partitioned carries its own key, and its children
             ## come behind it
             key_definition=child_scheme.get('key_definition', '') if partition.get('is_partitioned') else '',
@@ -273,7 +379,14 @@ def _check(plan, schemes, selected_set, target_version_num):
     a run which otherwise fails somewhere in the middle.
     """
     for table_name, decision in plan.items():
+        ## what the connector found about the scheme of the source and the reader has to be
+        ## told whatever becomes of the table - a mechanism with no counterpart, a level which
+        ## is not carried over, a global index PostgreSQL cannot have. A note is a fact about
+        ## the source; a blocker is a reason the same scheme cannot be BUILT, and it applies
+        ## only where it would be.
+        decision.warnings.extend(decision.scheme.get('notes') or [])
         if decision.action == PRESERVE:
+            decision.issues.extend(decision.scheme.get('blockers') or [])
             _check_preserved(table_name, decision, schemes, selected_set, target_version_num)
         elif decision.action == FLATTEN:
             _check_flattened(decision)
@@ -300,11 +413,30 @@ def _check_preserved(table_name, decision, schemes, selected_set, target_version
             f"preserved scheme belong to their parent and are not selected one by one. Use "
             f"source_partitioning: flatten to migrate the table without them")
 
-    if not decision.key_definition:
+    if not decision.target_key_definition:
         decision.issues.append(
             f"{table_name} is partitioned on the source and its partitioning key could not be "
             f"read, so the same scheme cannot be built. Set source_partitioning: flatten for "
             f"this table to migrate it as one ordinary table")
+
+    if not decision.partitions:
+        decision.issues.append(
+            f"{table_name} is partitioned on the source and not one of its partitions could be "
+            f"read, so the target would be created partitioned with nothing under it - a table "
+            f"which refuses EVERY row with 'no partition of relation ... found for row'. Set "
+            f"source_partitioning: flatten for this table")
+
+    ## a partition name PostgreSQL truncates is a name which collides with the one beside it,
+    ## and the collision is found when the second CREATE TABLE fails. Oracle allows 128 bytes
+    ## since 12.2 and PostgreSQL allows 63.
+    for partition in decision.partitions:
+        if len(str(partition.name).encode('utf-8')) > MAX_IDENTIFIER_LENGTH:
+            decision.issues.append(
+                f"the partition {partition.name} of {table_name} is "
+                f"{len(str(partition.name).encode('utf-8'))} bytes long and PostgreSQL truncates "
+                f"an identifier at {MAX_IDENTIFIER_LENGTH}, which turns two partitions into one "
+                f"name. Rename it on the source, or set source_partitioning: flatten for this "
+                f"table")
 
     if not target_version_num:
         decision.warnings.append(
@@ -356,11 +488,6 @@ DATE_RANGES = ('year', 'quarter', 'month', 'week', 'day')
 ## The name a generated partition is given, unless the entry writes its own. It is the name
 ## the migrator has always used, so a configuration which runs today keeps its partition names.
 DEFAULT_PARTITION_NAME = '{table}_{range}_{start:%Y%m%d}'
-
-## PostgreSQL refuses an identifier longer than this, and truncates the rest of it silently -
-## which turns two partitions of a long table into one name and a collision.
-MAX_IDENTIFIER_LENGTH = 63
-
 
 def as_date(value):
     """
@@ -647,6 +774,42 @@ def _check_the_table_itself(verdict, table_name, facts):
             f"none of the three is worth much here")
 
 
+def type_carries_a_calendar(type_name, date_range_types):
+    """
+    Whether a column type is one a `date_range` can be counted in.
+
+    The precision is taken off before the comparison, because a source which writes one into
+    the type name means the same type by it: Oracle's `TIMESTAMP(6) WITH TIME ZONE` and
+    `TIMESTAMP(9) WITH TIME ZONE` are both the type PostgreSQL calls `timestamptz`, and a
+    literal comparison against a list would refuse a column which carries a calendar perfectly
+    well.
+    """
+    if not type_name:
+        return False
+    plain = re.sub(r'\s*\([^)]*\)', '', str(type_name)).strip().lower()
+    return plain in {re.sub(r'\s*\([^)]*\)', '', str(candidate)).strip().lower()
+                     for candidate in (date_range_types or ())}
+
+
+def column_facts_of(facts, name):
+    """
+    What is known about one column, found however the source spells its name.
+
+    The entry is written by hand and the catalogue answers in the case the engine keeps -
+    Oracle upper, PostgreSQL lower - and the two need not match. A lookup which is not
+    case-insensitive answers None for a column which is there, and every check about it is
+    then skipped in silence.
+    """
+    columns = (facts or {}).get('columns') or {}
+    if name in columns:
+        return columns[name]
+    wanted = str(name).lower()
+    for column_name, column in columns.items():
+        if str(column_name).lower() == wanted:
+            return column
+    return None
+
+
 def _check_the_columns(verdict, entry, table_name, method, partitioning_columns, facts):
     """The partitioning columns themselves: their type, and what PostgreSQL will do with them."""
     if facts is None:
@@ -657,7 +820,7 @@ def _check_the_columns(verdict, entry, table_name, method, partitioning_columns,
     date_range = entry.get('date_range')
     date_types = facts.get('date_range_types') or ()
     for name in partitioning_columns:
-        column = facts['columns'].get(name) or facts['columns'].get(name.lower())
+        column = column_facts_of(facts, name)
         if column is None:
             continue
         if column.get('is_generated'):
@@ -673,7 +836,7 @@ def _check_the_columns(verdict, entry, table_name, method, partitioning_columns,
             verdict.issues.append(
                 f"{table_name}.{name} is {column.get('type_name')}, which has no default hash "
                 f"operator class - a HASH partition key needs one")
-        if date_range and column.get('type_name') not in date_types:
+        if date_range and not type_carries_a_calendar(column.get('type_name'), date_types):
             verdict.bounds_usable = False
             verdict.issues.append(
                 f"target_partitioning for {table_name} asks for date_range: {date_range} over "
@@ -682,6 +845,79 @@ def _check_the_columns(verdict, entry, table_name, method, partitioning_columns,
                 f"partition by a column which carries a date")
         else:
             verdict.notes.append(f"{name} is {column.get('type_name')}")
+
+
+## What to write instead, when a key does not contain the partitioning columns. The finding is
+## the same either way - §3.1 is a property of PostgreSQL - and what the user can do about it is
+## not: an entry they wrote can be taken out, and a scheme which came off the source cannot.
+REMEDY_FOR_AN_ENTRY = 'or do not partition this table by {columns}'
+REMEDY_FOR_A_PRESERVED_SCHEME = (
+    'or set source_partitioning: flatten for this table, which migrates it as one ordinary '
+    'table and keeps the key as it is')
+
+
+def unique_key_findings(table_name, partitioning_columns, keys, remedy=REMEDY_FOR_AN_ENTRY):
+    """
+    §3.1, key by key: the rule which breaks migrations.
+
+    Every unique constraint and every unique index of a partitioned table must contain all of
+    its partitioning columns, and this is where a migration fails at the very end - the table is
+    created, the data is loaded, and the constraint is refused.
+
+    It is asked of a `target_partitioning` entry and of a scheme carried over from the source
+    alike. The second is not the smaller case: Oracle keeps a primary key which does not contain
+    the partitioning column in a GLOBAL index, which is legal there, ordinary there, and has no
+    counterpart here at all.
+
+    Returns (issues, notes).
+    """
+    issues = []
+    notes = []
+    if not keys:
+        return issues, ['no primary key and no unique constraint - nothing to extend']
+    for key in keys:
+        key_columns = {str(name).lower() for name in (key.get('columns') or [])}
+        if not key_columns:
+            continue
+        kind = 'PRIMARY KEY' if key.get('is_primary') else 'UNIQUE'
+        written = ', '.join(key.get('columns') or [])
+        absent = [name for name in partitioning_columns if name.lower() not in key_columns]
+        if not absent:
+            notes.append(f"{kind} {key.get('name')} ({written}) contains "
+                         f"{', '.join(partitioning_columns)}")
+            continue
+        issues.append(
+            f"{kind} {key.get('name')} of {table_name} is ({written}) and does not contain "
+            f"{', '.join(absent)}. PostgreSQL refuses a unique constraint on a partitioned table "
+            f"which does not contain every partitioning column, so the table would be created, "
+            f"the data would be loaded and the constraint would fail. Add "
+            f"{', '.join(absent)} to the key, "
+            + remedy.format(columns=', '.join(partitioning_columns)))
+    return issues, notes
+
+
+def check_preserved_keys(decision, unique_keys):
+    """
+    §3.1 for a table whose scheme is carried over from the source as it stands.
+
+    Oracle is why this is not the same check as the one a `target_partitioning` entry gets: a
+    primary key which does not contain the partitioning column is legal on Oracle - it lives in
+    a GLOBAL index - and PostgreSQL has no global index. So a scheme which nobody chose and
+    which the source has run for years is refused here, before the table is created, rather
+    than at the end of the run when the constraint is added to a table already holding the data.
+    """
+    columns = decision.scheme.get('columns') or []
+    if decision.action != PRESERVE or not columns:
+        return
+    if unique_keys is None:
+        decision.warnings.append(
+            f"the unique keys of {decision.table_name} could not be read from this source, so it "
+            f"was NOT checked that they contain the partitioning columns. PostgreSQL refuses a "
+            f"primary key or a unique constraint on a partitioned table which does not")
+        return
+    issues, _notes = unique_key_findings(decision.table_name, columns, unique_keys,
+                                         remedy=REMEDY_FOR_A_PRESERVED_SCHEME)
+    decision.issues.extend(issues)
 
 
 def _check_the_keys(verdict, table_name, partitioning_columns, unique_keys, facts):
@@ -695,27 +931,9 @@ def _check_the_keys(verdict, table_name, partitioning_columns, unique_keys, fact
             f"checked that they contain the partitioning columns. PostgreSQL refuses a primary "
             f"key or a unique constraint on a partitioned table which does not")
         return
-    if not keys:
-        verdict.notes.append('no primary key and no unique constraint - nothing to extend')
-        return
-    for key in keys:
-        key_columns = {str(name).lower() for name in (key.get('columns') or [])}
-        if not key_columns:
-            continue
-        kind = 'PRIMARY KEY' if key.get('is_primary') else 'UNIQUE'
-        absent = [name for name in partitioning_columns if name.lower() not in key_columns]
-        if not absent:
-            verdict.notes.append(
-                f"{kind} {key.get('name')} ({', '.join(key.get('columns') or [])}) contains "
-                f"{', '.join(partitioning_columns)}")
-            continue
-        verdict.issues.append(
-            f"{kind} {key.get('name')} of {table_name} is ({', '.join(key.get('columns') or [])}) "
-            f"and does not contain {', '.join(absent)}. PostgreSQL refuses a unique constraint "
-            f"on a partitioned table which does not contain every partitioning column, so the "
-            f"table would be created, the data would be loaded and the constraint would fail. "
-            f"Add {', '.join(absent)} to the key, or do not partition this table by "
-            f"{', '.join(partitioning_columns)}")
+    issues, notes = unique_key_findings(table_name, partitioning_columns, keys)
+    verdict.issues.extend(issues)
+    verdict.notes.extend(notes)
 
 
 def _check_the_rows_fit(verdict, entry, table_name, method, partitioning_columns, facts):
@@ -727,7 +945,7 @@ def _check_the_rows_fit(verdict, entry, table_name, method, partitioning_columns
         return
     has_default = bool(entry.get('default_partition'))
     for name in partitioning_columns:
-        column = facts['columns'].get(name) or facts['columns'].get(name.lower())
+        column = column_facts_of(facts, name)
         if column is None:
             continue
         if column.get('not_null'):

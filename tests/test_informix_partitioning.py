@@ -681,3 +681,17 @@ def test_the_create_table_of_a_preserved_informix_table_and_its_partitions():
         "FOR VALUES FROM ('2023-01-01') TO ('2024-01-01')",
         'CREATE TABLE "migtest"."orders_rest" PARTITION OF "migtest"."orders" DEFAULT',
     ]
+
+
+def test_informix_does_not_delimit_an_identifier_with_double_quotes():
+    """
+    DELIMIDENT is off and `"rate_date"` is a STRING LITERAL, so the inherited quoting turns
+    `min("rate_date")` into an answer of 'rate_date' - the column NAME - and a range of
+    partitions generated from it would be built out of that. The table half of the same query
+    is a syntax error, which is the only reason this was seen at all.
+    """
+    from credativ_pg_migrator.connectors.informix_connector import InformixConnector
+
+    quote = InformixConnector.quote_source_identifier
+    assert quote(InformixConnector, 'rate_date') == 'rate_date'
+    assert quote(InformixConnector, 'currency_rates') == 'currency_rates'

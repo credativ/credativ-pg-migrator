@@ -28,6 +28,23 @@ import datetime
 
 class InformixConnector(DatabaseConnector):
 
+    ## Informix does NOT delimit an identifier with double quotes unless DELIMIDENT is set,
+    ## and it is not set here - `"rate_date"` is a STRING LITERAL. So a query built with the
+    ## inherited quoting is not merely refused, it is worse than refused:
+    ##
+    ##     select min("rate_date") from informix.currency_rates   ->  'rate_date'
+    ##
+    ## which is a perfectly good answer to a question nobody asked. A range of partitions
+    ## generated from it would have been built out of the column NAME. What saved this is that
+    ## the table half of the same query - `"informix"."currency_rates"` - is a syntax error, so
+    ## the run said the bounds could not be read rather than reading the wrong ones; a source
+    ## which took the whole query would have carried the garbage all the way to the target.
+    ##
+    ## The rest of this connector has always written its data queries unquoted for the same
+    ## reason. Found by running the migtest example of credativ-pg-migrator-tests against a
+    ## live Informix, where `target_partitioning` could not work out a single partition.
+    IDENTIFIER_QUOTES = ('', '')
+
     ## Measured for P3-2: the tables and the views inside the body are given the names the
     ## target has for them (they are the one thing the conversion knows is a table); the
     ## columns are still the ones the routine of the source wrote.
@@ -4064,11 +4081,15 @@ class InformixConnector(DatabaseConnector):
             written = ', '.join(f'"{self.config_parser.convert_names_case(column)}"'
                                 for column in columns)
             target_key_definition = f"{method} ({written})"
+            ## what was READ, not what will happen to it. Whether the scheme is carried over
+            ## or flattened is the planner's to say - `source_partitioning` decides it, and it
+            ## is decided per table - and this note claiming "the target is given the same
+            ## scheme" contradicted the planner's own line for every table set to flatten.
             notes.append(
                 f"the fragments of {source_table_name} really are a {method} over "
-                f"{', '.join(columns)}, so the target is given the same scheme - which is the "
-                f"minority case for an Informix source. Only the ranges are carried over; the "
-                f"dbspaces they sat in are not")
+                f"{', '.join(columns)}, which is the minority case for an Informix source: a "
+                f"scheme PostgreSQL can be given as it stands. Where it is carried over, only "
+                f"the ranges are - the dbspaces they sat in are not")
 
         return {
             'is_partitioned': True,

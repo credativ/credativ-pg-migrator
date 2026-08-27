@@ -166,6 +166,40 @@ class IbmDb2IConnector(Db2QueryConversion, DatabaseConnector):
                            f"instead.")
             return None
 
+    ## The DDL of this migration is parsed into `ddl_tables` by the workflow, which runs AFTER
+    ## the pre-migration analysis - so at the point the analysis asks, there is nothing in it
+    ## yet. That is "not read", and P2-8 says it must not look like "there is none": the report
+    ## used to say "no table of the source schema is partitioned" about a schema whose ORDERS
+    ## really is partitioned by range over ORDER_DATE, and it said it before the clause had
+    ## been looked at.
+    PARTITIONING_NOT_PARSED_YET = (
+        'the source of this migration is a set of DDL extracts, and they are parsed into the '
+        'migration AFTER this analysis - so the partitioning each CREATE TABLE writes has not '
+        'been read at the point this is reported. It is read, and it is carried over; what '
+        'cannot be said here is what is in it. The scheme of every table appears in the log '
+        'once the DDL has been parsed.')
+
+    def object_kind_not_read(self, kind):
+        """
+        What this connector cannot read out of THIS source - which for partitioning depends on
+        WHEN it is asked, because the DDL is parsed after the analysis runs.
+        """
+        if kind == 'table_partitioning' and not self.ddl_has_been_parsed():
+            return self.PARTITIONING_NOT_PARSED_YET
+        return super().object_kind_not_read(kind)
+
+    def ddl_has_been_parsed(self):
+        """Whether the DDL of the migration is in `ddl_tables` yet."""
+        try:
+            cursor = self.migrator_tables.protocol_connection.connection.cursor()
+            cursor.execute(f'SELECT 1 FROM "{self.protocol_schema}"."ddl_tables" LIMIT 1')
+            parsed = cursor.fetchone() is not None
+            cursor.close()
+            return parsed
+        except Exception:
+            ## it cannot be established either, which is the same answer for this purpose
+            return False
+
     def fetch_table_partitioning(self, settings):
         """
         The partitioning of one table, out of the PARTITION BY clause its DDL carried.

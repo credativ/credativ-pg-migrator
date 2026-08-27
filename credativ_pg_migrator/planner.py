@@ -294,7 +294,19 @@ class Planner:
     def run_premigration_analysis(self):
         self.config_parser.print_log_message('INFO', "planner: run_premigration_analysis: Running pre-migration analysis...")
         if self.source_db_config.get('connectivity') == 'ddl':
-            self.config_parser.print_log_message('DEBUG', "planner: run_premigration_analysis: skipping source db pre-migration analysis due to DDL connectivity")
+            ## The MEASUREMENTS below - the version, the size, the top tables by rows - need an
+            ## instance to ask, and a DDL migration has none: its structure comes out of `.sql`
+            ## extracts and its rows out of CSV files. The CHECKS do not. They read what the
+            ## connector parsed out of the DDL and what the target can express, and both are
+            ## there. Skipping the whole method skipped them too, so a `target_partitioning`
+            ## entry against Db2 for z/OS or Db2 for i was never looked at - the one entry those
+            ## two sources cannot carry out, because generating a range of partitions needs the
+            ## values the column really holds. The refusal is written and was never reached.
+            self.config_parser.print_log_message(
+                'INFO', "planner: run_premigration_analysis: the source is read from DDL, so "
+                        "there is no instance to measure - the checks which do not need one "
+                        "are made all the same.")
+            self.stop_on(self.analyse_the_target_only())
             return
         blocking_issues = []
         try:
@@ -465,6 +477,28 @@ class Planner:
 
         # Reported after the analysis finished, so the whole report is available in the log,
         # and independently of on_error_action - the migration cannot succeed in these cases.
+        self.stop_on(blocking_issues)
+
+    def analyse_the_target_only(self):
+        """
+        The checks of the analysis which do not need an instance behind the source - what the
+        target can express, and what the configuration asks of it. Everything they read comes
+        out of the connector's own readers, which a DDL connector answers from the parsed
+        extracts, and out of the target, which is a live server in every migration.
+        """
+        try:
+            self.source_connection.connect()
+            self.target_connection.connect()
+            return self.check_target_capabilities()
+        except Exception as e:
+            self.handle_error(e, "Pre-migration analysis")
+            return []
+        finally:
+            self.source_connection.disconnect()
+            self.target_connection.disconnect()
+
+    def stop_on(self, blocking_issues):
+        """The findings which make the migration fail later, reported once and acted on once."""
         if blocking_issues:
             self.config_parser.print_log_message('ERROR', "planner: run_premigration_analysis: The target database does not support features required by the source schema:")
             for issue in blocking_issues:
@@ -965,17 +999,25 @@ class Planner:
         ## the tables the migration really has - which is what an entry names, and which is not
         ## the same list as the plan for a source whose partitioning was never read
         selected = list((self.partitioning_table_ids or {}).keys()) or list(plan.keys())
+        ## A source read from DDL has no table list at this point: its extracts are parsed
+        ## into the migration AFTER this analysis. An empty list is not a schema which holds
+        ## nothing, and answering "the source schema does not hold CURRENCY_RATES" about a
+        ## schema which does hold it refuses the entry for a reason that is not true - and
+        ## hides the reason which is: there is no instance to ask for the smallest and the
+        ## largest value the column holds, which is exactly what a date_range needs.
+        table_list_was_read = bool(selected)
         for entry in entries:
             written = entry.get('table_name')
             table_name = self.selected_table_named(written, selected) or written
             decision = plan.get(table_name)
-            table_exists = self.selected_table_named(written, selected) is not None
+            table_exists = (self.selected_table_named(written, selected) is not None
+                            or not table_list_was_read)
             columns = []
             facts = None
             first_value = last_value = None
             bounds_were_read = False
 
-            if table_exists:
+            if table_exists and table_list_was_read:
                 columns, facts = self.read_partitioning_facts(table_name)
                 first_value, last_value, bounds_were_read = self.read_partitioning_bounds(
                     entry, table_name)

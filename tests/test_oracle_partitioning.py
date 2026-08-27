@@ -44,6 +44,8 @@ if 'oracledb' not in sys.modules:
     ## reaches it, so an empty module is enough to import the file.
     sys.modules['oracledb'] = types.ModuleType('oracledb')
 
+import datetime
+
 from credativ_pg_migrator import partitioning
 from credativ_pg_migrator.connectors import oracle_partitioning
 from credativ_pg_migrator.connectors.oracle_partitioning import UntranslatableScheme
@@ -661,8 +663,14 @@ def entry(**overrides):
 
 def verdict_for(written=None, facts=None):
     facts = facts_of() if facts is None else facts
+    ## the bounds are handed in so that these tests read what they say they read - the checks
+    ## ABOUT THE COLUMN. Without them every verdict also carries the blocking issue for a probe
+    ## which did not answer, and a test asserting "no issue mentions date_range" would pass or
+    ## fail for a reason it never meant to be about.
     return partitioning.check_repartitioning(
-        written or entry(), list(facts['columns']), None, target_version_num=160000, facts=facts)
+        written or entry(), list(facts['columns']), None, target_version_num=160000, facts=facts,
+        bounds_were_read=True,
+        first_value=datetime.date(2024, 1, 1), last_value=datetime.date(2024, 6, 30))
 
 
 def test_a_date_range_over_an_oracle_date_is_accepted():

@@ -1089,9 +1089,20 @@ def _check_the_partitions(verdict, entry, table_name, method, partitioning_colum
             f"the migration, or migrate from an instance")
         return
     if not bounds_were_read:
-        verdict.warnings.append(
-            f"the smallest and the largest value of {table_name}.{partitioning_columns[0]} could "
-            f"not be read, so the partitions this entry would create were NOT worked out")
+        ## BLOCKING, and it stood here as a warning until 2026-08-27. The outcome is the same
+        ## one the three branches above call blocking - a partitioned table with nothing under
+        ## it - and only the reason differs: there the source has no instance to ask, here the
+        ## question was asked and failed. An Informix run took this path, created
+        ## `currency_rates` partitioned with ZERO partitions, refused all 442 rows with "no
+        ## partition of relation currency_rates found for row", and finished saying
+        ## "Migration Done". A warning is not enough for an outcome that loses the table.
+        verdict.issues.append(
+            f"target_partitioning for {table_name} generates its partitions from a date_range, "
+            f"which needs the smallest and the largest value of {partitioning_columns[0]} - and "
+            f"the source refused the question. The table would be created partitioned with "
+            f"nothing under it and every row of it would be refused with 'no partition of "
+            f"relation {table_name} found for row'. The reason the source gave is logged above "
+            f"this line by read_partitioning_bounds")
         return
     if first_value is None or last_value is None:
         verdict.warnings.append(

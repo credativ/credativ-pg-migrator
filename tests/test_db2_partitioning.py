@@ -874,18 +874,26 @@ def test_a_date_range_against_a_source_with_no_instance_is_refused_before_anythi
     assert any('no database to ask' in issue for issue in verdict.issues)
 
 
-def test_a_probe_which_merely_failed_is_still_only_a_warning():
+def test_a_probe_which_merely_failed_is_blocking_all_the_same():
     """
-    A source which CAN be asked and answered with an error is a different finding: the check was
-    not made, and P2-8 says a check which was not made must not read like one which failed.
+    A source which CAN be asked and answered with an error ends in the same place as one which
+    cannot be asked at all: a partitioned table with nothing under it, refusing every row. Only
+    the reason differs, and the reason is not what the migration pays.
+
+    This stood as a warning until an Informix run took the path for real - the probe was built
+    with double quotes, which Informix reads as string literals - created `currency_rates`
+    partitioned with ZERO partitions, refused all 442 rows with "no partition of relation
+    currency_rates found for row", and finished saying "Migration Done".
     """
     verdict = partitioning.check_repartitioning(
         {'table_name': 'SALES', 'partition_by': 'RANGE',
          'partitioning_columns': 'SALES_DATE', 'date_range': 'month'},
         ['SALES_DATE'], [], target_version_num=160000,
         bounds_were_read=False, bounds_can_be_read=True)
-    assert verdict.can_be_built
-    assert any('NOT worked out' in warning for warning in verdict.warnings)
+    assert not verdict.can_be_built
+    assert any('the source refused the question' in issue for issue in verdict.issues)
+    assert any('no partition of relation SALES found for row' in issue
+               for issue in verdict.issues)
 
 
 # --------------------------------------------------------------------------------------

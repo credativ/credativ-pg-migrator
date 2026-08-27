@@ -21,6 +21,7 @@ from pyodbc import Error
 from credativ_pg_migrator.database_connector import DatabaseConnector, first_line
 from credativ_pg_migrator.migrator_logging import MigratorLogger
 from credativ_pg_migrator.connectors.tsql_parser import TsqlParser
+from credativ_pg_migrator.connectors import mssql_partitioning
 from credativ_pg_migrator.query_conversion import outer_joins as query_outer_joins
 from credativ_pg_migrator.query_conversion import money_literals as query_money_literals
 from credativ_pg_migrator.query_conversion import object_references as query_object_references
@@ -241,11 +242,10 @@ class MsSQLConnector(DatabaseConnector):
 
     ## What this connector does not read out of SQL Server - see
     ## DatabaseConnector.OBJECT_KINDS_NOT_READ. The user defined types ARE read, above.
+    ## `table_partitioning` stood here until 2026-08-27 and is read now, out of
+    ## sys.partition_functions, sys.partition_range_values, sys.partition_schemes and
+    ## sys.partitions - see fetch_table_partitioning().
     OBJECT_KINDS_NOT_READ = {
-        'table_partitioning': (
-            'SQL Server partitions a table with a partition function and a partition scheme over '
-            'filegroups, kept in sys.partition_functions, sys.partition_range_values and '
-            'sys.partition_schemes. This connector does not read them.'),
         'domains': ('SQL Server has rules (CREATE RULE) bound to a type or a column, which are '
                     'the closest thing it has to a domain constraint - the Sybase ASE connector '
                     'of this same migrator reads exactly those as domains. This connector does '
@@ -2475,6 +2475,408 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
     def get_top_fk_dependencies(self, settings):
         top_fk_dependencies = {}
         return top_fk_dependencies
+
+    ## ---------------------------------------------------------------- partitioning
+
+    ## §2.4 of development/PARTITIONING_STRATEGY.md puts mssql last of the twelve and calls it
+    ## "cheap, and the LEFT/RIGHT trap is precisely the kind of thing which is silently wrong if
+    ## nobody looks". Both halves held: it is one join over sys.partition_functions,
+    ## sys.partition_range_values, sys.partition_schemes and sys.partitions, and the whole
+    ## difficulty of the source is one bit of one catalogue row. The translation is
+    ## `mssql_partitioning.py`, which has no driver in it.
+
+    DATE_RANGE_TYPES = mssql_partitioning.DATE_RANGE_TYPES
+
+    ## The heap or the clustered index - the one which carries the rows, and therefore the one
+    ## whose data space is the partition scheme of the table.
+    DATA_INDEX_IDS = '(0, 1)'
+
+    def fetch_partitioning_candidates(self, schema):
+        """
+        The tables of one schema which sit on a partition scheme, in one query - so that a
+        schema of three hundred ordinary tables costs one round trip rather than three hundred.
+
+        A partition of a SQL Server table is not a table: it has no row in sys.tables of its own,
+        no row in the migration, and nothing asks about it. What makes a table partitioned is
+        that the data space of its heap or clustered index is a partition scheme rather than a
+        filegroup.
+        """
+        query = f"""
+            SELECT t.name
+            FROM sys.tables t
+            JOIN sys.schemas s ON s.schema_id = t.schema_id
+            JOIN sys.indexes i ON i.object_id = t.object_id AND i.index_id IN {self.DATA_INDEX_IDS}
+            JOIN sys.partition_schemes ps ON ps.data_space_id = i.data_space_id
+            WHERE s.name = '{schema}'
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            names = {row[0] for row in cursor.fetchall() if row[0]}
+            cursor.close()
+            self.disconnect()
+            return names
+        except Exception as e:
+            self.config_parser.print_log_message(
+                'WARNING', f"ms_sql_connector: fetch_partitioning_candidates: the partitioned "
+                           f"tables of {schema} could not be listed ({e}) - every table is asked "
+                           f"instead.")
+            return None
+
+    def fetch_table_partitioning(self, settings):
+        """
+        The partitioning of one SQL Server table, out of the four catalogue views which hold it.
+
+        See the contract in DatabaseConnector.fetch_table_partitioning(). Beyond it this
+        connector answers `target_key_definition`, a `target_bound` per partition, `notes` and
+        `blockers` - and for this source the note which matters most is the one about RANGE LEFT,
+        because a scheme copied bound for bound out of a RANGE LEFT function is wrong by exactly
+        one value at every boundary and nothing in the run would say so.
+        """
+        source_schema_name = settings['source_schema_name']
+        source_table_name = settings['source_table_name']
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            scheme = self._partition_scheme(cursor, source_schema_name, source_table_name)
+            if not scheme:
+                cursor.close()
+                self.disconnect()
+                return {}
+            boundaries = self._boundary_values(cursor, scheme['function_id'])
+            partitions = self._partitions(cursor, source_schema_name, source_table_name)
+            unaligned = self._unaligned_indexes(cursor, source_schema_name, source_table_name)
+            cursor.close()
+            self.disconnect()
+        except Exception as e:
+            self.config_parser.print_log_message(
+                'ERROR', f"ms_sql_connector: fetch_table_partitioning: the partitioning of "
+                         f"{source_schema_name}.{source_table_name} could not be read: {e}")
+            return {}
+
+        columns = [scheme['column']] if scheme['column'] else []
+        filegroups = sorted({partition['filegroup'] for partition in partitions
+                             if partition.get('filegroup')})
+        notes = mssql_partitioning.what_the_scheme_is(
+            source_table_name, scheme['scheme_name'], scheme['function_name'],
+            scheme['boundary_value_on_right'], columns, partitions, filegroups, unaligned)
+        notes.extend(mssql_partitioning.what_a_nullable_key_costs(
+            source_table_name, scheme['column'], scheme['is_nullable']))
+
+        target_key_definition, more_notes, blockers = mssql_partitioning.build_scheme(
+            source_table_name, columns, partitions, boundaries,
+            scheme['boundary_value_on_right'], scheme['column_type'],
+            self.config_parser.convert_names_case)
+        notes.extend(more_notes)
+
+        return {
+            'is_partitioned': True,
+            ## a partition of a SQL Server table is not a table of the schema, so nothing this
+            ## connector is asked about is ever one
+            'is_partition': False,
+            'parent_table': '',
+            'parent_schema': '',
+            'partition_bound': '',
+            'method': mssql_partitioning.METHOD,
+            'columns': columns if target_key_definition else [],
+            'key_definition': (
+                f"{'RANGE RIGHT' if scheme['boundary_value_on_right'] else 'RANGE LEFT'} "
+                f"({scheme['column'] or '?'}) ON {scheme['scheme_name'] or '?'}"),
+            'target_key_definition': target_key_definition,
+            'level': 1,
+            ## SQL Server has one level of partitioning and no sub-partitions
+            'levels_below': [],
+            'partitions': [{
+                'name': partition['name'],
+                'bound': self._bound_as_the_source_writes_it(
+                    partition['number'], boundaries, scheme['boundary_value_on_right']),
+                'target_bound': partition.get('target_bound', ''),
+                'is_default': False,
+                'is_partitioned': False,
+                'rows': partition.get('rows'),
+            } for partition in partitions],
+            'partition_count': len(partitions),
+            'engine_specific': {
+                'partition_scheme': scheme['scheme_name'],
+                'partition_function': scheme['function_name'],
+                'boundary_value_on_right': bool(scheme['boundary_value_on_right']),
+                'range_direction': 'RANGE RIGHT' if scheme['boundary_value_on_right'] else 'RANGE LEFT',
+                'filegroups': filegroups,
+                'unaligned_indexes': unaligned,
+                'compression': sorted({partition['compression'] for partition in partitions
+                                       if partition.get('compression')}),
+            },
+            'notes': notes,
+            'blockers': blockers,
+        }
+
+    @staticmethod
+    def _bound_as_the_source_writes_it(number, boundaries, boundary_value_on_right):
+        """
+        One partition's range in the words of SQL Server, for the report and the protocol.
+
+        SQL Server writes no bound on a partition at all - the function holds the boundaries and
+        the partition has only its number - so this is the sentence the function means for that
+        number, which is what a reader is looking for.
+        """
+        side = '<' if boundary_value_on_right else '<='
+        above = '>=' if boundary_value_on_right else '>'
+        index = (number or 1) - 1
+        if not boundaries:
+            return 'the whole table - the function has no boundary'
+        if index <= 0:
+            return f"{side} {boundaries[0]}"
+        if index >= len(boundaries):
+            return f"{above} {boundaries[-1]}"
+        return f"{above} {boundaries[index - 1]} and {side} {boundaries[index]}"
+
+    def _partition_scheme(self, cursor, schema, table):
+        """
+        The scheme, the function and the partitioning column of one table - the one join §2.4
+        promised.
+
+        `sys.index_columns.partition_ordinal` is what marks the partitioning column: it is 0 for
+        an ordinary key column and 1 for the one the partition function is applied to.
+        """
+        cursor.execute(f"""
+            SELECT ps.name, pf.name, pf.function_id, pf.boundary_value_on_right, pf.fanout,
+                   c.name, ty.name, c.max_length, c.precision, c.scale, c.is_nullable
+            FROM sys.tables t
+            JOIN sys.schemas s ON s.schema_id = t.schema_id
+            JOIN sys.indexes i ON i.object_id = t.object_id AND i.index_id IN {self.DATA_INDEX_IDS}
+            JOIN sys.partition_schemes ps ON ps.data_space_id = i.data_space_id
+            JOIN sys.partition_functions pf ON pf.function_id = ps.function_id
+            JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
+                                     AND ic.partition_ordinal = 1
+            JOIN sys.columns c ON c.object_id = t.object_id AND c.column_id = ic.column_id
+            LEFT JOIN sys.types ty ON ty.user_type_id = c.user_type_id
+            WHERE s.name = '{schema}' AND t.name = '{table}'
+        """)
+        row = cursor.fetchone()
+        if row is None:
+            return {}
+        type_name = (row[6] or '').upper()
+        if row[9] is not None and int(row[9]) > 0:
+            type_name = f"{type_name}({row[8]},{row[9]})"
+        return {
+            'scheme_name': row[0],
+            'function_name': row[1],
+            'function_id': int(row[2]),
+            ## the one bit the whole source turns on - RANGE RIGHT when it is set
+            'boundary_value_on_right': bool(row[3]),
+            'fanout': int(row[4]) if row[4] is not None else None,
+            'column': row[5],
+            'column_type': type_name,
+            'is_nullable': bool(row[10]),
+        }
+
+    def _boundary_values(self, cursor, function_id):
+        """
+        The boundary values of one partition function, in the order they run in.
+
+        `value` is a `sql_variant`, so the driver hands it over as whatever it really is - an
+        int, a Decimal, a datetime - and it is rendered as a PostgreSQL literal rather than
+        converted to text by the server, whose default rendering of a datetime is not the ISO
+        form PostgreSQL reads.
+        """
+        cursor.execute(f"""
+            SELECT prv.boundary_id, prv.value
+            FROM sys.partition_range_values prv
+            WHERE prv.function_id = {function_id}
+            ORDER BY prv.boundary_id
+        """)
+        return [row[1] for row in cursor.fetchall()]
+
+    def _partitions(self, cursor, schema, table):
+        """
+        The partitions of one table, in the order the function makes them.
+
+        `sys.partitions.rows` is the row count SQL Server keeps per partition and is exact for a
+        rowstore; `sys.destination_data_spaces` is what maps a partition number onto the
+        filegroup its scheme sends it to.
+        """
+        cursor.execute(f"""
+            SELECT p.partition_number, p.rows, fg.name, p.data_compression_desc
+            FROM sys.tables t
+            JOIN sys.schemas s ON s.schema_id = t.schema_id
+            JOIN sys.partitions p ON p.object_id = t.object_id
+                                 AND p.index_id IN {self.DATA_INDEX_IDS}
+            JOIN sys.indexes i ON i.object_id = t.object_id AND i.index_id = p.index_id
+            LEFT JOIN sys.destination_data_spaces dds
+                   ON dds.partition_scheme_id = i.data_space_id
+                  AND dds.destination_id = p.partition_number
+            LEFT JOIN sys.filegroups fg ON fg.data_space_id = dds.data_space_id
+            WHERE s.name = '{schema}' AND t.name = '{table}'
+            ORDER BY p.partition_number
+        """)
+        partitions = []
+        for row in cursor.fetchall():
+            number = int(row[0]) if row[0] is not None else len(partitions) + 1
+            partitions.append({
+                ## SQL Server does not name a partition - it numbers it - so the target's is
+                ## named after its table, the way a numbered Db2 z/OS partition is
+                'name': f"{table}_p{number}",
+                'number': number,
+                'rows': int(row[1]) if row[1] is not None else None,
+                'filegroup': row[2] or '',
+                'compression': (row[3] or '').strip().upper(),
+                'target_bound': '',
+            })
+        return partitions
+
+    def _unaligned_indexes(self, cursor, schema, table):
+        """
+        The indexes of a partitioned table which do NOT sit on its partition scheme - SQL
+        Server's answer to the question Oracle answers with a global index, and PostgreSQL has
+        neither.
+        """
+        try:
+            cursor.execute(f"""
+                SELECT i.name, i.is_unique
+                FROM sys.tables t
+                JOIN sys.schemas s ON s.schema_id = t.schema_id
+                JOIN sys.indexes i ON i.object_id = t.object_id AND i.index_id > 0
+                JOIN sys.indexes data_index ON data_index.object_id = t.object_id
+                                           AND data_index.index_id IN {self.DATA_INDEX_IDS}
+                WHERE s.name = '{schema}' AND t.name = '{table}'
+                  AND i.data_space_id <> data_index.data_space_id
+                  AND i.name IS NOT NULL
+                ORDER BY i.name
+            """)
+            return [{'name': row[0], 'is_unique': bool(row[1])} for row in cursor.fetchall()]
+        except Exception as e:
+            self.config_parser.print_log_message(
+                'DEBUG', f"ms_sql_connector: fetch_table_partitioning: the non-aligned indexes of "
+                         f"{schema}.{table} could not be read ({e}).")
+            return []
+
+    def fetch_partitioning_facts(self, settings):
+        """
+        Everything about one SQL Server table which decides whether it CAN be partitioned - read
+        before anything is created, which is the moment the answer is still free.
+
+        See DatabaseConnector.fetch_partitioning_facts() for the shape. Everything comes from the
+        catalogue and from `sys.partitions`, whose row count SQL Server keeps itself: nothing
+        here reads a row of the table. SQL Server keeps no NULL count of its own outside a
+        statistics histogram, so the null fraction is answered as NOT known for every column and
+        the check which needs it says it was not made.
+        """
+        source_schema_name = settings['source_schema_name']
+        source_table_name = settings['source_table_name']
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            row_estimate = self._row_estimate(cursor, source_schema_name, source_table_name)
+            columns = self._column_facts(cursor, source_schema_name, source_table_name)
+            unique_keys = self._unique_keys(cursor, source_schema_name, source_table_name)
+            referenced_by = self._referencing_foreign_keys(cursor, source_schema_name,
+                                                           source_table_name)
+            cursor.close()
+            self.disconnect()
+        except Exception as e:
+            self.config_parser.print_log_message(
+                'WARNING', f"ms_sql_connector: fetch_partitioning_facts: the facts of "
+                           f"{source_schema_name}.{source_table_name} could not be read ({e}) - "
+                           f"the checks which need them are reported as NOT made rather than as "
+                           f"passed.")
+            return None
+
+        return {
+            'columns': columns,
+            'unique_keys': unique_keys,
+            ## SQL Server has no exclusion constraint and no table inheritance - absences of the
+            ## engine, which are not the same as things this connector did not read
+            'exclusion_constraints': [],
+            'referenced_by': referenced_by,
+            'inherits_from_a_plain_table': False,
+            'is_a_plain_inheritance_parent': False,
+            'row_estimate': row_estimate,
+            'date_range_types': self.DATE_RANGE_TYPES,
+        }
+
+    def _row_estimate(self, cursor, schema, table):
+        """The rows of every partition added up, which SQL Server keeps itself."""
+        cursor.execute(f"""
+            SELECT sum(p.rows)
+            FROM sys.tables t
+            JOIN sys.schemas s ON s.schema_id = t.schema_id
+            JOIN sys.partitions p ON p.object_id = t.object_id
+                                 AND p.index_id IN {self.DATA_INDEX_IDS}
+            WHERE s.name = '{schema}' AND t.name = '{table}'
+        """)
+        row = cursor.fetchone()
+        return int(row[0]) if row and row[0] is not None else None
+
+    def _column_facts(self, cursor, schema, table):
+        """Every column and what PostgreSQL will be able to do with it."""
+        cursor.execute(f"""
+            SELECT c.name, ty.name, c.precision, c.scale, c.is_nullable, c.is_computed
+            FROM sys.tables t
+            JOIN sys.schemas s ON s.schema_id = t.schema_id
+            JOIN sys.columns c ON c.object_id = t.object_id
+            LEFT JOIN sys.types ty ON ty.user_type_id = c.user_type_id
+            WHERE s.name = '{schema}' AND t.name = '{table}'
+            ORDER BY c.column_id
+        """)
+        columns = {}
+        for row in cursor.fetchall():
+            name = row[0]
+            type_name = (row[1] or '').upper()
+            written = f"{type_name}({row[2]},{row[3]})" if row[3] is not None and int(row[3]) > 0 \
+                else type_name
+            can_be_a_key = type_name not in mssql_partitioning.TYPES_WITHOUT_AN_OPERATOR_CLASS
+            columns[name] = {
+                'type_name': written,
+                'not_null': not bool(row[4]),
+                ## a computed column of SQL Server is a generated column of the target, which
+                ## PostgreSQL refuses in a partition key
+                'is_generated': bool(row[5]),
+                'has_btree_opclass': can_be_a_key,
+                'has_hash_opclass': can_be_a_key,
+                ## SQL Server keeps no NULL count outside a statistics histogram, so this is NOT
+                ## known for every column - and the check which needs it says it was not made
+                'null_fraction': None,
+            }
+        return columns
+
+    def _unique_keys(self, cursor, schema, table):
+        """
+        The primary key, every unique constraint and every unique index which is not one - §3.1
+        applies to all three alike, and `sys.indexes.is_unique` holds them together.
+        """
+        cursor.execute(f"""
+            SELECT i.name, i.is_primary_key, c.name, ic.key_ordinal
+            FROM sys.tables t
+            JOIN sys.schemas s ON s.schema_id = t.schema_id
+            JOIN sys.indexes i ON i.object_id = t.object_id AND i.is_unique = 1 AND i.index_id > 0
+            JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
+                                     AND ic.key_ordinal > 0
+            JOIN sys.columns c ON c.object_id = t.object_id AND c.column_id = ic.column_id
+            WHERE s.name = '{schema}' AND t.name = '{table}'
+            ORDER BY i.name, ic.key_ordinal
+        """)
+        keys = {}
+        for row in cursor.fetchall():
+            name = row[0]
+            key = keys.setdefault(name, {'name': name, 'columns': [],
+                                         'is_primary': bool(row[1])})
+            if row[2]:
+                key['columns'].append(row[2])
+        return list(keys.values())
+
+    def _referencing_foreign_keys(self, cursor, schema, table):
+        """§3.5: a foreign key pointing AT a partitioned table needs PostgreSQL 12."""
+        cursor.execute(f"""
+            SELECT fk.name, child.name
+            FROM sys.foreign_keys fk
+            JOIN sys.tables parent ON parent.object_id = fk.referenced_object_id
+            JOIN sys.schemas s ON s.schema_id = parent.schema_id
+            JOIN sys.tables child ON child.object_id = fk.parent_object_id
+            WHERE s.name = '{schema}' AND parent.name = '{table}'
+            ORDER BY fk.name
+        """)
+        return [{'name': row[0], 'table': row[1]} for row in cursor.fetchall()]
 
     def target_table_exists(self, target_schema_name, target_table_name):
         query = f"""

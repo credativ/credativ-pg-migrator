@@ -502,6 +502,8 @@ SOURCE_TEST_WITHOUT_MECHANISM = {
                              'two share the way they share mysql_query_conversion.py.',
     'sybase_partitioning.py': 'not a connector - the semantic partitioning of Sybase ASE, '
                               'written the way PostgreSQL writes it. It has no driver in it.',
+    'mssql_partitioning.py': 'not a connector - the partition functions and schemes of SQL '
+                             'Server, written the way PostgreSQL writes them.',
     'match_schemas.py': 'not a connector - it compares two schemas.',
     'tsql_parser.py': 'not a connector - the parser the Transact-SQL family shares.',
 }

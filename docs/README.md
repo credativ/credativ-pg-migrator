@@ -10,6 +10,8 @@ General
 
 [Migration Database Tables](migration_tables.md)
 
+[Partitioning](partitioning.md)
+
 Workflows
 ---------
 

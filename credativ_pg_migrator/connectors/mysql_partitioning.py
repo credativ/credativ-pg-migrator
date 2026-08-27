@@ -464,12 +464,25 @@ class MySqlPartitioning:
         notes = []
         blockers = []
         columns = []
-        try:
-            columns = partition_key_columns(method, expression)
-        except UntranslatableScheme as e:
+        if not target_method_of(method):
+            ## the method itself has no counterpart - MariaDB's SYSTEM_TIME is the one which
+            ## really turns up - and saying that is more use than saying its key is an
+            ## expression, which is true of SYSTEM_TIME and is not why it cannot be built
             blockers.append(
-                f"{source_table_name} is partitioned by {method} on the source and the same "
-                f"scheme cannot be built on PostgreSQL: {e}")
+                f"{source_table_name} is partitioned by {method} on the source, which PostgreSQL "
+                f"has no counterpart for: it partitions by RANGE, by LIST and by HASH and by "
+                f"nothing else. A SYSTEM_TIME scheme of MariaDB rotates the history rows of a "
+                f"system-versioned table out of the current partition, which is a feature of the "
+                f"versioning rather than a way of dividing the rows by their values. Set "
+                f"source_partitioning: flatten for this table, or write a scheme of your own "
+                f"with target_partitioning")
+        else:
+            try:
+                columns = partition_key_columns(method, expression)
+            except UntranslatableScheme as e:
+                blockers.append(
+                    f"{source_table_name} is partitioned by {method} on the source and the same "
+                    f"scheme cannot be built on PostgreSQL: {e}")
 
         target_key_definition = ''
         if columns:

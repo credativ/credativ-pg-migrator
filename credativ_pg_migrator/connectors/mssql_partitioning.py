@@ -110,15 +110,23 @@ def scale_of(type_name):
     return int(found.group(1)) if found.group(1) else 0
 
 
-def to_postgresql_value(value):
+## The types whose literal PostgreSQL takes bare. Everything else is quoted - and which of the
+## two a boundary needs is decided by the DECLARED type of the partitioning column rather than
+## by what the text looks like, because a `varchar` partition function whose boundaries happen
+## to be '100' and '200' is a range over two STRINGS and writing them bare would make it a range
+## over two numbers.
+BARE_LITERAL_TYPES = INTEGER_TYPES + DECIMAL_TYPES + ('FLOAT', 'REAL', 'MONEY', 'SMALLMONEY',
+                                                     'BIT')
+
+
+def to_postgresql_value(value, type_name=''):
     """
     One boundary value, written as PostgreSQL writes it.
 
-    `sys.partition_range_values.value` is a `sql_variant`, so the driver hands it over as
-    whatever it really is - an `int`, a `Decimal`, a `datetime`, a string. Each of those is
-    rendered here rather than trusted to `str()`: a `datetime` printed by Python is already the
-    ISO form PostgreSQL reads, and a `Decimal` printed by Python is not always the form its
-    literal takes.
+    `sys.partition_range_values.value` is a `sql_variant`. The connector asks the SERVER to
+    render it as text - see `_boundary_values()` for why - so what arrives here is normally a
+    string, and `type_name` is what says whether it is a number or a literal. A driver which
+    answers the value as a Python object is handled too, because one which does is not wrong.
     """
     if value is None:
         raise UntranslatableScheme('the catalogue holds no value for this boundary')
@@ -126,16 +134,21 @@ def to_postgresql_value(value):
         return 'true' if value else 'false'
     if isinstance(value, (int, decimal.Decimal, float)):
         return str(value)
-    if isinstance(value, (datetime.datetime, datetime.date, datetime.time)):
-        return "'" + value.isoformat(sep=' ') + "'" \
-            if isinstance(value, datetime.datetime) else "'" + value.isoformat() + "'"
+    if isinstance(value, datetime.datetime):
+        return "'" + value.isoformat(sep=' ') + "'"
+    if isinstance(value, (datetime.date, datetime.time)):
+        return "'" + value.isoformat() + "'"
     if isinstance(value, bytes):
         ## a binary boundary, which the migration gives a bytea column
         return "'\\x" + value.hex().upper() + "'"
     text = str(value).strip()
     if not text:
         raise UntranslatableScheme('the catalogue holds an empty value for this boundary')
-    if NUMBER.match(text):
+    if base_type_of(type_name) in BARE_LITERAL_TYPES:
+        if not NUMBER.match(text):
+            raise UntranslatableScheme(
+                f"the boundary {text} is not a number, and the partitioning column is "
+                f"{type_name}")
         return text
     return "'" + text.replace("'", "''") + "'"
 
@@ -188,7 +201,7 @@ def range_bounds(boundaries, boundary_value_on_right, type_name):
     was given values. RANGE RIGHT is `FROM (a) TO (b)` already; RANGE LEFT is the opposite at
     both ends and every bound moves to the next value of the type.
     """
-    written = [to_postgresql_value(value) for value in boundaries]
+    written = [to_postgresql_value(value, type_name) for value in boundaries]
     if not boundary_value_on_right:
         ## RANGE LEFT: partition k holds (b(k-1), bk], and PostgreSQL says [a, b) - so the value
         ## which really opens partition k is the one after b(k-1), and the one which closes it

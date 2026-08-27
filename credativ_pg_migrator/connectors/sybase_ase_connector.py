@@ -5633,32 +5633,47 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_function_name}"();
     ## query conversion work is a Sybase ASE one, so it is wanted - and "catalogue names not
     ## verified against a live server", so what reads it is written from documentation.
     ##
-    ## That shapes what follows. The reads are in two groups. What §2.4 names - syspartitions and
-    ## syspartitionkeys - is read as one query each, and a failure of either is an error. The
-    ## CONDITION of a partition, which is what a RANGE or a LIST scheme would be built from, has
-    ## no place this migrator can point at with confidence: it is tried, and where it cannot be
-    ## had the scheme is reported in full and refused for BUILDING rather than guessed at. §0.9
-    ## says which of these a live ASE still has to confirm.
+    ## **Verified against a live ASE 16.0 SP02 on 2026-08-27**, and the verification changed
+    ## this. §2.4 named `syspartitions` and `syspartitionkeys` and marked them unverified; the
+    ## first thing a real server said is that **`syspartitions` has no condition column at
+    ## all** - its columns are name, indid, id, partitionid, segment, status, datoampage,
+    ## indoampage, firstpage, rootpage, data_partitionid, crdate, cdataptnname, lobcomp_lvl and
+    ## ptndcompver - and `syspartitionkeys` has only (indid, id, colid, position). The bounds of
+    ## a range or a list scheme are in **neither**.
+    ##
+    ## `sp_helpartition` is where they are, and it turns out to answer everything at once. Four
+    ## result sets, in this order:
+    ##
+    ##   1. name, type, partition_type, partitions, partition_keys
+    ##      - partition_type is 'range' | 'hash' | 'list' | 'roundrobin', so the method does not
+    ##        have to be inferred at all, and partition_keys is the key, comma separated
+    ##   2. partition_name, partition_id, compression_level, pages, row_count, segment,
+    ##      create_date - one row per partition, in partition order
+    ##   3. Partition_Conditions - one row per partition IN THE SAME ORDER for range and list,
+    ##      and a single NULL row for hash and roundrobin. It carries no key of its own, so it
+    ##      is matched to (2) by position and only where the two are the same length
+    ##   4. the page statistics, which nothing here reads
+    ##
+    ## So `sp_helpartition` is asked first and `syspartitions` is the fallback for the half it
+    ## holds - the names and the segments. What §0.9 designed for is still what happens when
+    ## neither answers: the scheme is reported in full with its method stated as not known, and
+    ## nothing is built out of a read which did not happen.
 
     DATE_RANGE_TYPES = sybase_partitioning.DATE_RANGE_TYPES
 
-    ## Data partitions are the ones of the table itself: indid 0 is a heap and indid 1 the
-    ## clustered index, and everything above that is a partition of a secondary index.
+    ## Data partitions are the ones of the table itself. Verified: a `lock datarows` table keeps
+    ## its data at indid 0 and an allpages table with a clustered index at indid 1 - never both,
+    ## so this cannot double count - and everything above that is a partition of a secondary
+    ## index, which is a local index and not the table's own scheme.
     DATA_PARTITION_INDIDS = '(0, 1)'
 
-    ## Where the condition of a partition might be had, in the order they are tried. Every one of
-    ## these is written from the documentation of ASE and NOT verified against a live server; the
-    ## first which the server accepts is used, and when none is accepted the run says so and
-    ## builds nothing from what it did not get.
-    PARTITION_CONDITION_SOURCES = (
-        ## the column syspartitions is documented to carry the condition in
-        'SELECT p.partitionid, p.condition FROM syspartitions p '
-        'WHERE p.id = {table_id} AND p.indid IN {indids} ORDER BY p.partitionid',
-        ## ASE renders the same thing through its own reporting procedure, whose result set is
-        ## read by the NAMES of its columns rather than by their order - which is what makes it
-        ## worth trying second rather than a second guess at a column name
-        'EXEC sp_helpartition {table_name}',
-    )
+    ## What sp_helpartition calls each of the four methods, in its first result set.
+    HELPARTITION_METHODS = {
+        'range': sybase_partitioning.RANGE,
+        'list': sybase_partitioning.LIST,
+        'hash': sybase_partitioning.HASH,
+        'roundrobin': sybase_partitioning.ROUND_ROBIN,
+    }
 
     def fetch_partitioning_candidates(self, schema):
         """
@@ -5720,9 +5735,14 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_function_name}"();
                 cursor.close()
                 self.disconnect()
                 return {}
-            columns = self._partition_key_columns(cursor, table_id)
-            conditions_were_read = self._read_the_conditions(
-                cursor, table_id, source_table_name, partitions)
+            ## sp_helpartition answers the method, the key and the conditions in one go, and
+            ## it is the only thing on the server which holds the conditions at all
+            method, columns, conditions_were_read = self._read_with_helpartition(
+                cursor, source_table_name, partitions)
+            if not columns:
+                ## the catalogue still holds the key, which is what says ROUND ROBIN from the
+                ## other three where sp_helpartition could not be run
+                columns = self._partition_key_columns(cursor, table_id)
             column_types = self._column_types(cursor, table_id)
             cursor.close()
             self.disconnect()
@@ -5732,9 +5752,13 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_function_name}"();
                          f"{source_schema_name}.{source_table_name} could not be read: {e}")
             return {}
 
-        method = sybase_partitioning.method_of(
-            [partition['condition'] for partition in partitions], bool(columns),
-            conditions_were_read)
+        if not method:
+            ## sp_helpartition could not be run: the method has to be worked out from what the
+            ## catalogue does hold - §0.9's inference, which is now the fallback rather than the
+            ## way it is normally answered
+            method = sybase_partitioning.method_of(
+                [partition['condition'] for partition in partitions], bool(columns),
+                conditions_were_read)
         segments = sorted({partition['segment'] for partition in partitions
                            if partition.get('segment')})
         notes = sybase_partitioning.what_the_partitioning_is(
@@ -5832,96 +5856,108 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_function_name}"();
 
     def _partition_key_columns(self, cursor, table_id):
         """
-        The columns the table is partitioned by, in key order.
+        The columns the table is partitioned by, in key order - the fallback for what
+        sp_helpartition answers directly.
 
-        A table with no row here is partitioned BY ROUNDROBIN - it is the one method of the four
-        with no key at all, which is what lets the method be worked out without reading it.
+        `position` is the key order and `colid` is the column's place in the table; ordering by
+        the second is right by accident for a key of one column and wrong for every other.
+        Verified against ASE 16: syspartitionkeys is (indid, id, colid, position), and it holds
+        a row per LOCAL INDEX as well as for the data, which is what the indid filter is for.
+
+        A table with no row here is partitioned BY ROUNDROBIN - the one method of the four with
+        no key at all.
         """
         cursor.execute(f"""
             SELECT c.name
             FROM syspartitionkeys k
             JOIN syscolumns c ON c.id = k.id AND c.colid = k.colid
             WHERE k.id = {table_id} AND k.indid IN {self.DATA_PARTITION_INDIDS}
-            ORDER BY k.colid
+            ORDER BY k.position
         """)
         return [self._text_of(row[0]) for row in cursor.fetchall() if self._text_of(row[0])]
 
-    def _read_the_conditions(self, cursor, table_id, table_name, partitions):
+    def _read_with_helpartition(self, cursor, table_name, partitions):
         """
-        The condition of every partition, set on the partitions in place. Answers whether they
-        were read at all.
+        Everything sp_helpartition answers about one table: the method, the key columns and the
+        condition of every partition.
 
-        This is the read §2.4 warns about, and it is the one the target would be BUILT from - so
-        the answer is a boolean rather than an empty list: a condition which came back empty
-        means the scheme has none, which is HASH, and a read which did not happen means nothing
-        at all. Telling the two apart is the whole reason this method exists.
+        Returns (method, columns, conditions_were_read). The conditions are set on `partitions`
+        in place, matched to them **by position** - result set 3 carries no key of its own, and
+        ASE answers it in the order of result set 2. Where the two are not the same length the
+        conditions are NOT applied and the read is answered as one which did not happen: for a
+        hash or a roundrobin scheme ASE answers a single NULL row there, which is not one
+        condition for the first partition and none for the rest.
         """
-        by_id = {partition['id']: partition for partition in partitions}
-        by_name = {partition['name']: partition for partition in partitions}
-        for query in self.PARTITION_CONDITION_SOURCES:
-            statement = query.format(table_id=table_id, table_name=table_name,
-                                     indids=self.DATA_PARTITION_INDIDS)
-            try:
-                cursor.execute(statement)
-                rows = cursor.fetchall()
-                names = [(column[0] or '').lower() for column in (cursor.description or [])]
-            except Exception as e:
-                self.config_parser.print_log_message(
-                    'DEBUG', f"sybase_ase_connector: fetch_table_partitioning: the conditions of "
-                             f"{table_name} could not be read with `{statement.strip()[:60]}...` "
-                             f"({e}) - trying the next way.")
-                continue
-            if self._apply_conditions(rows, names, by_id, by_name):
-                return True
+        try:
+            cursor.execute(f"EXEC sp_helpartition {table_name}")
+            answers = self._result_sets(cursor)
+        except Exception as e:
             self.config_parser.print_log_message(
-                'DEBUG', f"sybase_ase_connector: fetch_table_partitioning: `{statement.strip()[:60]}"
-                         f"...` answered nothing this migrator could read as a partition "
-                         f"condition - trying the next way.")
-        return False
+                'DEBUG', f"sybase_ase_connector: fetch_table_partitioning: sp_helpartition "
+                         f"{table_name} could not be run ({e}) - the catalogue is read instead.")
+            return '', [], False
+        if not answers:
+            return '', [], False
+
+        method, columns = '', []
+        for rows, names in answers:
+            if 'partition_type' not in names or not rows:
+                continue
+            method = self.HELPARTITION_METHODS.get(
+                self._text_of(rows[0][names.index('partition_type')]).lower(), '')
+            if 'partition_keys' in names:
+                ## 'order_date' for one column, 'a, b' for several, and NULL for roundrobin,
+                ## which has no key at all
+                written = self._text_of(rows[0][names.index('partition_keys')])
+                columns = [column.strip() for column in written.split(',')
+                           if column.strip() and column.strip().upper() != 'NULL']
+            break
+
+        conditions = []
+        for rows, names in answers:
+            if any('condition' in name for name in names):
+                index = [position for position, name in enumerate(names)
+                         if 'condition' in name][0]
+                conditions = [self._text_of(row[index]) for row in rows]
+                break
+
+        ## the length is what says whether this really is one condition per partition. A hash
+        ## scheme answers one NULL row here whatever the partition count is, and reading that as
+        ## "the first partition has no condition" would leave the rest unanswered in silence
+        if conditions and len(conditions) == len(partitions):
+            for partition, condition in zip(partitions, conditions):
+                partition['condition'] = condition
+            return method, columns, True
+        if method in (sybase_partitioning.HASH, sybase_partitioning.ROUND_ROBIN):
+            ## the method is known and those two have no conditions to read - which is an
+            ## answer, and not a read which failed
+            return method, columns, True
+        return method, columns, False
 
     @staticmethod
-    def _condition_column_of(names):
+    def _result_sets(cursor):
         """
-        Which column of an answer holds the condition, found by its NAME.
+        Every result set of a stored procedure, as (rows, lower-cased column names).
 
-        `sp_helpartition` is ASE's own report and its columns stand in an order which differs
-        between releases; reading it by name is what makes it worth asking at all.
+        sp_helpartition answers four of them and the driver hands them over one at a time. A
+        driver which does not implement nextset() answers the first and nothing else, which is
+        the first set - the method and the key - so even there the read is not a total loss.
         """
-        for index, name in enumerate(names):
-            if 'condition' in name:
-                return index
-        return None
-
-    @classmethod
-    def _key_column_of(cls, names):
-        """Which column of an answer names the partition it describes."""
-        for index, name in enumerate(names):
-            if name in ('partitionid', 'partition_id', 'name', 'partition_name'):
-                return index
-        return None
-
-    def _apply_conditions(self, rows, names, by_id, by_name):
-        """
-        Set the condition of every partition out of one answer. False where the answer holds
-        none which could be matched to a partition, so that the caller tries the next way.
-        """
-        condition_column = self._condition_column_of(names)
-        key_column = self._key_column_of(names)
-        if condition_column is None or key_column is None:
-            return False
-        matched = False
-        for row in rows:
-            key = row[key_column]
-            partition = None
-            if isinstance(key, str):
-                partition = by_name.get(key.strip())
-            elif key is not None:
-                partition = by_id.get(int(key))
-            if partition is None:
-                continue
-            partition['condition'] = self._text_of(row[condition_column])
-            matched = True
-        return matched
+        answers = []
+        while True:
+            try:
+                names = [(column[0] or '').lower() for column in (cursor.description or [])]
+                rows = cursor.fetchall() if names else []
+                if names:
+                    answers.append((rows, names))
+            except Exception:
+                pass
+            try:
+                if not cursor.nextset():
+                    break
+            except Exception:
+                break
+        return answers
 
     @staticmethod
     def _text_of(value):

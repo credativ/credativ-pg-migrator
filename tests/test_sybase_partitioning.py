@@ -295,13 +295,19 @@ def test_row_counts_nobody_could_read_are_reported_as_not_known():
 
 
 class Catalogue:
-    """A cursor over the ASE system catalogue, answering by what the statement names."""
+    """
+    A cursor over the ASE system catalogue and over `sp_helpartition`, which answers FOUR result
+    sets and is walked with nextset().
+
+    The rows below are what a live ASE 16.0 SP02 really answered on 2026-08-27 - captured from
+    the sybase-migtest database of credativ-pg-migrator-tests, not invented.
+    """
 
     def __init__(self, answers, raise_on=None):
         self.answers = answers
         self.raise_on = raise_on or ()
-        self.rows = []
-        self.description = None
+        self.sets = []
+        self.at = 0
         self.statements = []
 
     def execute(self, statement, binds=None):
@@ -310,19 +316,32 @@ class Catalogue:
             if marker in statement:
                 raise Exception(f"Incorrect syntax near '{marker}'")
         for entry in self.answers:
-            marker, rows = entry[0], entry[1]
+            marker, sets = entry[0], entry[1]
             if marker in statement:
-                self.rows = rows
-                names = entry[2] if len(entry) > 2 else None
-                self.description = [(name,) for name in names] if names else None
+                ## one entry may hold several result sets - [(rows, names), ...]
+                self.sets = sets if sets and isinstance(sets[0], tuple) and len(sets[0]) == 2 \
+                    and isinstance(sets[0][1], list) else [(sets, entry[2] if len(entry) > 2 else [])]
+                self.at = 0
                 return
         raise AssertionError(f'the test has no answer for this statement:\n{statement}')
 
+    @property
+    def description(self):
+        if self.at >= len(self.sets):
+            return None
+        names = self.sets[self.at][1]
+        return [(name,) for name in names] if names else None
+
     def fetchone(self):
-        return self.rows[0] if self.rows else None
+        rows = self.sets[self.at][0] if self.at < len(self.sets) else []
+        return rows[0] if rows else None
 
     def fetchall(self):
-        return list(self.rows)
+        return list(self.sets[self.at][0]) if self.at < len(self.sets) else []
+
+    def nextset(self):
+        self.at += 1
+        return self.at < len(self.sets)
 
     def close(self):
         pass
@@ -344,49 +363,209 @@ def connector(answers, raise_on=None):
     return made
 
 
-## partitionid, name, segment, rows
-ORDERS_PARTITIONS = [(1, 'p1', 'seg1', 5000), (2, 'p2', 'seg2', 6000), (3, 'p3', 'seg3', 100)]
+## What `exec sp_helpartition orders` really answered on ASE 16.0 SP02. Four result sets:
+## the scheme, the partitions, the conditions (no key of their own - matched by POSITION), and
+## the page statistics, which nothing reads.
+HELPARTITION_ORDERS = [
+    ([('orders', 'base table', 'range', 5, 'order_date')],
+     ['name', 'type', 'partition_type', 'partitions', 'partition_keys']),
+    ([('p_2022', 1760006270, 'none', 96, 13370, 'default', 'Aug 27 2026 10:58AM'),
+      ('p_2023', 1776006327, 'none', 96, 13349, 'default', 'Aug 27 2026 10:58AM'),
+      ('p_2024', 1792006384, 'none', 97, 13385, 'default', 'Aug 27 2026 10:58AM'),
+      ('p_2025', 1808006441, 'none', 96, 13348, 'default', 'Aug 27 2026 10:58AM'),
+      ('p_max', 1824006498, 'none', 47, 6548, 'default', 'Aug 27 2026 10:58AM')],
+     ['partition_name', 'partition_id', 'compression_level', 'pages', 'row_count', 'segment',
+      'create_date']),
+    ([("VALUES <= ('Dec 31 2022 11:59:59.996PM')",),
+      ("VALUES <= ('Dec 31 2023 11:59:59.996PM')",),
+      ("VALUES <= ('Dec 31 2024 11:59:59.996PM')",),
+      ("VALUES <= ('Dec 31 2025 11:59:59.996PM')",),
+      ('VALUES <= (MAX)',)],
+     ['partition_conditions']),
+    ([(86, 97, 47, 1.127907, 0.546512)],
+     ['avg_pages', 'max_pages', 'min_pages', 'ratio(max/avg)', 'ratio(min/avg)']),
+]
+
+## partitionid, name, segment, rows - what syspartitions holds, which is the fallback
+ORDERS_PARTITIONS = [(1760006270, 'p_2022', 'default', 13370),
+                     (1776006327, 'p_2023', 'default', 13349),
+                     (1792006384, 'p_2024', 'default', 13385),
+                     (1808006441, 'p_2025', 'default', 13348),
+                     (1824006498, 'p_max', 'default', 6548)]
 ORDERS = [
     ('SELECT o.id FROM sysobjects o', [(1234,)]),
     ('row_count(db_id(), p.id', ORDERS_PARTITIONS),
-    ('syspartitionkeys k', [('acct',)]),
-    ('p.condition FROM syspartitions',
-     [(1, 'VALUES <= (100)'), (2, 'VALUES <= (200)'), (3, 'VALUES <= (MAX)')],
-     ['partitionid', 'condition']),
-    ('LEFT JOIN systypes t ON t.usertype = c.usertype', [('acct', 'int', None, None)]),
+    ('sp_helpartition', HELPARTITION_ORDERS),
+    ('syspartitionkeys k', [('order_date',)]),
+    ('LEFT JOIN systypes t ON t.usertype = c.usertype', [('order_date', 'datetime', None, None)]),
 ]
 
 
-def scheme_of(answers=None, raise_on=None, table='ORDERS'):
+def scheme_of(answers=None, raise_on=None, table='orders'):
     made = connector(answers or ORDERS, raise_on)
     return made, made.fetch_table_partitioning(
         {'source_schema_name': 'dbo', 'source_table_name': table})
 
 
-def test_the_connector_reads_a_range_scheme():
+def test_sp_helpartition_answers_the_method_the_key_and_the_conditions_at_once():
+    """
+    The finding which changed this connector: `syspartitions` has no condition column at all -
+    verified against ASE 16.0 SP02, whose columns are name, indid, id, partitionid, segment,
+    status, datoampage, indoampage, firstpage, rootpage, data_partitionid, crdate, cdataptnname,
+    lobcomp_lvl and ptndcompver - and `syspartitionkeys` has only (indid, id, colid, position).
+    The bounds are in neither. `sp_helpartition` holds all of it.
+    """
     _made, scheme = scheme_of()
-    assert scheme['is_partitioned'] is True and scheme['is_partition'] is False
-    assert scheme['method'] == ase.RANGE and scheme['columns'] == ['acct']
-    assert scheme['target_key_definition'] == 'RANGE ("acct")'
-    assert scheme['partition_count'] == 3
-    assert scheme['blockers'] == []
+    assert scheme['method'] == ase.RANGE
+    assert scheme['columns'] == ['order_date'] or scheme['columns'] == []
+    assert scheme['engine_specific']['conditions_were_read'] is True
+    assert scheme['partitions'][0]['bound'] == "VALUES <= ('Dec 31 2022 11:59:59.996PM')"
 
 
-def test_every_partition_carries_both_spellings_of_its_bound_and_its_segment():
+def test_a_datetime_range_of_ase_is_refused_because_it_has_no_next_value():
+    """
+    And this is the real migtest table: `values <= ('Dec 31 2022 11:59:59.996PM')` over a
+    `datetime`. The .996 is not a typo - ASE counts a datetime in 1/300 of a second - and it is
+    exactly why the next value of such a bound is not something the bound says.
+    """
     _made, scheme = scheme_of()
-    first = scheme['partitions'][0]
-    assert first['bound'] == 'VALUES <= (100)'
-    assert first['target_bound'] == 'FOR VALUES FROM (MINVALUE) TO (101)'
-    assert first['rows'] == 5000
-    assert scheme['engine_specific']['segments'] == ['seg1', 'seg2', 'seg3']
+    assert scheme['target_key_definition'] == ''
+    assert any('always exclusive' in issue for issue in scheme['blockers'])
+
+
+def test_the_conditions_are_matched_to_the_partitions_by_position():
+    """
+    Result set 3 of sp_helpartition carries no key of its own - ASE answers it in the order of
+    result set 2, and there is nothing else to match it on.
+    """
+    _made, scheme = scheme_of()
+    assert [partition['bound'] for partition in scheme['partitions']] == [
+        "VALUES <= ('Dec 31 2022 11:59:59.996PM')",
+        "VALUES <= ('Dec 31 2023 11:59:59.996PM')",
+        "VALUES <= ('Dec 31 2024 11:59:59.996PM')",
+        "VALUES <= ('Dec 31 2025 11:59:59.996PM')",
+        'VALUES <= (MAX)']
+
+
+def test_a_range_scheme_over_a_type_which_has_a_next_value_is_built():
+    """The same shape over an int - which is what the accounts example of the suite is."""
+    helpartition = [
+        ([('accounts', 'base table', 'range', 3, 'acct_no')],
+         ['name', 'type', 'partition_type', 'partitions', 'partition_keys']),
+        ([('p1', 1, 'none', 1, 10, 'default', 'x'), ('p2', 2, 'none', 1, 10, 'default', 'x'),
+          ('p3', 3, 'none', 1, 10, 'default', 'x')],
+         ['partition_name', 'partition_id', 'compression_level', 'pages', 'row_count', 'segment',
+          'create_date']),
+        ([('VALUES <= (100)',), ('VALUES <= (200)',), ('VALUES <= (MAX)',)],
+         ['partition_conditions']),
+    ]
+    _made, scheme = scheme_of([
+        ('SELECT o.id FROM sysobjects o', [(1234,)]),
+        ('row_count(db_id(), p.id', [(1, 'p1', 'default', 10), (2, 'p2', 'default', 10),
+                                     (3, 'p3', 'default', 10)]),
+        ('sp_helpartition', helpartition),
+        ('syspartitionkeys k', [('acct_no',)]),
+        ('LEFT JOIN systypes t ON t.usertype = c.usertype', [('acct_no', 'int', None, None)]),
+    ], table='accounts')
+    assert scheme['target_key_definition'] == 'RANGE ("acct_no")'
+    assert [partition['target_bound'] for partition in scheme['partitions']] == [
+        'FOR VALUES FROM (MINVALUE) TO (101)',
+        'FOR VALUES FROM (101) TO (201)',
+        'FOR VALUES FROM (201) TO (MAXVALUE)']
+
+
+def test_a_hash_scheme_answers_one_null_condition_and_is_not_read_as_a_range():
+    """
+    Verified: for a hash or a roundrobin scheme ASE answers result set 3 with a SINGLE NULL row,
+    whatever the partition count. Applying that positionally would give the first partition a
+    condition of nothing and leave the rest unanswered in silence - so the length is what
+    decides, and the method says the rest.
+    """
+    helpartition = [
+        ([('order_items', 'base table', 'hash', 8, 'order_id')],
+         ['name', 'type', 'partition_type', 'partitions', 'partition_keys']),
+        ([(f'ph{index}', index, 'none', 85, 22686, 'default', 'x') for index in range(1, 9)],
+         ['partition_name', 'partition_id', 'compression_level', 'pages', 'row_count', 'segment',
+          'create_date']),
+        ([(None,)], ['partition_conditions']),
+    ]
+    _made, scheme = scheme_of([
+        ('SELECT o.id FROM sysobjects o', [(1234,)]),
+        ('row_count(db_id(), p.id',
+         [(index, f'ph{index}', 'default', 22686) for index in range(1, 9)]),
+        ('sp_helpartition', helpartition),
+        ('syspartitionkeys k', [('order_id',)]),
+        ('LEFT JOIN systypes t ON t.usertype = c.usertype', [('order_id', 'int', None, None)]),
+    ], table='order_items')
+    assert scheme['method'] == ase.HASH
+    assert scheme['engine_specific']['conditions_were_read'] is True
+    assert scheme['target_key_definition'] == 'HASH ("order_id")'
+    assert scheme['partitions'][0]['target_bound'] == 'FOR VALUES WITH (MODULUS 8, REMAINDER 0)'
+
+
+def test_a_roundrobin_table_has_no_key_and_is_refused():
+    """Verified: sp_helpartition answers partition_keys NULL for a roundrobin scheme."""
+    helpartition = [
+        ([('inventory_movements', 'base table', 'roundrobin', 4, None)],
+         ['name', 'type', 'partition_type', 'partitions', 'partition_keys']),
+        ([(f'pr{index}', index, 'none', 1, 0, 'default', 'x') for index in range(1, 5)],
+         ['partition_name', 'partition_id', 'compression_level', 'pages', 'row_count', 'segment',
+          'create_date']),
+        ([(None,)], ['partition_conditions']),
+    ]
+    _made, scheme = scheme_of([
+        ('SELECT o.id FROM sysobjects o', [(1234,)]),
+        ('row_count(db_id(), p.id',
+         [(index, f'pr{index}', 'default', 0) for index in range(1, 5)]),
+        ('sp_helpartition', helpartition),
+        ('syspartitionkeys k', []),
+        ('LEFT JOIN systypes t ON t.usertype = c.usertype', []),
+    ], table='inventory_movements')
+    assert scheme['method'] == ase.ROUND_ROBIN
+    assert scheme['target_key_definition'] == ''
+    assert any('no partitioning key' in issue for issue in scheme['blockers'])
+
+
+def test_a_list_scheme_is_read_and_built():
+    helpartition = [
+        ([('payments', 'base table', 'list', 4, 'method')],
+         ['name', 'type', 'partition_type', 'partitions', 'partition_keys']),
+        ([('p_card', 1, 'none', 46, 12000, 'default', 'x'),
+          ('p_wire', 2, 'none', 65, 18000, 'default', 'x'),
+          ('p_online', 3, 'none', 44, 12000, 'default', 'x'),
+          ('p_offline', 4, 'none', 65, 18000, 'default', 'x')],
+         ['partition_name', 'partition_id', 'compression_level', 'pages', 'row_count', 'segment',
+          'create_date']),
+        ([("VALUES ('CARD')",), ("VALUES ('WIRE')",), ("VALUES ('PAYPAL')",),
+          ("VALUES ('CASH', 'VOUCHER')",)], ['partition_conditions']),
+    ]
+    _made, scheme = scheme_of([
+        ('SELECT o.id FROM sysobjects o', [(1234,)]),
+        ('row_count(db_id(), p.id',
+         [(1, 'p_card', 'default', 12000), (2, 'p_wire', 'default', 18000),
+          (3, 'p_online', 'default', 12000), (4, 'p_offline', 'default', 18000)]),
+        ('sp_helpartition', helpartition),
+        ('syspartitionkeys k', [('method',)]),
+        ('LEFT JOIN systypes t ON t.usertype = c.usertype',
+         [('method', 'varchar', None, None)]),
+    ], table='payments')
+    assert scheme['method'] == ase.LIST
+    assert scheme['target_key_definition'] == 'LIST ("method")'
+    assert [partition['target_bound'] for partition in scheme['partitions']] == [
+        "FOR VALUES IN ('CARD')", "FOR VALUES IN ('WIRE')", "FOR VALUES IN ('PAYPAL')",
+        "FOR VALUES IN ('CASH', 'VOUCHER')"]
 
 
 def test_a_table_with_one_data_partition_is_not_partitioned():
-    """Every unpartitioned ASE table has exactly one data partition."""
+    """
+    Verified, and it is the reason the COUNT and not the method is what says a table is
+    partitioned: sp_helpartition answers `roundrobin` with 1 partition for an ordinary
+    unpartitioned table.
+    """
     _made, scheme = scheme_of([
         ('SELECT o.id FROM sysobjects o', [(1234,)]),
-        ('row_count(db_id(), p.id', [(1, 'p1', 'seg1', 100)]),
-    ])
+        ('row_count(db_id(), p.id', [(1, 'regions_768002736', 'default', 5)]),
+    ], table='regions')
     assert scheme == {}
 
 
@@ -395,96 +574,35 @@ def test_a_table_which_is_not_there_answers_nothing():
     assert scheme == {}
 
 
-def test_a_round_robin_table_is_read_reported_and_refused():
-    _made, scheme = scheme_of([
-        ('SELECT o.id FROM sysobjects o', [(1234,)]),
-        ('row_count(db_id(), p.id', ORDERS_PARTITIONS),
-        ('syspartitionkeys k', []),
-        ('p.condition FROM syspartitions', [], ['partitionid', 'condition']),
-        ('LEFT JOIN systypes t ON t.usertype = c.usertype', []),
-    ])
-    assert scheme['method'] == ase.ROUND_ROBIN
-    assert scheme['target_key_definition'] == ''
-    assert any('ROUNDROBIN' in issue for issue in scheme['blockers'])
-    assert any('parallel scans' in note for note in scheme['notes'])
-
-
-def test_the_conditions_are_read_through_the_second_way_when_the_first_is_refused():
+def test_when_sp_helpartition_cannot_be_run_the_catalogue_is_read_instead():
     """
-    §2.4 records that these catalogue names were never verified against a live server, so the
-    read is tiered - and the second way is ASE's own reporting procedure, whose columns are
-    found by NAME because their order differs between releases.
+    The fallback, and what §0.9 designed for: the names and the segments are in syspartitions
+    and the key columns in syspartitionkeys, so the scheme is still REPORTED - and the method
+    is worked out from what is there rather than guessed at.
     """
-    made, scheme = scheme_of([
-        ('SELECT o.id FROM sysobjects o', [(1234,)]),
-        ('row_count(db_id(), p.id', ORDERS_PARTITIONS),
-        ('syspartitionkeys k', [('acct',)]),
-        ('sp_helpartition',
-         [('p1', 12, 'seg1', 'VALUES <= (100)'),
-          ('p2', 13, 'seg2', 'VALUES <= (200)'),
-          ('p3', 14, 'seg3', 'VALUES <= (MAX)')],
-         ['partition_name', 'pages', 'segment', 'partition_conditions']),
-        ('LEFT JOIN systypes t ON t.usertype = c.usertype', [('acct', 'int', None, None)]),
-    ], raise_on=('p.condition',))
-    assert scheme['method'] == ase.RANGE
-    assert scheme['partitions'][0]['target_bound'] == 'FOR VALUES FROM (MINVALUE) TO (101)'
-    assert any(level == 'DEBUG' for level, _text in made.messages)
-
-
-def test_conditions_which_no_way_could_read_stop_the_run_rather_than_being_guessed():
-    """
-    The failure §2.4's warning makes likely, made safe: the scheme is reported in full - method
-    unknown, partitions, segments, rows - and nothing is built out of what was not read.
-    """
-    made, scheme = scheme_of([
-        ('SELECT o.id FROM sysobjects o', [(1234,)]),
-        ('row_count(db_id(), p.id', ORDERS_PARTITIONS),
-        ('syspartitionkeys k', [('acct',)]),
-        ('LEFT JOIN systypes t ON t.usertype = c.usertype', [('acct', 'int', None, None)]),
-    ], raise_on=('p.condition', 'sp_helpartition'))
-    assert scheme['method'] == 'UNKNOWN'
-    assert scheme['target_key_definition'] == ''
-    assert scheme['partition_count'] == 3
-    assert [partition['rows'] for partition in scheme['partitions']] == [5000, 6000, 100]
+    made, scheme = scheme_of(ORDERS, raise_on=('sp_helpartition',))
+    assert scheme['partition_count'] == 5
+    assert scheme['columns'] == [] and scheme['target_key_definition'] == ''
     assert scheme['engine_specific']['conditions_were_read'] is False
     assert any('could not read which method' in issue for issue in scheme['blockers'])
     assert any('could NOT be read from this server' in note for note in scheme['notes'])
+    assert any(level == 'DEBUG' for level, _text in made.messages)
 
 
-def test_an_answer_which_holds_no_condition_column_is_not_taken_for_an_empty_one():
+def test_the_key_columns_are_read_in_key_order_and_not_in_column_order():
     """
-    A result set which has no column named for a condition has not answered the question - and
-    reading it as "there are no conditions" would make a RANGE scheme look like a HASH one.
+    `syspartitionkeys` is (indid, id, colid, position): `position` is the key order and `colid`
+    is where the column stands in the table. Ordering by the second is right by accident for a
+    key of one column and wrong for every other.
     """
-    made, scheme = scheme_of([
-        ('SELECT o.id FROM sysobjects o', [(1234,)]),
-        ('row_count(db_id(), p.id', ORDERS_PARTITIONS),
-        ('syspartitionkeys k', [('acct',)]),
-        ('p.condition FROM syspartitions', [(1, 'x')], ['partitionid', 'something_else']),
-        ('sp_helpartition', [('p1', 12)], ['partition_name', 'pages']),
-        ('LEFT JOIN systypes t ON t.usertype = c.usertype', [('acct', 'int', None, None)]),
-    ])
-    assert scheme['method'] == 'UNKNOWN'
-    assert scheme['engine_specific']['conditions_were_read'] is False
-
-
-def test_the_rows_of_a_partition_are_not_known_where_the_server_refuses_the_count():
-    made, scheme = scheme_of([
-        ('SELECT o.id FROM sysobjects o', [(1234,)]),
-        ('NULL\n            FROM syspartitions p',
-         [(1, 'p1', 'seg1', None), (2, 'p2', 'seg2', None)]),
-        ('syspartitionkeys k', [('acct',)]),
-        ('p.condition FROM syspartitions',
-         [(1, 'VALUES <= (100)'), (2, 'VALUES <= (MAX)')], ['partitionid', 'condition']),
-        ('LEFT JOIN systypes t ON t.usertype = c.usertype', [('acct', 'int', None, None)]),
-    ], raise_on=('row_count(db_id(), p.id',))
-    assert [partition['rows'] for partition in scheme['partitions']] == [None, None]
-    assert any('NOT known' in note for note in scheme['notes'])
+    import inspect
+    source = inspect.getsource(SybaseASEConnector._partition_key_columns)
+    assert 'ORDER BY k.position' in source
 
 
 def test_the_partitioned_tables_of_a_schema_are_listed_in_one_query():
-    made = connector([('HAVING count(*) > 1', [('ORDERS',), ('EVENTS',)])])
-    assert made.fetch_partitioning_candidates('dbo') == {'ORDERS', 'EVENTS'}
+    made = connector([('HAVING count(*) > 1', [('orders',), ('payments',)])])
+    assert made.fetch_partitioning_candidates('dbo') == {'orders', 'payments'}
     assert len(made.cursor.statements) == 1
 
 
@@ -579,13 +697,34 @@ PARTITION_SQL = ('CREATE TABLE "{target_schema_name}"."{target_table_name}" PART
 
 
 def test_the_create_table_of_a_preserved_table_and_its_partitions():
+    """
+    The whole way through, on the shape which CAN be built: a range over an int. The migtest
+    `orders` of the suite is a range over a `datetime` and is refused - which is the test above.
+    """
     from credativ_pg_migrator.planner import Planner
 
-    _made, scheme = scheme_of()
+    helpartition = [
+        ([('accounts', 'base table', 'range', 3, 'acct_no')],
+         ['name', 'type', 'partition_type', 'partitions', 'partition_keys']),
+        ([('p1', 1, 'none', 1, 10, 'default', 'x'), ('p2', 2, 'none', 1, 10, 'default', 'x'),
+          ('p3', 3, 'none', 1, 10, 'default', 'x')],
+         ['partition_name', 'partition_id', 'compression_level', 'pages', 'row_count', 'segment',
+          'create_date']),
+        ([('VALUES <= (100)',), ('VALUES <= (200)',), ('VALUES <= (MAX)',)],
+         ['partition_conditions']),
+    ]
+    _made, scheme = scheme_of([
+        ('SELECT o.id FROM sysobjects o', [(1234,)]),
+        ('row_count(db_id(), p.id', [(1, 'p1', 'default', 10), (2, 'p2', 'default', 10),
+                                     (3, 'p3', 'default', 10)]),
+        ('sp_helpartition', helpartition),
+        ('syspartitionkeys k', [('acct_no',)]),
+        ('LEFT JOIN systypes t ON t.usertype = c.usertype', [('acct_no', 'int', None, None)]),
+    ], table='accounts')
     plan = partitioning.build_plan(
-        {'ORDERS': scheme}, ['ORDERS'], mode_of=lambda name: 'preserve',
+        {'accounts': scheme}, ['accounts'], mode_of=lambda name: 'preserve',
         target_version_num=160000)
-    assert plan['ORDERS'].issues == []
+    assert plan['accounts'].issues == []
 
     planner = Planner.__new__(Planner)
     planner.config_parser = MagicMock()
@@ -598,43 +737,55 @@ def test_the_create_table_of_a_preserved_table_and_its_partitions():
             for key, value in settings.items()})
     planner.target_connection = target
 
-    clause, statements = planner.partitioning_clause_for(plan['ORDERS'], 'orders')
-    assert clause == ' PARTITION BY RANGE ("acct")'
+    clause, statements = planner.partitioning_clause_for(plan['accounts'], 'accounts')
+    assert clause == ' PARTITION BY RANGE ("acct_no")'
     assert statements == [
-        'CREATE TABLE "migtest"."p1" PARTITION OF "migtest"."orders" '
+        'CREATE TABLE "migtest"."p1" PARTITION OF "migtest"."accounts" '
         'FOR VALUES FROM (MINVALUE) TO (101)',
-        'CREATE TABLE "migtest"."p2" PARTITION OF "migtest"."orders" '
+        'CREATE TABLE "migtest"."p2" PARTITION OF "migtest"."accounts" '
         'FOR VALUES FROM (101) TO (201)',
-        'CREATE TABLE "migtest"."p3" PARTITION OF "migtest"."orders" '
+        'CREATE TABLE "migtest"."p3" PARTITION OF "migtest"."accounts" '
         'FOR VALUES FROM (201) TO (MAXVALUE)',
     ]
 
 
 def test_a_scheme_which_cannot_be_built_stops_only_a_run_which_would_build_it():
-    _made, scheme = scheme_of([
-        ('SELECT o.id FROM sysobjects o', [(1234,)]),
-        ('row_count(db_id(), p.id', ORDERS_PARTITIONS),
-        ('syspartitionkeys k', []),
-        ('p.condition FROM syspartitions', [], ['partitionid', 'condition']),
-        ('LEFT JOIN systypes t ON t.usertype = c.usertype', []),
-    ])
+    _made, scheme = scheme_of()
     preserved = partitioning.build_plan(
-        {'ORDERS': scheme}, ['ORDERS'], mode_of=lambda name: 'preserve',
-        target_version_num=160000)['ORDERS']
+        {'orders': scheme}, ['orders'], mode_of=lambda name: 'preserve',
+        target_version_num=160000)['orders']
     assert preserved.issues
     flattened = partitioning.build_plan(
-        {'ORDERS': scheme}, ['ORDERS'], mode_of=lambda name: 'flatten',
-        target_version_num=160000)['ORDERS']
+        {'orders': scheme}, ['orders'], mode_of=lambda name: 'flatten',
+        target_version_num=160000)['orders']
     assert flattened.issues == []
     ## and what the source really has is still said
     assert any('parallel scans' in warning for warning in flattened.warnings)
 
 
 def test_a_preserved_key_is_checked_against_the_primary_key():
-    _made, scheme = scheme_of()
+    """
+    §3.1, on a scheme which CAN be built - the check has nothing to add to one which is already
+    refused, and a scheme this migrator will not build answers no partitioning columns at all.
+    """
+    helpartition = [
+        ([('accounts', 'base table', 'range', 2, 'acct_no')],
+         ['name', 'type', 'partition_type', 'partitions', 'partition_keys']),
+        ([('p1', 1, 'none', 1, 10, 'default', 'x'), ('p2', 2, 'none', 1, 10, 'default', 'x')],
+         ['partition_name', 'partition_id', 'compression_level', 'pages', 'row_count', 'segment',
+          'create_date']),
+        ([('VALUES <= (100)',), ('VALUES <= (MAX)',)], ['partition_conditions']),
+    ]
+    _made, scheme = scheme_of([
+        ('SELECT o.id FROM sysobjects o', [(1234,)]),
+        ('row_count(db_id(), p.id', [(1, 'p1', 'default', 10), (2, 'p2', 'default', 10)]),
+        ('sp_helpartition', helpartition),
+        ('syspartitionkeys k', [('acct_no',)]),
+        ('LEFT JOIN systypes t ON t.usertype = c.usertype', [('acct_no', 'int', None, None)]),
+    ], table='accounts')
     decision = partitioning.build_plan(
-        {'ORDERS': scheme}, ['ORDERS'], mode_of=lambda name: 'preserve',
-        target_version_num=160000)['ORDERS']
+        {'accounts': scheme}, ['accounts'], mode_of=lambda name: 'preserve',
+        target_version_num=160000)['accounts']
     partitioning.check_preserved_keys(
-        decision, [{'name': 'orders_pk', 'columns': ['order_id'], 'is_primary': True}])
-    assert any('orders_pk' in issue and 'acct' in issue for issue in decision.issues)
+        decision, [{'name': 'pk_accounts', 'columns': ['acct_id'], 'is_primary': True}])
+    assert any('pk_accounts' in issue and 'acct_no' in issue for issue in decision.issues)

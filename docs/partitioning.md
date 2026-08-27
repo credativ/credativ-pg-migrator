@@ -4,12 +4,14 @@ How `credativ-pg-migrator` handles partitioned tables: what it reads from each o
 source databases, what it builds on PostgreSQL, what it refuses, and what it tells you before it
 creates anything.
 
-> **State of this feature.** Only the PostgreSQL source has been run against a live server
-> (PostgreSQL 18). The other ten implementations were written against the documented catalogue
-> of their engine and are exercised by an extensive test suite, but **have not yet met a real
-> database of their own kind**. Sybase ASE is the least certain of them and is marked `?` rather
-> than `yes` in [`FEATURE_MATRIX.md`](../FEATURE_MATRIX.md). Read the `[ PARTITIONING ]` block of
-> your first run before trusting it.
+> **State of this feature.** Five of the eleven implementations have been read end to end
+> against a live server of their own engine — **PostgreSQL 18, Oracle 21c, Sybase ASE 16.0 SP02,
+> SQL Server 2022, MySQL 9 and MariaDB 10.11** — each against the `migtest` example of
+> `credativ-pg-migrator-tests`, which carries every partitioning flavour that engine has.
+> **The three Db2 connectors and Informix have not yet been read from a running server**;
+> their parsers are exercised by the test suite and against the real DDL of that same example,
+> which is not the same thing. Read the `[ PARTITIONING ]` block of your first run before
+> trusting any of them.
 
 ---
 
@@ -354,17 +356,31 @@ One implementation for both — the two are one dialect, as their query conversi
 
 ### 5.7 Sybase ASE
 
-**The connector whose catalogue reading is written from the documentation of the engine rather
-than against a live server.** That is not a footnote here — it shapes what it does.
+**Verified against ASE 16.0 SP02**, and the verification changed the connector. `syspartitions`
+was documented to hold the partition condition and **does not** — its columns are `name`,
+`indid`, `id`, `partitionid`, `segment`, `status`, `datoampage`, `indoampage`, `firstpage`,
+`rootpage`, `data_partitionid`, `crdate`, `cdataptnname`, `lobcomp_lvl`, `ptndcompver` — and
+`syspartitionkeys` has only `(indid, id, colid, position)`. The bounds are in neither.
 
 | | |
 |---|---|
 | **has** | semantic partitioning since ASE 15: RANGE, HASH, LIST and ROUND ROBIN, over **segments**, for I/O across devices and for parallel scans |
-| **read from** | `syspartitions`, `syspartitionkeys`, `syscolumns`, `sysindexes`, `sysreferences` |
+| **read from** | `sp_helpartition`, plus `syspartitions`, `syspartitionkeys`, `syscolumns`, `sysindexes`, `sysreferences` |
 | **carried over** | RANGE (bounds converted per section 4), LIST over one column, and the count of a HASH scheme |
 
-**How the method is worked out.** ASE keeps it in a place this migrator cannot point at with
-confidence, so it is derived from two things which it can read:
+**`sp_helpartition` is where the whole scheme lives**, and it answers everything at once, in four
+result sets: the method (`range` / `hash` / `list` / `roundrobin`) and the key columns; one row
+per partition with its name, segment and row count; the **conditions**, one row per partition in
+the same order and carrying no key of their own — so they are matched by position, and only where
+the two are the same length; and the page statistics, which nothing reads. For a hash or a
+roundrobin scheme the conditions come back as a **single NULL row** whatever the partition count
+is, which is why the length is what decides.
+
+`syspartitions` and `syspartitionkeys` are the fallback for the half they do hold — the names,
+the segments and the key columns — and `syspartitionkeys.position` is the key order, not `colid`.
+
+**How the method is worked out when `sp_helpartition` cannot be run**, which is the fallback
+path: it is derived from two things the catalogue does hold:
 
 | | |
 |---|---|
@@ -385,11 +401,11 @@ reported in full with its method stated as **not known**, and the run stops.
 **Stops the run:** ROUND ROBIN; a scheme whose conditions could not be read; an inclusive bound
 whose column type has no next value; a LIST key over more than one column.
 
-**What a live ASE still has to confirm:** that `syspartitions` and `syspartitionkeys` carry the
-columns read here under these names; that a data partition is `indid IN (0, 1)`; the meanings of
-the `syscolumns.status` and `sysindexes.status` bits; and above all **where the partition
-condition really lives**. The run says per table which of its reads answered, so a first migration
-reports what it got rather than failing.
+**What the live run confirmed**, beyond where the conditions live: a `lock datarows` table keeps
+its data at `indid 0` and an allpages table with a clustered index at `indid 1`, never both, so
+`indid IN (0, 1)` cannot double-count; and an **unpartitioned** table reports `roundrobin` with
+**one** partition, which is why the partition *count* and not the method is what says a table is
+partitioned at all.
 
 ---
 
@@ -429,6 +445,17 @@ one at each end is how a sliding window is kept.
 NULL in the lowest partition, PostgreSQL puts it in none at all. Whether the column really holds a
 NULL is not something the catalogue answers, so it is said rather than refused — write the scheme
 with `target_partitioning` and `default_partition: true`, or make the column `NOT NULL` first.
+
+> **One thing a live SQL Server taught this connector.** `sys.partition_range_values.value` is a
+> `sql_variant`, and this connector registers an ODBC output converter for that type so that a
+> `sql_variant` *column* of a migrated table arrives as text. That converter fired on the boundary
+> value too, and turned the `smallint` boundary `2023` into the single character `U+07E7` — its
+> own bytes read as a string. The boundaries are converted **by the server** now
+> (`CONVERT(nvarchar(4000), prv.value, 126)`, which is ISO8601 for a date and ignored for
+> everything else), so the driver never sees a `sql_variant` there at all. Whether a boundary is
+> then written bare or quoted is decided by the **declared type** of the partitioning column, not
+> by what the text looks like: a `varchar` function whose boundaries happen to be `'100'` and
+> `'200'` is a range over two strings.
 
 **Stops the run:** a `RANGE LEFT` function over a type with no next value — notably `datetime`,
 which SQL Server counts in units of 1/300 of a second (which is *why* such boundaries are written
@@ -497,17 +524,18 @@ failed says so; an estimate is marked as an estimate.
 
 ## 7. Summary
 
-| source | reads the source scheme | carried over by `preserve` | refuses |
+| source | read from a live server | carried over by `preserve` | refuses |
 |---|---|---|---|
-| PostgreSQL | yes — **verified live** | RANGE, LIST, HASH, sub-partitions and all | a bound the catalogue does not hold |
-| Oracle | yes | RANGE, LIST, HASH — first level only | REFERENCE, SYSTEM, an unreadable bound |
-| Db2 LUW | yes | range partitioning | inclusive bound with no next value, multi-column range |
-| Db2 z/OS | yes (from DDL) | RANGE | partition-by-growth, `EVERY`, `date_range` entries |
-| Db2 for i | yes (from DDL) | RANGE, HASH | as above |
-| Informix | yes | expression chains which are a range or a list | ROUND ROBIN, HYBRID, arbitrary expressions, overlaps |
-| MySQL / MariaDB | yes | RANGE, LIST, HASH — first level only | a partitioning expression, `KEY()`, multi-column LIST |
-| MS SQL Server | yes | the ranges | RANGE LEFT with no next value, an inconsistent catalogue |
-| Sybase ASE | yes — **catalogue unverified** | RANGE, LIST, HASH | ROUND ROBIN, conditions which could not be read |
+| PostgreSQL | **yes — PostgreSQL 18** | RANGE, LIST, HASH, sub-partitions and all | a bound the catalogue does not hold |
+| Sybase ASE | **yes — ASE 16.0 SP02** | RANGE, LIST, HASH | ROUND ROBIN, an inclusive bound with no next value |
+| MS SQL Server | **yes — SQL Server 2022** | the ranges, both directions | RANGE LEFT with no next value, an inconsistent catalogue |
+| MySQL | **yes — MySQL 9** | RANGE, LIST, HASH — first level only | a partitioning expression, `KEY()`, multi-column LIST |
+| MariaDB | **yes — MariaDB 10.11** | as MySQL | as MySQL, plus `SYSTEM_TIME` |
+| Oracle | **yes — Oracle 21c** | RANGE, LIST, HASH — first level only | REFERENCE, SYSTEM, an unreadable bound |
+| Db2 LUW | not yet | range partitioning | inclusive bound with no next value, multi-column range |
+| Db2 z/OS | not yet (from DDL) | RANGE | partition-by-growth, `EVERY`, `date_range` entries |
+| Db2 for i | not yet (from DDL) | RANGE, HASH | as above |
+| Informix | not yet | expression chains which are a range or a list | ROUND ROBIN, HYBRID, arbitrary expressions, overlaps |
 | SQL Anywhere | n/a — has none | — | — |
 | SQLite | n/a — has none | — | — |
 
@@ -526,4 +554,5 @@ against the two offline Db2 connectors.
   its partitions today;
 * sub-partitioning of a target scheme;
 * the nullable-partitioning-column finding of section 5.8 for the sources other than SQL Server;
-* running any of the eleven non-PostgreSQL implementations against a live server of its engine.
+* reading the three Db2 connectors and Informix from a **running server** — the other six have
+  been, and two of them turned up a real defect that no test could have found.

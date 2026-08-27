@@ -2675,18 +2675,37 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
         """
         The boundary values of one partition function, in the order they run in.
 
-        `value` is a `sql_variant`, so the driver hands it over as whatever it really is - an
-        int, a Decimal, a datetime - and it is rendered as a PostgreSQL literal rather than
-        converted to text by the server, whose default rendering of a datetime is not the ISO
-        form PostgreSQL reads.
+        `value` is a `sql_variant`, and **the server is asked to render it** rather than the
+        driver: this connector registers an output converter for SQL type -150 so that a
+        sql_variant COLUMN of a migrated table arrives as text, and that converter fires on this
+        value too - which turned the smallint boundary 2023 into the single character U+07E7,
+        its own bytes read as a string. Converting in the SELECT means pyodbc never sees a
+        sql_variant here at all.
+
+        Style 126 is ISO8601 for a date or a time - `2024-01-01T00:00:00.000`, which PostgreSQL
+        reads - and is ignored for every other type, so one CONVERT serves them all.
         """
-        cursor.execute(f"""
+        readable = f"""
+            SELECT prv.boundary_id, CONVERT(nvarchar(4000), prv.value, 126)
+            FROM sys.partition_range_values prv
+            WHERE prv.function_id = {function_id}
+            ORDER BY prv.boundary_id
+        """
+        raw = f"""
             SELECT prv.boundary_id, prv.value
             FROM sys.partition_range_values prv
             WHERE prv.function_id = {function_id}
             ORDER BY prv.boundary_id
-        """)
-        return [row[1] for row in cursor.fetchall()]
+        """
+        try:
+            cursor.execute(readable)
+            return [row[1] for row in cursor.fetchall()]
+        except Exception as e:
+            self.config_parser.print_log_message(
+                'DEBUG', f"ms_sql_connector: fetch_table_partitioning: the boundary values could "
+                         f"not be converted to text by the server ({e}) - read as they come.")
+            cursor.execute(raw)
+            return [row[1] for row in cursor.fetchall()]
 
     def _partitions(self, cursor, schema, table):
         """

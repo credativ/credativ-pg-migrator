@@ -19,6 +19,7 @@ import jaydebeapi
 from credativ_pg_migrator.database_connector import DatabaseConnector, first_line
 from credativ_pg_migrator.migrator_logging import MigratorLogger
 from credativ_pg_migrator.jvm_helper import detach_thread_from_jvm
+from credativ_pg_migrator.connectors import informix_partitioning
 import re
 import traceback
 import pyodbc
@@ -37,12 +38,11 @@ class InformixConnector(DatabaseConnector):
 
     ## What this connector does not read out of Informix, and what Informix really has - see
     ## DatabaseConnector.OBJECT_KINDS_NOT_READ. An empty answer would say the source has none.
+    ## `table_partitioning` stood here until 2026-08-27 and is read now, out of sysfragments -
+    ## see fetch_table_partitioning(). Reading it is mostly reporting it: a fragmentation spreads
+    ## the I/O of a table over dbspaces and is not a partitioning, which §2.4 of
+    ## development/PARTITIONING_STRATEGY.md calls the honest answer for this source.
     OBJECT_KINDS_NOT_READ = {
-        'table_partitioning': (
-            'Informix fragments a table by ROUND ROBIN, by EXPRESSION or by a fragment list over '
-            'dbspaces, and keeps it in sysfragments. This connector does not read it - and a round '
-            'robin fragmentation has no partitioning key at all, so there is nothing PostgreSQL '
-            'could be given.'),
         'user_defined_types': ('Informix has DISTINCT types (CREATE DISTINCT TYPE) and named '
                                'ROW types (CREATE ROW TYPE), both in informix.sysxtdtypes. '
                                'This connector does not read either of them.'),
@@ -3974,6 +3974,384 @@ class InformixConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"informix_connector: get_top_fk_dependencies: Error fetching top foreign key dependencies by tables: {e}")
 
         return top_fk_dependencies
+
+    ## ---------------------------------------------------------------- partitioning
+
+    ## §2.4 of development/PARTITIONING_STRATEGY.md puts informix fourth and gives it a verdict
+    ## none of the other eleven sources has: "the case where the honest report is *none of this
+    ## should be reproduced*, which is worth more than a translation". A table is fragmented
+    ## across dbspaces to spread its I/O over devices - the fragment is a place, not a class of
+    ## row - and PostgreSQL does not need a partition to put a table in a tablespace. So what is
+    ## read here is read to be REPORTED, and a scheme is built only where the fragments really
+    ## are a range or a list over one column. `informix_partitioning.py` is the reading; it has
+    ## no driver in it.
+
+    DATE_RANGE_TYPES = informix_partitioning.DATE_RANGE_TYPES
+
+    ## sysfragments.exprtext is a TEXT column, which arrives as an object of the driver rather
+    ## than as a string. Informix renders it as text when it is cast, and this is the length the
+    ## cast asks for - a fragment expression longer than this is refused with its text truncated
+    ## rather than read wrongly.
+    FRAGMENT_EXPRESSION_LENGTH = 4096
+
+    def fetch_partitioning_candidates(self, schema):
+        """
+        The tables of one schema which are fragmented, in one query - so that a schema of three
+        hundred ordinary tables costs one round trip rather than three hundred.
+
+        A fragment of an Informix table is not a table: it has no row in systables of its own,
+        no row in the migration, and nothing asks about it.
+        """
+        query = f"""
+            SELECT DISTINCT t.tabname
+            FROM sysfragments f
+            JOIN systables t ON t.tabid = f.tabid
+            WHERE t.owner = '{schema}' AND t.tabtype = 'T'
+              AND t.tabid >= {self.FIRST_USER_TABID}
+              AND f.fragtype = 'T'
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            names = {row[0].strip() for row in cursor.fetchall() if row[0]}
+            cursor.close()
+            self.disconnect()
+            return names
+        except Exception as e:
+            self.config_parser.print_log_message(
+                'WARNING', f"informix_connector: fetch_partitioning_candidates: the fragmented "
+                           f"tables of {schema} could not be listed ({e}) - every table is asked "
+                           f"instead.")
+            return None
+
+    def fetch_table_partitioning(self, settings):
+        """
+        The fragmentation of one Informix table, out of sysfragments.
+
+        See the contract in DatabaseConnector.fetch_table_partitioning(). Beyond it this
+        connector answers `target_key_definition`, a `target_bound` per fragment, `notes` and
+        `blockers` - and for this source the notes are the point. Most Informix schemes are not
+        partitionings and are reported rather than reproduced; the ones which are a range or a
+        list over one column are built.
+        """
+        source_schema_name = settings['source_schema_name']
+        source_table_name = settings['source_table_name']
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            strategy, fragments = self._fragments(cursor, source_schema_name, source_table_name)
+            cursor.close()
+            self.disconnect()
+        except Exception as e:
+            self.config_parser.print_log_message(
+                'ERROR', f"informix_connector: fetch_table_partitioning: the fragmentation of "
+                         f"{source_schema_name}.{source_table_name} could not be read: {e}")
+            return {}
+
+        if not fragments:
+            return {}
+
+        dbspaces = sorted({fragment.dbspace for fragment in fragments if fragment.dbspace})
+        notes = informix_partitioning.what_the_fragmentation_is(
+            source_table_name, strategy, fragments, dbspaces)
+        method, columns, more_notes, blockers = informix_partitioning.build_scheme(
+            source_table_name, strategy, fragments, self.config_parser.convert_names_case)
+        notes.extend(more_notes)
+
+        target_key_definition = ''
+        if method and columns:
+            written = ', '.join(f'"{self.config_parser.convert_names_case(column)}"'
+                                for column in columns)
+            target_key_definition = f"{method} ({written})"
+            notes.append(
+                f"the fragments of {source_table_name} really are a {method} over "
+                f"{', '.join(columns)}, so the target is given the same scheme - which is the "
+                f"minority case for an Informix source. Only the ranges are carried over; the "
+                f"dbspaces they sat in are not")
+
+        return {
+            'is_partitioned': True,
+            ## a fragment of an Informix table is not a table of the schema, so nothing this
+            ## connector is asked about is ever one
+            'is_partition': False,
+            'parent_table': '',
+            'parent_schema': '',
+            'partition_bound': '',
+            'method': method or informix_partitioning.STRATEGIES.get(strategy, strategy or ''),
+            'columns': columns,
+            'key_definition': self._key_as_informix_writes_it(strategy, columns, fragments),
+            'target_key_definition': target_key_definition,
+            'level': 1,
+            ## Informix's hybrid fragmentation is the one scheme with a second level, and it is
+            ## refused rather than reported as a level which could have been carried over
+            'levels_below': [],
+            'partitions': [{
+                'name': fragment.name,
+                'bound': fragment.expression or informix_partitioning.REMAINDER,
+                'target_bound': fragment.target_bound,
+                'is_default': bool(fragment.is_remainder),
+                'is_partitioned': False,
+                'rows': fragment.rows,
+            } for fragment in fragments],
+            'partition_count': len(fragments),
+            'engine_specific': {
+                'strategy': strategy,
+                'strategy_name': informix_partitioning.STRATEGIES.get(strategy, ''),
+                'dbspaces': dbspaces,
+                'fragments': [{'name': fragment.name, 'dbspace': fragment.dbspace,
+                               'expression': fragment.expression, 'rows': fragment.rows}
+                              for fragment in fragments],
+            },
+            'notes': notes,
+            'blockers': blockers,
+        }
+
+    @staticmethod
+    def _key_as_informix_writes_it(strategy, columns, fragments):
+        """The scheme of the source in one line, for the report and the protocol."""
+        name = informix_partitioning.STRATEGIES.get(strategy, f"strategy '{strategy}'")
+        if columns:
+            return f"FRAGMENT BY {name} ({', '.join(columns)})"
+        return f"FRAGMENT BY {name} over {len(fragments)} fragment(s)"
+
+    def _fragments(self, cursor, schema, table):
+        """
+        The fragments of one table, in the order Informix evaluates their expressions.
+
+        `evalpos` is that order and it is what makes an expression scheme readable: Informix
+        stops at the first fragment whose expression is true, so a chain of `col < v` is a chain
+        of ranges rather than a set of overlapping ones.
+
+        exprtext is a TEXT column and arrives as an object of the driver unless it is cast; the
+        cast is tried first and the raw column is the fallback, so a release which refuses the
+        cast still reports the strategy, the dbspaces and the row counts.
+        """
+        ## `partition` is the name a fragment of a 11.70 or newer scheme carries - `partn` next
+        ## to it is a number and not a name. Both it and the cast of the TEXT column are what an
+        ## older release refuses, so the whole SELECT is tried once and a second one which asks
+        ## for neither is the fallback: the strategy, the dbspaces and the row counts are most
+        ## of what this source has to say, and they are on every release.
+        columns = (f"f.strategy, f.evalpos, f.partition, f.dbspace, f.nrows, "
+                   f"CAST(f.exprtext AS LVARCHAR({self.FRAGMENT_EXPRESSION_LENGTH}))")
+        fallback = "f.strategy, f.evalpos, '', f.dbspace, f.nrows, f.exprtext"
+        query = """
+            SELECT {columns}
+            FROM sysfragments f
+            JOIN systables t ON t.tabid = f.tabid
+            WHERE t.owner = '{schema}' AND t.tabname = '{table}' AND f.fragtype = 'T'
+            ORDER BY f.evalpos
+        """
+        try:
+            cursor.execute(query.format(columns=columns, schema=schema, table=table))
+            rows = cursor.fetchall()
+        except Exception as e:
+            self.config_parser.print_log_message(
+                'DEBUG', f"informix_connector: fetch_table_partitioning: sysfragments of "
+                         f"{schema}.{table} could not be read with the fragment names and the "
+                         f"expressions cast to text ({e}) - read without either instead, so the "
+                         f"fragments are named after their table.")
+            cursor.execute(query.format(columns=fallback, schema=schema, table=table))
+            rows = cursor.fetchall()
+
+        strategy = ''
+        fragments = []
+        for index, row in enumerate(rows, start=1):
+            strategy = strategy or (row[0] or '').strip().upper()
+            expression = self._fragment_expression_text(row[5])
+            ## the name Informix knows the fragment by. A named fragment - a partition of a
+            ## 11.70 or newer scheme - has one; an unnamed one is known by the dbspace it sits
+            ## in, which is not a name a relation of the target could take
+            written = row[2] if isinstance(row[2], str) else ''
+            fragments.append(informix_partitioning.Fragment(
+                name=written.strip() or f"{table}_p{index}",
+                dbspace=(row[3] or '').strip() if isinstance(row[3], str) else '',
+                expression=expression,
+                ## sysfragments.nrows is what UPDATE STATISTICS last gathered, and is answered
+                ## as not known rather than as zero where it has not run
+                rows=int(row[4]) if row[4] is not None and int(row[4]) >= 0 else None,
+                evalpos=int(row[1]) if row[1] is not None else index,
+                is_remainder=not expression,
+            ))
+        return strategy, fragments
+
+    @staticmethod
+    def _fragment_expression_text(value):
+        """One exprtext, however the driver answered it - text, bytes, or a Clob of the JDBC."""
+        if value is None:
+            return ''
+        if isinstance(value, bytes):
+            return value.decode('utf-8', errors='replace').strip()
+        if isinstance(value, str):
+            return value.strip()
+        reader = getattr(value, 'getSubString', None)
+        if reader is not None:
+            try:
+                return str(reader(1, int(value.length()))).strip()
+            except Exception:
+                return ''
+        return str(value).strip()
+
+    def fetch_partitioning_facts(self, settings):
+        """
+        Everything about one Informix table which decides whether it CAN be partitioned - read
+        before anything is created, which is the moment the answer is still free.
+
+        See DatabaseConnector.fetch_partitioning_facts() for the shape. Everything comes from
+        the system catalogue and from what UPDATE STATISTICS has already gathered; nothing here
+        reads a row of the table. `syscolumns.colmin` and `colmax` hold the extremes where
+        statistics have been gathered, and Informix keeps no NULL count of its own - so the null
+        fraction is answered as NOT known for every column, which the checks report as a check
+        which was not made rather than as one which passed.
+        """
+        source_schema_name = settings['source_schema_name']
+        source_table_name = settings['source_table_name']
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            row_estimate = self._row_estimate(cursor, source_schema_name, source_table_name)
+            columns = self._column_facts(cursor, source_schema_name, source_table_name)
+            unique_keys = self._unique_keys(cursor, source_schema_name, source_table_name)
+            referenced_by = self._referencing_foreign_keys(cursor, source_schema_name, source_table_name)
+            cursor.close()
+            self.disconnect()
+        except Exception as e:
+            self.config_parser.print_log_message(
+                'WARNING', f"informix_connector: fetch_partitioning_facts: the facts of "
+                           f"{source_schema_name}.{source_table_name} could not be read ({e}) - "
+                           f"the checks which need them are reported as NOT made rather than as "
+                           f"passed.")
+            return None
+
+        return {
+            'columns': columns,
+            'unique_keys': unique_keys,
+            ## Informix has no exclusion constraint and no table inheritance of the PostgreSQL
+            ## kind - absences of the engine, which are not the same as things this connector
+            ## did not read
+            'exclusion_constraints': [],
+            'referenced_by': referenced_by,
+            'inherits_from_a_plain_table': False,
+            'is_a_plain_inheritance_parent': False,
+            'row_estimate': row_estimate,
+            'date_range_types': self.DATE_RANGE_TYPES,
+        }
+
+    def _row_estimate(self, cursor, schema, table):
+        """systables.nrows - what UPDATE STATISTICS gathered, and stale where it has not run."""
+        cursor.execute(f"""
+            SELECT nrows FROM systables
+            WHERE owner = '{schema}' AND tabname = '{table}'
+        """)
+        row = cursor.fetchone()
+        if not row or row[0] is None or int(row[0]) < 0:
+            return None
+        return int(row[0])
+
+    def _column_facts(self, cursor, schema, table):
+        """
+        Every column and what PostgreSQL will be able to do with it.
+
+        `syscolumns.coltype` carries the NOT NULL flag in bit 0x100, which is how Informix says
+        it; the type itself is the low byte. A generated column of Informix is a virtual column
+        of a virtual table and does not appear here at all.
+        """
+        cursor.execute(f"""
+            SELECT c.colname, c.coltype, c.collength
+            FROM syscolumns c
+            JOIN systables t ON t.tabid = c.tabid
+            WHERE t.owner = '{schema}' AND t.tabname = '{table}'
+            ORDER BY c.colno
+        """)
+        columns = {}
+        for row in cursor.fetchall():
+            name = (row[0] or '').strip()
+            code = int(row[1]) if row[1] is not None else 0
+            type_name = self.INFORMIX_TYPE_NAMES.get(code & 0x00FF, f"type {code & 0x00FF}")
+            can_be_a_key = type_name not in informix_partitioning.TYPES_WITHOUT_AN_OPERATOR_CLASS
+            columns[name] = {
+                'type_name': type_name,
+                ## bit 0x100 of coltype is Informix's NOT NULL
+                'not_null': bool(code & 0x0100),
+                ## a generated column of Informix belongs to a virtual table and is not one of
+                ## these; nothing here is a generated column of the target either
+                'is_generated': False,
+                'has_btree_opclass': can_be_a_key,
+                'has_hash_opclass': can_be_a_key,
+                ## Informix keeps no NULL count of its own, so this is NOT known for every
+                ## column - and the check which needs it says it was not made
+                'null_fraction': None,
+            }
+        return columns
+
+    ## syscolumns.coltype, low byte. The list is Informix's own numbering; a code which is not
+    ## here is reported as the number rather than named, and a column whose type this migrator
+    ## cannot name is not refused for it - only the types which cannot carry a key at all are.
+    INFORMIX_TYPE_NAMES = {
+        0: 'CHAR', 1: 'SMALLINT', 2: 'INTEGER', 3: 'FLOAT', 4: 'SMALLFLOAT', 5: 'DECIMAL',
+        6: 'SERIAL', 7: 'DATE', 8: 'MONEY', 9: 'NULL', 10: 'DATETIME', 11: 'BYTE', 12: 'TEXT',
+        13: 'VARCHAR', 14: 'INTERVAL', 15: 'NCHAR', 16: 'NVARCHAR', 17: 'INT8', 18: 'SERIAL8',
+        19: 'SET', 20: 'MULTISET', 21: 'LIST', 22: 'ROW', 23: 'COLLECTION', 40: 'LVARCHAR',
+        41: 'BOOLEAN', 43: 'LVARCHAR', 45: 'BOOLEAN', 52: 'BIGINT', 53: 'BIGSERIAL',
+    }
+
+    def _unique_keys(self, cursor, schema, table):
+        """
+        The primary key, every unique constraint and every unique index which is not one - §3.1
+        applies to all three alike.
+
+        `sysindexes.part1 .. part16` are the column numbers of the key, in order, and a negative
+        one is a descending column - the name is what matters here and not the direction.
+        """
+        parts = ', '.join(f'i.part{index}' for index in range(1, 17))
+        cursor.execute(f"""
+            SELECT coalesce(c.constrname, i.idxname), c.constrtype, i.idxtype, {parts}
+            FROM sysindexes i
+            JOIN systables t ON t.tabid = i.tabid
+            LEFT JOIN sysconstraints c ON c.tabid = i.tabid AND c.idxname = i.idxname
+            WHERE t.owner = '{schema}' AND t.tabname = '{table}'
+              AND (i.idxtype = 'U' OR c.constrtype IN ('P', 'U'))
+            ORDER BY 1
+        """)
+        rows = cursor.fetchall()
+        cursor.execute(f"""
+            SELECT c.colno, c.colname
+            FROM syscolumns c
+            JOIN systables t ON t.tabid = c.tabid
+            WHERE t.owner = '{schema}' AND t.tabname = '{table}'
+        """)
+        names_of = {int(row[0]): (row[1] or '').strip() for row in cursor.fetchall()}
+
+        keys = []
+        for row in rows:
+            columns = []
+            for part in row[3:]:
+                if not part:
+                    continue
+                name = names_of.get(abs(int(part)))
+                if name:
+                    columns.append(name)
+            if not columns:
+                continue
+            keys.append({'name': (row[0] or '').strip(),
+                         'columns': columns,
+                         'is_primary': (row[1] or '').strip().upper() == 'P'})
+        return keys
+
+    def _referencing_foreign_keys(self, cursor, schema, table):
+        """§3.5: a foreign key pointing AT a partitioned table needs PostgreSQL 12."""
+        cursor.execute(f"""
+            SELECT child.constrname, childtab.tabname
+            FROM sysconstraints child
+            JOIN systables childtab ON childtab.tabid = child.tabid
+            JOIN sysreferences r ON r.constrid = child.constrid
+            JOIN systables parent ON parent.tabid = r.ptabid
+            WHERE child.constrtype = 'R'
+              AND parent.owner = '{schema}' AND parent.tabname = '{table}'
+            ORDER BY child.constrname
+        """)
+        return [{'name': (row[0] or '').strip(), 'table': (row[1] or '').strip()}
+                for row in cursor.fetchall()]
 
     def target_table_exists(self, target_schema_name, target_table_name):
         try:

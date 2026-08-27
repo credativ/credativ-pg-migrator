@@ -496,6 +496,8 @@ SOURCE_TEST_WITHOUT_MECHANISM = {
                               'PostgreSQL writes it. It has no driver in it at all.',
     'db2_partitioning.py': 'not a connector - the partitioning of the three Db2 connectors, '
                            'written the way PostgreSQL writes it. It has no driver in it at all.',
+    'informix_partitioning.py': 'not a connector - the fragmentation of Informix, and the small '
+                                'part of it which is a partitioning. It has no driver in it.',
     'match_schemas.py': 'not a connector - it compares two schemas.',
     'tsql_parser.py': 'not a connector - the parser the Transact-SQL family shares.',
 }

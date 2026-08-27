@@ -424,6 +424,11 @@ def _check(plan, schemes, selected_set, target_version_num):
 def _check_preserved(table_name, decision, schemes, selected_set, target_version_num):
     methods = {decision.method} if decision.method else set()
     has_default = any(partition.is_default for partition in decision.partitions)
+    ## whether a partition of this source is a relation of its own. See the contract in
+    ## DatabaseConnector.fetch_table_partitioning(): PostgreSQL answers for its partitions as
+    ## tables and every other engine keeps them as storage objects with no name of their own in
+    ## the table list.
+    partitions_are_tables = bool(decision.scheme.get('partitions_are_tables'))
 
     for partition in decision.partitions:
         child_scheme = schemes.get(partition.name) or {}
@@ -434,7 +439,13 @@ def _check_preserved(table_name, decision, schemes, selected_set, target_version
                 f"the partition {partition.name} of {table_name} has no bound in the source "
                 f"catalogue, so it cannot be created on the target. Read the scheme again, or "
                 f"set source_partitioning: flatten for this table")
-        if partition.name in selected_set:
+        if partition.name in selected_set or not partitions_are_tables:
+            ## the warning below is about a table the FILTERS could have selected and did not,
+            ## and that only exists where a partition is a relation of its own - which is
+            ## PostgreSQL and nothing else. On every other source a partition is a storage
+            ## object with no row in the table list, so it can never be "not selected", and
+            ## saying so once per partition is one line per partition of noise: an Oracle
+            ## INTERVAL table of 55 months produced 55 of them.
             continue
         decision.warnings.append(
             f"the partition {partition.name} of {table_name} is not selected by "

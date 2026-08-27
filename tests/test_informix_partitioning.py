@@ -479,9 +479,32 @@ def test_a_release_which_refuses_the_names_and_the_cast_still_reports_what_it_ha
     ('acct < 100', 'acct < 100'),
     (b'acct < 100', 'acct < 100'),
     (None, ''),
+    ## Informix answers this column NUL-TERMINATED, and str.strip() does not remove a NUL.
+    ## Until these were taken out, EVERY fragment expression of every Informix table was
+    ## refused as "not a range or a list" - found by running the migtest example against a
+    ## live Informix, not by any test.
+    ('remainder\x00', 'remainder'),
+    ('order_date < MDY(1,1,2023)\x00', 'order_date < MDY(1,1,2023)'),
+    (b'batch_no < 1001\x00', 'batch_no < 1001'),
 ])
 def test_an_expression_is_decoded_however_the_driver_answered_it(value, expected):
     assert InformixConnector._fragment_expression_text(value) == expected
+
+
+def test_a_nul_terminated_remainder_is_still_the_remainder():
+    """The end-to-end shape of the defect: the last fragment of every expression scheme."""
+    made = connector([('sysfragments f', [
+        ('E', 0, 'p1', 'dbs1', 10, 'batch_no < 1001\x00'),
+        ('E', 1, 'p2', 'dbs2', 10, 'batch_no >= 1001 AND batch_no < 2001\x00'),
+        ('E', 2, 'p_rest', 'dbs3', 1, 'remainder\x00')])])
+    scheme = made.fetch_table_partitioning(
+        {'source_schema_name': 'app', 'source_table_name': 'batch_runs'})
+    assert scheme['blockers'] == []
+    assert scheme['target_key_definition'] == 'RANGE ("batch_no")'
+    assert [partition['target_bound'] for partition in scheme['partitions']] == [
+        'FOR VALUES FROM (MINVALUE) TO (1001)',
+        'FOR VALUES FROM (1001) TO (2001)',
+        'DEFAULT']
 
 
 def test_a_clob_of_the_jdbc_driver_is_read_through_its_own_reader():

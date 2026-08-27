@@ -3651,6 +3651,10 @@ class PostgreSQLConnector(DatabaseConnector):
             'level': 1,
             'partitions': partitions,
             'partition_count': len(partitions),
+            ## a partition of PostgreSQL IS a relation, with a row of its own in
+            ## fetch_table_names() which include_tables / exclude_tables can select - which is
+            ## true of no other source of this migrator, and which the checks need to know
+            'partitions_are_tables': True,
             'engine_specific': {},
         }
 

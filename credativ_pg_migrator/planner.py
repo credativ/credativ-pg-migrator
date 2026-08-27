@@ -55,6 +55,8 @@ class Planner:
         self.partitioning_table_ids = {}
         # why the partitioning of this source is not reported, when it is not
         self.partitioning_note = ''
+        # and which of the two reasons it is: the source HAS none, or this run cannot see it
+        self.partitioning_is_absent = False
         self.sql_functions_mapping = self.source_connection.get_sql_functions_mapping({
             'target_db_type': self.config_parser.get_target_db_type()
         })
@@ -695,11 +697,16 @@ class Planner:
         """
         The partitioning of the source, read, and the decision taken for every selected table.
 
-        A source whose connector does not read partitioning says so once and the plan is empty
-        - which is not the same as a source with no partitioned table, and the report says
-        which of the two it is.
+        A source whose connector does not read partitioning - or which has none to read - says so
+        once, and the plan is then built over EMPTY schemes rather than not built at all. The
+        two halves of this feature are independent: reading how the source partitions is per
+        connector, and `target_partitioning` reads a configuration and writes PostgreSQL. A
+        SQLite or SQL Anywhere source has no scheme to report and can still be given one, and
+        returning no plan at all used to make every `target_partitioning` entry against such a
+        source both refused by the analysis and, had it passed, silently never applied.
         """
         self.partitioning_note = ''
+        self.partitioning_is_absent = False
         source_tables = self.source_connection.fetch_table_names(self.source_schema_name)
         selected = []
         table_ids = {}
@@ -716,10 +723,19 @@ class Planner:
         if absent:
             self.partitioning_note = self.source_connection.OBJECT_KINDS_ABSENT.get(
                 'table_partitioning', 'this source has no partitioning')
-            return {}
-        if not_read:
+            ## P2-8 once more, and one level finer than the note itself. Both cases end here
+            ## with nothing read, and they are not the same answer: SQL Anywhere HAS no table
+            ## partitioning, while a Db2 read through SYSIBM has some that this run cannot see.
+            ## The note says which, and the sentence it is printed under has to agree with it.
+            self.partitioning_is_absent = True
+        elif not_read:
             self.partitioning_note = not_read
-            return {}
+            self.partitioning_is_absent = False
+        if self.partitioning_note:
+            ## nothing to read, and still a plan to build: what `target_partitioning` names is
+            ## decided here too, and a source with no scheme of its own is exactly the source
+            ## most likely to be given one
+            return self.plan_over(schemes={}, selected=selected)
 
         ## the tables which are worth asking about. A connector which can answer it in one
         ## query answers it; one which cannot says so, and every table is asked.
@@ -756,13 +772,70 @@ class Planner:
             pending.extend(partition.get('name') for partition in scheme.get('partitions') or []
                            if partition.get('is_partitioned'))
 
-        repartitioned = {entry.get('table_name') for entry in self.config_parser.get_target_partitioning()
+        return self.plan_over(schemes, selected)
+
+    def plan_over(self, schemes, selected):
+        """
+        The decision for every selected table, out of whatever was read about the source.
+
+        The `target_partitioning` entries are resolved against the tables the migration really
+        has, case-insensitively - an entry is written by hand and the source spells its tables
+        the way its engine does, which for Oracle and Db2 is upper case. `table_settings`
+        already matches that way, and the two must not disagree about which table an entry means.
+        """
+        repartitioned = {self.selected_table_named(entry.get('table_name'), selected)
+                         for entry in self.config_parser.get_target_partitioning()
                          if entry.get('table_name')}
         return partitioning.build_plan(
             schemes, selected,
             mode_of=self.config_parser.get_source_partitioning,
-            repartitioned_tables=repartitioned,
+            repartitioned_tables={name for name in repartitioned if name},
             target_version_num=self.target_connection.get_server_version_num())
+
+    def source_columns_named(self, written_columns, table_name):
+        """
+        The columns of the source one entry's `partitioning_columns` mean, in the source's own
+        spelling.
+
+        The entry is written by hand and the source spells its columns the way its engine does:
+        an Oracle entry naming `rate_date` means `RATE_DATE`, and asking the source for
+        `min("rate_date")` is ORA-00904. The clause of the TARGET is a different spelling again -
+        `names_case_handling` decides that one - so the source's is resolved here once and each
+        side is written from it.
+
+        A column which matches nothing is answered as it was written: the checks of §4.4 report
+        it as a column the table does not have, which is the message the user needs.
+        """
+        try:
+            source_columns = self.source_connection.fetch_table_columns({
+                'table_schema': self.source_schema_name,
+                'table_name': table_name,
+                'target_db_type': self.config_parser.get_target_db_type(),
+            })
+            real = [column['column_name'] for column in (source_columns or {}).values()]
+        except Exception as e:
+            self.config_parser.print_log_message(
+                'DEBUG', f"planner: source_columns_named: the columns of {table_name} could not "
+                         f"be read ({e}) - the entry is used as it was written.")
+            return list(written_columns)
+        by_lower = {str(name).strip().lower(): name for name in real}
+        return [by_lower.get(str(name).strip().lower(), name) for name in written_columns]
+
+    @staticmethod
+    def selected_table_named(written, selected):
+        """
+        The table of the migration one configured name means, or None where there is none.
+
+        The comparison is case-insensitive because the name is written by hand and the source
+        spells its own tables the way its engine does.
+        """
+        if not written:
+            return None
+        wanted = str(written).strip().lower()
+        for name in selected:
+            if str(name).strip().lower() == wanted:
+                return name
+        return None
 
     def check_partitioning(self):
         """
@@ -780,9 +853,11 @@ class Planner:
 
         self.config_parser.print_log_message('INFO', "planner: check_partitioning: ***** Partitioning *****")
         if self.partitioning_note:
+            opening = ("this source has no table partitioning to report"
+                       if self.partitioning_is_absent else
+                       "the partitioning of this source is not reported")
             self.config_parser.print_log_message(
-                'INFO', f"planner: check_partitioning: the partitioning of this source is not "
-                        f"reported: {self.partitioning_note}")
+                'INFO', f"planner: check_partitioning: {opening}: {self.partitioning_note}")
 
         partitioned = [decision for decision in plan.values()
                        if decision.action in (partitioning.PRESERVE, partitioning.FLATTEN)]
@@ -793,10 +868,22 @@ class Planner:
         repartitioned = [decision for decision in plan.values()
                          if decision.action == partitioning.REPARTITION]
 
-        if not plan and not self.partitioning_note:
+        if not (partitioned or parts or orphans or repartitioned):
+            ## P2-8: "not read" and "there is none" must never look alike. Where the note is
+            ## set the migrator did not look - or looked through a catalogue which does not
+            ## answer - and saying "no table is partitioned" underneath it states as a fact
+            ## the one thing that was not established.
             self.config_parser.print_log_message(
-                'INFO', "planner: check_partitioning: no table of the source schema is partitioned.")
-        elif partitioned or parts or orphans or repartitioned:
+                'INFO', "planner: check_partitioning: no table of the source schema is "
+                        "partitioned, and none is partitioned by target_partitioning."
+                        if not self.partitioning_note else
+                        "planner: check_partitioning: no table of the source schema is "
+                        "partitioned, and none is partitioned by target_partitioning."
+                        if self.partitioning_is_absent else
+                        "planner: check_partitioning: whether any table of the source schema is "
+                        "partitioned was not established, and none is partitioned by "
+                        "target_partitioning.")
+        else:
             ## §4.2's headline: a number a reader can act on, before the detail underneath it.
             ## A scheme of more than one level is worth counting on its own - §2.2 is about
             ## what it costs to reproduce one.
@@ -828,9 +915,6 @@ class Planner:
                 self.config_parser.print_log_message(
                     'INFO', "planner: check_partitioning: " + " | ".join(
                         str(cell).ljust(widths[index]) for index, cell in enumerate(row)))
-        else:
-            self.config_parser.print_log_message(
-                'INFO', "planner: check_partitioning: no table of the source schema is partitioned.")
 
         ## §3.1 for a scheme which is carried over rather than asked for. It is not the
         ## smaller case: Oracle keeps a primary key which does not contain the partitioning
@@ -878,10 +962,14 @@ class Planner:
             return blocking_issues
 
         existing_target_names = self.target_schema_object_names()
+        ## the tables the migration really has - which is what an entry names, and which is not
+        ## the same list as the plan for a source whose partitioning was never read
+        selected = list((self.partitioning_table_ids or {}).keys()) or list(plan.keys())
         for entry in entries:
-            table_name = entry.get('table_name')
+            written = entry.get('table_name')
+            table_name = self.selected_table_named(written, selected) or written
             decision = plan.get(table_name)
-            table_exists = decision is not None
+            table_exists = self.selected_table_named(written, selected) is not None
             columns = []
             facts = None
             first_value = last_value = None
@@ -978,7 +1066,8 @@ class Planner:
         """
         if not entry.get('date_range'):
             return None, None, False
-        columns = partitioning.partitioning_columns_of(entry)
+        columns = self.source_columns_named(
+            partitioning.partitioning_columns_of(entry), table_name)
         if not columns:
             return None, None, False
         try:
@@ -1148,9 +1237,15 @@ class Planner:
                                f"{decision.table_name} could not be recorded: {e}")
 
     def repartitioning_entry(self, source_table_name):
-        """The `target_partitioning` entry which names one table, or None."""
+        """
+        The `target_partitioning` entry which names one table, or None.
+
+        Matched case-insensitively, the way `table_settings` matches: the entry is written by
+        hand and the source spells its tables the way its engine does.
+        """
+        wanted = str(source_table_name or '').strip().lower()
         for entry in self.config_parser.get_target_partitioning():
-            if entry.get('table_name') == source_table_name:
+            if str(entry.get('table_name') or '').strip().lower() == wanted:
                 return entry
         return None
 
@@ -1163,11 +1258,11 @@ class Planner:
         created partitioned with nothing under it. That is a table which refuses every INSERT
         with `no partition of relation … found for row`, so it is said out loud here.
         """
-        columns = partitioning.partitioning_columns_of(entry)
-        ## the entry is written in the names of the SOURCE and the clause is written in the
-        ## names of the target: an Oracle entry names ORDER_DATE and names_case_handling: lower
-        ## gives the target order_date, so an unquoted copy of the entry names a column which is
-        ## not there. §4.4 of development/PARTITIONING_STRATEGY.md
+        ## resolved to the spelling the SOURCE really uses, so that the probe below asks for a
+        ## column which exists; the clause is then written in the names of the TARGET, which
+        ## names_case_handling decides. §4.4 of development/PARTITIONING_STRATEGY.md
+        columns = self.source_columns_named(
+            partitioning.partitioning_columns_of(entry), source_table_name)
         quoted = ', '.join(f'"{self.config_parser.convert_names_case(column)}"'
                            for column in columns)
         clause = f" PARTITION BY {str(entry.get('partition_by') or '').upper()} ({quoted})"

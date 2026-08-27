@@ -52,6 +52,7 @@ def parent(key='RANGE (created_at)', method='RANGE', columns=('created_at',), pa
         'is_partitioned': True, 'is_partition': False, 'parent_table': '',
         'method': method, 'columns': list(columns), 'key_definition': key, 'level': 1,
         'partitions': list(partitions), 'partition_count': len(partitions),
+        'partitions_are_tables': True,
         'engine_specific': {},
     }
 
@@ -66,6 +67,9 @@ def child(parent_table, key='', method='', columns=(), partitions=()):
         'is_partitioned': bool(key), 'is_partition': True, 'parent_table': parent_table,
         'method': method, 'columns': list(columns), 'key_definition': key, 'level': 2,
         'partitions': list(partitions), 'partition_count': len(partitions),
+        ## this fixture is the PostgreSQL shape: a partition is a relation of its own, which
+        ## the filters can select and which every other source has no counterpart for
+        'partitions_are_tables': True,
         'engine_specific': {},
     }
 
@@ -195,6 +199,21 @@ def test_a_partition_the_filters_left_out_is_created_anyway_and_the_run_says_so(
     decision = plan_of(selected=['orders', 'orders_2023', 'orders_2023_h0', 'orders_2023_h1'])['orders']
     assert any('orders_2024' in warning and 'created anyway' in warning
                for warning in decision.warnings)
+
+
+def test_a_source_whose_partitions_are_not_tables_says_nothing_about_the_filters():
+    """
+    The warning above is about a table the filters could have selected and did not, and that
+    only exists where a partition is a relation of its own - PostgreSQL and nothing else. On
+    every other source it is one line of noise per partition: an Oracle INTERVAL table of 55
+    months produced 55 of them.
+    """
+    schemes = {'orders': dict(parent(partitions=[part('orders_p1', 'FOR VALUES FROM (1) TO (2)')]),
+                              partitions_are_tables=False)}
+    decision = partitioning.build_plan(
+        schemes, ['orders'], mode_of=lambda name: 'preserve',
+        target_version_num=MODERN)['orders']
+    assert not [warning for warning in decision.warnings if 'created anyway' in warning]
 
 
 # --------------------------------------------------------------------------------------
@@ -758,17 +777,80 @@ def test_a_partition_which_the_filters_left_out_is_still_read_for_its_own_scheme
 
 
 def test_a_source_which_does_not_read_partitioning_says_so_and_asks_nothing():
+    """
+    Nothing is asked of the connector - and the plan is still BUILT, over empty schemes. The two
+    halves of the feature are independent: `target_partitioning` reads a configuration and writes
+    PostgreSQL, so a source whose scheme was never read can still be given one. Returning no plan
+    at all used to make every such entry both refused by the analysis and, had it passed,
+    silently never applied.
+    """
     made = planner_with(ORDERS, not_read='Oracle partitions by RANGE, LIST and HASH; this '
                                          'connector does not read it')
-    assert made.get_partitioning_plan() == {}
+    plan = made.get_partitioning_plan()
     assert 'does not read it' in made.partitioning_note
     assert not made.source_connection.fetch_table_partitioning.called
+    ## every selected table is decided, and none of them is partitioned as far as this run knows
+    assert set(plan) == set(ORDERS)
+    assert all(decision.action == partitioning.NOT_PARTITIONED for decision in plan.values())
+
+
+def test_a_target_partitioning_entry_works_on_a_source_with_no_partitioning_of_its_own():
+    """
+    SQLite and SQL Anywhere have none, and are exactly the sources most likely to be GIVEN a
+    scheme. The entry has to reach the plan as a REPARTITION decision, or the table is created
+    ordinary and nothing says so.
+    """
+    made = planner_with({}, absent='SQLite has no table partitioning at all',
+                        repartitioned=['currency_rates'])
+    made.source_connection.fetch_table_names.return_value = {
+        1: {'id': 1, 'table_name': 'currency_rates'}, 2: {'id': 2, 'table_name': 'customers'}}
+    plan = made.get_partitioning_plan()
+    assert plan['currency_rates'].action == partitioning.REPARTITION
+    assert plan['customers'].action == partitioning.NOT_PARTITIONED
+
+
+def test_an_entry_names_its_columns_however_the_source_spells_them():
+    """
+    An Oracle entry naming `rate_date` means `RATE_DATE`, and asking the source for
+    `min("rate_date")` is ORA-00904. The clause of the target is a different spelling again -
+    `names_case_handling` decides that one - so the source's is resolved first.
+    """
+    made = planner_with({}, repartitioned=['currency_rates'])
+    made.source_connection.fetch_table_columns.return_value = {
+        1: {'column_name': 'CURRENCY_CODE'}, 2: {'column_name': 'RATE_DATE'}}
+    assert made.source_columns_named(['rate_date'], 'CURRENCY_RATES') == ['RATE_DATE']
+    ## a column which matches nothing is answered as written, so the checks of §4.4 can say
+    ## that the table does not have it
+    assert made.source_columns_named(['no_such_column'], 'CURRENCY_RATES') == ['no_such_column']
+
+
+def test_an_entry_names_its_table_however_the_source_spells_it():
+    """
+    The entry is written by hand and Oracle and Db2 spell their tables in upper case.
+    `table_settings` has always matched case-insensitively; these two must not disagree about
+    which table an entry means.
+    """
+    made = planner_with({}, repartitioned=['currency_rates'])
+    made.source_connection.fetch_table_names.return_value = {
+        1: {'id': 1, 'table_name': 'CURRENCY_RATES'}}
+    plan = made.get_partitioning_plan()
+    assert plan['CURRENCY_RATES'].action == partitioning.REPARTITION
+    assert made.repartitioning_entry('CURRENCY_RATES') is not None
+    assert made.selected_table_named('currency_rates', ['CURRENCY_RATES']) == 'CURRENCY_RATES'
+    assert made.selected_table_named('nothing_like_it', ['CURRENCY_RATES']) is None
 
 
 def test_a_source_with_no_partitioning_at_all_is_not_the_same_thing():
-    made = planner_with({}, absent='SQL Anywhere has no table partitioning at all')
+    made = planner_with({'customers': {}}, absent='SQL Anywhere has no table partitioning at all')
     made.check_partitioning()
-    assert any('no table partitioning at all' in message for _level, message in made.messages)
+    report = '\n'.join(message for _level, message in made.messages)
+    assert 'no table partitioning at all' in report
+    ## and the sentence it is printed under agrees with it: this source HAS none, so it is not
+    ## reported as one whose partitioning could not be read
+    assert 'this source has no table partitioning to report' in report
+    assert 'is not reported' not in report
+    assert 'no table of the source schema is partitioned' in report
+    assert 'was not established' not in report
 
 
 def test_the_analysis_reports_what_is_there_and_what_will_happen_to_it():
@@ -788,6 +870,22 @@ def test_the_analysis_of_a_schema_with_nothing_partitioned_says_that():
     assert made.check_partitioning() == []
     assert any('no table of the source schema is partitioned' in message
                for _level, message in made.messages)
+
+
+def test_a_source_whose_partitioning_was_not_read_is_not_told_it_has_none():
+    """
+    P2-8: "not read" and "there is none" must never look alike. A Db2 LUW migration which
+    reads the source through SYSIBM cannot see DATAPARTITIONS at all, and the analysis used
+    to print the note saying so and then, one line below it, "no table of the source schema
+    is partitioned" - stating as a fact the one thing that had not been established.
+    """
+    made = planner_with({'customers': {}, 'orders': {}},
+                        not_read='this migration reads the source through SYSIBM')
+    assert made.check_partitioning() == []
+    report = '\n'.join(message for _level, message in made.messages)
+    assert 'reads the source through SYSIBM' in report
+    assert 'was not established' in report
+    assert 'no table of the source schema is partitioned' not in report
 
 
 def test_the_analysis_hands_back_what_cannot_be_built_as_a_blocking_issue():

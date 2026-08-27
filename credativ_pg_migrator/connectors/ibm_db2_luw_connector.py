@@ -1855,8 +1855,11 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
         """
         if not self.partitioning_is_readable():
             return set()
+        ## DATAPARTITIONEXPRESSION and not DATAPARTITIONS: the latter holds a row for every
+        ## table of the schema, partitioned or not, so asking it names all three hundred of
+        ## them and the round trip this saves is not saved at all.
         query = f"""
-            SELECT DISTINCT TABNAME FROM SYSCAT.DATAPARTITIONS
+            SELECT DISTINCT TABNAME FROM SYSCAT.DATAPARTITIONEXPRESSION
             WHERE TABSCHEMA = upper('{schema}')
             UNION
             SELECT TABNAME FROM SYSCAT.TABLES
@@ -1924,7 +1927,23 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
         notes.extend(self._what_db2_means_by_partition(
             source_table_name, partitions, distribution, dimensions, engine_specific))
 
-        if not partitions:
+        ## An ORDINARY table has a data partition too. SYSCAT.DATAPARTITIONS holds one row for
+        ## every table there is - a table which was never partitioned gets a single one named
+        ## PART0, with LOWVALUE and HIGHVALUE both NULL - so "it has a row in DATAPARTITIONS"
+        ## says nothing at all. What separates the two is SYSCAT.DATAPARTITIONEXPRESSION, which
+        ## holds the partitioning key and holds rows only for a table which really has one.
+        ##
+        ## Reading it the other way round reported every plain table of the schema as RANGE with
+        ## one partition and no key columns, and then refused the whole migration: 24 blocking
+        ## issues saying "a RANGE scheme whose key columns the source does not hold" about
+        ## tables which are not partitioned in any sense. Found by running the migtest example
+        ## of credativ-pg-migrator-tests against a live Db2 through system_catalog: SYSCAT.
+        ##
+        ## The count is the tie-breaker and not the test: a table partitioned into ONE range is
+        ## a real scheme and has an expression, so where there are several data partitions and
+        ## no expression the key is something this connector failed to read - which is P2-8's
+        ## case, and is left to the blocker below to say rather than quietly called unpartitioned.
+        if not partitions or (not columns and len(partitions) <= 1):
             ## DPF or MDC and no table partitioning: the table is not partitioned in the sense
             ## PostgreSQL means, and saying it is would be the wrong answer to a different
             ## question. The notes above are what there is to say about it, and the analysis

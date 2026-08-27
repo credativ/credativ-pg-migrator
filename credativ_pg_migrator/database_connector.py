@@ -1927,6 +1927,11 @@ class DatabaseConnector(ABC):
             'target_key_definition': str,   # the PARTITION BY of the target, in the names the
                                             # migration gives the columns. Absent: use
                                             # 'key_definition' as it stands
+            'partitions_are_tables': bool,  # whether a partition of this source is a relation
+                                            # of its own, with a row in fetch_table_names()
+                                            # which the filters can select. True for
+                                            # postgresql and for nothing else - a partition of
+                                            # every other engine is a storage object
             'levels_below': [{'level': int, 'method': str, 'columns': [str],
                               'partition_count': int}],
                                             # the levels under this one whose partitions are not

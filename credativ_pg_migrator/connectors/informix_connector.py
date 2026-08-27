@@ -4177,20 +4177,32 @@ class InformixConnector(DatabaseConnector):
 
     @staticmethod
     def _fragment_expression_text(value):
-        """One exprtext, however the driver answered it - text, bytes, or a Clob of the JDBC."""
+        """
+        One exprtext, however the driver answered it - text, bytes, or a Clob of the JDBC.
+
+        Informix answers this column NUL-TERMINATED: the remainder fragment comes back as
+        `'remainder\x00'` and an expression as `"order_date < MDY(1,1,2023)\x00"`. `str.strip()`
+        does not remove a NUL, so every fragment expression of every Informix table was refused
+        as "not a range or a list" until this took them out - found by running the migtest
+        example of credativ-pg-migrator-tests against a live Informix.
+        """
         if value is None:
             return ''
         if isinstance(value, bytes):
-            return value.decode('utf-8', errors='replace').strip()
-        if isinstance(value, str):
-            return value.strip()
-        reader = getattr(value, 'getSubString', None)
-        if reader is not None:
-            try:
-                return str(reader(1, int(value.length()))).strip()
-            except Exception:
-                return ''
-        return str(value).strip()
+            written = value.decode('utf-8', errors='replace')
+        elif isinstance(value, str):
+            written = value
+        else:
+            reader = getattr(value, 'getSubString', None)
+            if reader is not None:
+                try:
+                    written = str(reader(1, int(value.length())))
+                except Exception:
+                    return ''
+            else:
+                written = str(value)
+        ## the NUL and anything else which is not part of the expression
+        return written.replace('\x00', ' ').strip()
 
     def fetch_partitioning_facts(self, settings):
         """

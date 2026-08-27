@@ -603,6 +603,68 @@ def test_the_inclusive_ends_of_a_luw_scheme_become_exclusive_ones():
     assert 'ENDING AT' in scheme['partitions'][0]['bound']
 
 
+def test_an_ordinary_luw_table_has_a_data_partition_and_is_not_partitioned():
+    """
+    SYSCAT.DATAPARTITIONS holds one row for EVERY table there is: a table which was never
+    partitioned gets a single one named PART0 with LOWVALUE and HIGHVALUE both NULL. Reading
+    that as a scheme reported all 25 ordinary tables of the migtest schema as RANGE with one
+    partition and no key columns, and then refused the migration with 24 blocking issues
+    saying "a RANGE scheme whose key columns the source does not hold".
+    """
+    made = luw_connector([
+        ('SYSCAT.DATAPARTITIONS', [('PART0', 0, None, 'Y', None, 'Y', 3, '')]),
+        ('SYSCAT.DATAPARTITIONEXPRESSION', []),
+        ('PARTITION_MODE FROM SYSCAT.TABLES', [('',)]),
+        ('SYSCAT.INDEXES', []),
+        ('SYSCAT.COLUMNS', [('CUSTOMER_ID', 'INTEGER', 4, 0)]),
+    ])
+    scheme = made.fetch_table_partitioning(
+        {'source_schema_name': 'PROD', 'source_table_name': 'CUSTOMERS'})
+    assert not scheme.get('is_partitioned')
+    assert not scheme.get('blockers')
+
+
+def test_a_luw_table_partitioned_into_one_range_still_is_partitioned():
+    """
+    The count of data partitions is the tie-breaker and not the test: one range is a scheme,
+    and it has a partitioning expression like any other.
+    """
+    made = luw_connector([
+        ('SYSCAT.DATAPARTITIONS', [('PART0', 0, "'2024-01-01'", 'Y', "'2024-12-31'", 'Y', 3, '')]),
+        ('SYSCAT.DATAPARTITIONEXPRESSION', [('SALES_DATE',)]),
+        ('PARTITION_MODE FROM SYSCAT.TABLES', [('',)]),
+        ('SYSCAT.INDEXES', []),
+        ('SYSCAT.COLUMNS', [('SALES_DATE', 'DATE', 4, 0)]),
+    ])
+    scheme = made.fetch_table_partitioning(
+        {'source_schema_name': 'PROD', 'source_table_name': 'SALES'})
+    assert scheme['is_partitioned'] is True and scheme['partition_count'] == 1
+    assert scheme['target_key_definition'] == 'RANGE ("sales_date")'
+
+
+def test_several_luw_data_partitions_with_no_expression_are_not_called_unpartitioned():
+    """
+    P2-8: a key which could not be read is not the same thing as a table which has none. Where
+    the catalogue answers several data partitions and no expression, something is there that
+    this connector failed to read, and the run says so rather than moving the table as if it
+    were an ordinary one.
+    """
+    made = luw_connector([
+        ('SYSCAT.DATAPARTITIONS', [
+            ('PART0', 0, "'2024-01-01'", 'Y', "'2024-06-30'", 'Y', 3, ''),
+            ('PART1', 1, "'2024-07-01'", 'Y', None, 'Y', 3, ''),
+        ]),
+        ('SYSCAT.DATAPARTITIONEXPRESSION', []),
+        ('PARTITION_MODE FROM SYSCAT.TABLES', [('',)]),
+        ('SYSCAT.INDEXES', []),
+        ('SYSCAT.COLUMNS', [('SALES_DATE', 'DATE', 4, 0)]),
+    ])
+    scheme = made.fetch_table_partitioning(
+        {'source_schema_name': 'PROD', 'source_table_name': 'SALES'})
+    assert scheme['is_partitioned'] is True
+    assert any('key columns the source does not hold' in issue for issue in scheme['blockers'])
+
+
 def test_dpf_is_not_table_partitioning_and_says_so():
     """
     §4.2: the rows are spread over the physical nodes of the instance by a hash. It is a

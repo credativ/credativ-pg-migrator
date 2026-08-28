@@ -340,10 +340,10 @@ See more at the “Connection to Sybase ASE” wiki page:
 Other ODBC parameters such as DSN or connection string are configured alongside the driver (see `docs/config_reference.md` for the exact parameter names). Sybase ASE also supports JDBC connectivity via `jaydebeapi`.
 
 **Current status (Sybase ASE as source):** the richest connector after PostgreSQL for schema objects. Besides tables, data, primary keys, indexes, foreign keys and CHECK constraints it is the **only** connector implementing:
-- **Named default objects** (`CREATE DEFAULT ... AS ...`, bound to several columns by name, note [4] in `FEATURE_MATRIX.md`). PostgreSQL has no such object, so the underlying default expression is attached directly to each target column.
-- **Rules / domains** (note [3]) — externally defined checks bound to a column or data type, migrated as PostgreSQL domains or CHECK constraints depending on `migrate_domains_as`.
+- **Named default objects** (`CREATE DEFAULT ... AS ...`, bound to several columns by name; see the Sybase ASE note in `FEATURE_MATRIX.md`). PostgreSQL has no such object, so the underlying default expression is attached directly to each target column.
+- **Rules / domains** — externally defined checks bound to a column or data type, migrated as PostgreSQL domains or CHECK constraints depending on `migrate_domains_as`.
 - **Procedure groups** (`create procedure p_report;1`, `create procedure p_report;2`) — several procedures sharing one name, told apart by a number, which the catalog keeps as *one* object holding all their CREATE statements. PostgreSQL has no such thing, so every member is migrated as a routine of its own: the member `;1`, which `exec p_report` calls, keeps the name of the group, every other one gets its number appended (`p_report_2`). Reported as a `WARNING` naming the members, because a caller writing `exec p_report;2` has to name the routine of that member instead.
-- User-defined types, and **hidden computed columns** that Sybase creates for function-based indexes (note [5]) — the index is rewritten to use the underlying expression instead of the internal `sybfi*` column.
+- User-defined types, and **hidden computed columns** that Sybase creates for function-based indexes — the index is rewritten to use the underlying expression instead of the internal `sybfi*` column.
 - **Computed columns** (`AS <expression> MATERIALIZED`) become PostgreSQL generated columns — `MATERIALIZED` maps to `STORED`, a computed column which is not materialized to `VIRTUAL` (PostgreSQL 18+, `STORED` with a `WARNING` on an older target). The expression is translated with it: `CONVERT(<type>, <expression>)` becomes `CAST(<expression> AS <type>)` with the type of the target, `$` amounts become plain numbers, and the function mapping is applied (`isnull` → `coalesce`, …). The columns are left out of the data migration, because PostgreSQL computes them itself and refuses a supplied value. `CONVERT` with a third argument — the *style* number, which formats a date or a number — has no equivalent in a `CAST` and is **not** converted: it is reported as a `WARNING` and has to be completed by hand, rather than silently producing differently formatted values.
 
 Functions, procedures and triggers are converted (T-SQL → PL/pgSQL, via the shared T-SQL parser), as are views.
@@ -716,9 +716,10 @@ MySQL and MariaDB have **separate connectors** with almost the same behavior; th
 
 How complete each connector is differs a lot, and the summary above is deliberately short. The
 authoritative, per-feature overview is `FEATURE_MATRIX.md` in the repo — it lists every connector
-against every feature (identity columns, generated columns, CHECK constraints, comments, sequences,
-views, routines, triggers, validation depth, …), is reconciled against the connector sources, and
-carries numbered notes for the engine-specific caveats.
+against every feature (generated columns, CHECK constraints, referential actions, comments,
+sequences, routines, triggers, partitioning, code conversion, validation depth, …), it is measured
+against the connector sources rather than maintained by hand, it keeps *implemented* apart from
+*tested against a live server*, and it closes with a note per connector.
 
 ---
 

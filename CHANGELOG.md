@@ -1,6 +1,14 @@
 # Changelog
 
-## 0.17.0 - 2026.08.25
+## 0.17.0 - 2026.08.28
+
+- 2026.08.28
+
+  - New - Documentation: **`FEATURE_MATRIX.md` is measured against the connectors instead of being maintained by hand.** Every cell was re-derived from the code: the class of each connector is imported and its MRO resolved, so a method which comes from a mixin counts and one which only the base class defines does not; every method of the interface is classified from its AST as absent, `pass`, a bare `return {}`, or a real body; the keys each connector really produces are read out of the dictionary literals *and* the subscript assignments of its fetch methods, which is what decides whether a feature reaches the target rather than only being named in a docstring; and the connectors' own `OBJECT_KINDS_NOT_READ` / `OBJECT_KINDS_ABSENT` declarations are quoted as they stand. The format follows: one wide ASCII block became seven themed tables, the 34 rows which read `yes` for all twelve are one paragraph instead of twelve identical columns, the seventeen numbered notes in scrambled order became footnotes local to their table plus one note per connector, and **`implemented` is kept apart from `tested`** - the old legend meant "supported and successfully tested" by `yes` and "implemented but not verified" by `?`, which put two different questions in one cell; how far each connector has been taken against a real server now stands once, in a table of its own.
+
+  - Fix - Documentation: what that measurement corrected in the matrix. **Query conversion** is implemented for all twelve sources, and was still marked as missing for PostgreSQL and SQLite. **SQL Anywhere** reads the `ON DELETE` / `ON UPDATE` actions of a foreign key and migrates standalone sequences - both were marked as not implemented. **Oracle** reads CHECK constraints, table and column comments, and virtual columns as generated columns - all of it was marked "implemented but not validated". **MS SQL Server**, **MySQL** and **MariaDB** were marked as reading CHECK constraints in one row and not in another. Three cells which said `?` for Db2 for z/OS are `yes` and two are `-`. The rows nobody could act on - `?` for a whole column - are gone.
+
+  - Fix - Db2 for z/OS and Db2 for i write the literal text `Primary Key` into the comment of every primary-key column, instead of the comment the DDL parser stored in `ddl_columns.source_column_comment`. Found while measuring the matrix; the entry says so, and the real comment is still not handed back.
 
 - 2026.08.27
 

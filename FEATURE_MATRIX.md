@@ -1,110 +1,253 @@
 # Feature Matrix
 
-The table below was last reconciled against the connector sources on 2026.08.27 - every entry
-corresponds to code that is actually present in the connector, not to a plan.
+What each of the twelve source connectors really does, measured against the connector sources on
+**2026-08-28**. Every cell corresponds to code which is present and reachable - not to a plan,
+and not to a docstring. How it was measured is in [§11](#11-how-this-was-measured), and it can be
+re-run.
 
-Different features and differently supported across various database connectors. This file provides overview of the supported features and their status.
+## How to read it
 
-Legend:
+| | |
+|---|---|
+| `yes` | the connector implements it |
+| `part` | implemented with a limit which the note names |
+| `-` | **not implemented**: the engine has this and the connector does not read it |
+| `n/a` | there is nothing of the kind to read: the engine has no such object - or, for the two offline connectors, there is no live source to ask at all |
+| `n/a*` | the same, but the engine's support was not re-verified in the documentation |
 
-- WIP = work in progress, feature is not yet supported but is being worked on
-- yes = feature is supported and was successfully tested
-- ? = status unclear, feature is generally implemented, must be better tested for the specific database
-- -- = feature is not implemented yet
-- N/A = feature is not supported by the specific database ("\*" = requires deeper checking in documentation)
+**Implemented is not the same as tested.** These tables say what the code does; how far each
+connector has been taken against a real server is a property of the connector and not of every
+single feature, and it stands once, in [§8](#8-how-far-each-connector-has-been-taken). A `yes`
+against a connector which has never met a live instance of its engine means the code is there,
+not that it has been proven.
 
-Note to the unclear status - the biggest issue is to find reasonable testing database with the features properly used.
+Where a connector *declares in its own code* that the source has no such objects - the mechanism
+which keeps "we do not read it" apart from "there is none" - the declaration is quoted in the
+per-connector notes of [§9](#9-per-connector-notes).
 
-```
-| Feature                                   | IBM DB2 | IBM DB2 | IBM DB2 | Informix | MSSQL  | MySQL | MariaDB | Oracle | PostgreSQL | SQL      | SQLite | Sybase |
-| description                               | LUW     | z/OS    | i       |          | Server |       |         |        |            | Anywhere |        | ASE    |
-|-------------------------------------------|---------|---------|---------|----------|--------|-------|---------|--------|------------|----------|--------|--------|
-| Pre-migration analysis                    | WIP     | --[9]   | --[9]   | yes      | WIP    | WIP   | WIP     | WIP    | WIP        | WIP      | yes    | WIP    |
-| Migration of data                         | yes     | yes[9]  | yes[9]  | yes      | yes    | yes   | yes     | yes    | yes        | yes      | yes    | yes    |
-| NOT NULL constraints                      | yes     | yes     | yes     | yes      | yes    | yes   | yes     | yes    | yes        | yes      | yes    | yes    |
-| Default values on columns                 | yes     | yes     | yes     | WIP      | yes    | yes   | yes     | yes    | yes        | yes      | yes    | yes[4] |
-| IDENTITY columns                          | yes     | yes     | yes     | yes      | yes    | yes   | yes     | yes[1] | yes        | yes      | yes[8] | yes    |
-| Computed(generated) columns               | --      | --      | --      | --       | --     | yes   | yes     | yes    | yes        | --       | yes[8] | yes[5] |
-| Custom defined replacements of data types | yes     | yes     | yes     | yes      | yes    | yes   | yes     | yes    | yes        | yes      | yes    | yes    |
-| Implicit default values replacements[6]   | yes     | yes     | yes     | --       | yes    | yes   | yes     | yes    | N/A        | yes      | yes    | yes    |
-| Custom repl. of default values            | yes     | yes     | yes     | yes      | yes    | yes   | yes     | yes    | yes        | yes      | yes    | yes    |
-| Primary Keys                              | yes     | yes     | yes     | yes      | yes    | yes   | yes     | yes    | yes        | yes      | yes    | yes    |
-| Secondary Indexes                         | yes     | yes     | yes     | yes      | yes    | yes   | yes     | yes    | yes        | yes      | yes[8] | yes    |
-| Foreign Keys                              | yes     | yes     | yes     | yes      | yes    | yes   | yes     | yes    | yes        | yes      | yes    | yes    |
-| FK on delete action                       | --      | yes     | yes     | --       | --     | --    | --      | yes    | yes        | --       | yes    | N/A*   |
-| Check Constraints                         | yes     | yes     | yes     | yes      | --     | --    | --      | ?[7]   | yes        | --       | yes[8] | yes    |
-| Check Rules/Domains[3]                    | --      | --      | --      | --       | --     | N/A   | N/A     | ?[7]   | ?          | --       | N/A    | yes    |
-| User-defined types                        | --      | --      | --      | --       | ?      | N/A   | N/A     | ?[7]   | yes        | --       | N/A    | yes    |
-| User-defined collations[12]               | --      | --      | --      | --       | --     | --    | --      | --     | yes        | --       | N/A    | --     |
-| Full text search objects[13]              | --      | --      | --      | --       | --     | --    | --      | --     | yes        | --       | N/A    | --     |
-| User-defined aggregates[14]               | --      | --      | --      | --       | --     | N/A   | N/A     | --     | yes        | --       | N/A    | --     |
-| Comments on columns                       | yes     | --[9]   | --[9]   | N/A*     | --     | yes   | yes     | ?[7]   | yes        | --       | N/A    | N/A*   |
-| Comments on tables                        | yes     | --[9]   | --[9]   | N/A*     | --     | yes   | yes     | ?[7]   | yes        | --       | N/A    | N/A*   |
-| Migration of views                        | ?       | ?       | ?       | WIP      | ?      | WIP   | WIP     | ?[7]   | yes        | WIP      | ?[8]   | ?      |
-| Conversion of user defined funcs/procs    | --      | ?       | --      | yes      | ?      | --    | --      | ?[7]   | yes        | --       | N/A    | ?      |
-| Conversion of user defined triggers       | ?       | ?       | ?       | yes      | ?      | --    | --      | ?[7]   | yes        | --       | ?[8]   | ?      |
-| Sequences[2]                              | ?       | ?       | ?       | --       | ?      | N/A   | ?[10]   | ?[7]   | yes        | --       | N/A    | N/A*   |
-| Aliases / synonyms                        | ?       | ?       | ?       | ?        | ?      | N/A   | N/A     | ?      | N/A        | --       | N/A    | N/A    |
-| SQL functions mapping[11]                 | WIP     | WIP     | WIP     | WIP      | WIP    | WIP   | WIP     | WIP    | N/A        | WIP      | WIP    | WIP    |
-| Conversion of application queries[15]     | yes     | yes     | yes     | yes      | yes    | yes   | yes     | yes    | --         | yes      | --     | yes    |
-| Partitioning of source tables[16]         | yes     | yes     | yes     | yes      | yes    | yes   | yes     | yes    | yes        | N/A      | N/A    | yes    |
-| Partitioning of target tables[17]         | yes     | --[17]  | --[17]  | yes      | yes    | yes   | yes     | yes    | yes        | yes      | yes    | yes    |
-| Validation - row counts & checksums       | yes     | yes     | --[9]   | yes      | yes    | yes   | yes     | yes    | yes        | yes      | yes    | yes    |
-| Validation - random sample & LOB sizes    | --      | --      | --      | --       | --     | --    | --      | yes    | yes        | --       | yes    | --     |
-```
+Columns are: **LUW** = Db2 LUW, **z/OS** = Db2 for z/OS, **i** = Db2 for i, **IFX** = Informix,
+**MSSQL** = MS SQL Server, **ORA** = Oracle, **PG** = PostgreSQL, **SQLA** = SQL Anywhere,
+**ASE** = Sybase ASE.
 
-Notes:
+---
 
-- [1]: IDENTITY columns are recognized based on sequence used as the default value. But there is still an issue with data types. Oracle allows PRIMARY KEY on NUMBER with sequence. But IDENTITY column in PostgresSQL must be INT or BIGINT.
-- [2]: Sequences are not explicitly migrated (presuming source database implements them). But SERIAL/BIGSERIAL and IDENTITY columns and columns with a sequence as default value are migrated into PostgreSQL as IDENTITY columns. Which means the sequence is created in PostgreSQL automatically. The current value of the sequence is set to the last value found in migrated data after the data migration is finished. Exception: for Oracle, standalone sequences (not attached to a table column) are additionally migrated as independent PostgreSQL sequences - see note [7].
-- [3]: Check rules/domains are addiional checks externally defined and bound to specific column or data type. In PostgreSQL they are implemented as [domains](https://www.postgresql.org/docs/current/sql-createdomain.html), in some other databases as rules bind to columns/data types. Currently we work on implementing this feature for Sybase ASE migration.
-- [4]: Sybase ASE has SQL command CREATE DEFAULT which creates independent named default value and this can be attached to a multiple columns using its name. PostgreSQL does not support this, therefore we attach corresponding underlying default value directly to the target column.
-- [5]: Sybase ASE in some cases creates internal computed columns, not visible in selects, but documented in system tables. One example is column for this index: CREATE NONCLUSTERED INDEX IX_Products_LowerProductName ON dbo.Products (LOWER(ProductName)) - Sybase created internal calculated materialized column "sybfi4_1" with computation formula "AS LOWER(ProductName) MATERIALIZED". There internal computed columns have status3 = 1 – Indicates a hidden computed column for a function-based index key. This feature also means that the index has different DDL command in system tables - uses the hidden column: CREATE INDEX IX_Products_LowerProductName_608002166_4 ON Products (sybfi4_1);
-- [6]: Typical most commonly used default values not compatible with target PostgreSQL syntax are replaced implicitly during migration.
-- [7]: Oracle - CHECK constraints, standalone sequences, user-defined types, domains, table/column comments, views/materialized views and best-effort PL/SQL function/procedure/trigger conversion are implemented but not yet validated against a live database. PL/SQL conversion is heuristic (packages are split into standalone `<package>_<routine>` functions with their call sites rewritten, but package state is not migrated; triggers are split into a PL/pgSQL trigger function + CREATE TRIGGER; complex constructs are flagged for manual review). Standalone sequences (`ALL_SEQUENCES`) are migrated as independent PostgreSQL sequences, with bounds clamped to PostgreSQL's `bigint` range. Oracle object types are migrated as PostgreSQL composite types and collection types (VARRAY / nested tables) as array-based domains; SQL domains exist only in Oracle 23ai (`ALL_DOMAINS`) and that path is best-effort. See section 4.3 of `docs/README.md` for the full list of Oracle limitations.
-- [8]: SQLite has no data dictionary for these objects - CHECK constraints, generated column expressions, AUTOINCREMENT markers and the expressions of functional indexes are parsed out of the CREATE statements stored in `sqlite_master`. Views, triggers and expressions are translated to PostgreSQL with `sqlglot` plus a SQLite specific function mapping; a SQLite trigger becomes a PL/pgSQL trigger function + CREATE TRIGGER. Partial indexes are migrated without their WHERE condition (a partial UNIQUE index is degraded to a non-unique index) and the original condition is recorded in the index comment. An INTEGER PRIMARY KEY (rowid alias) and AUTOINCREMENT columns become PostgreSQL identity columns. Virtual tables (FTS, RTREE, ...) and their shadow tables are skipped. SQLite is dynamically typed, so values are coerced to the target column type during data migration (0/1 to boolean, Unix timestamps and Julian days to timestamp).
-- [9]: IBM DB2 z/OS and IBM DB2 for i are **offline** connectors - they never connect to the source instance. The structure is read from `.sql`/DDL extracts (`connectivity: "ddl"`) and the data from source-generated CSV files, so anything that requires a live source (pre-migration analysis, random-sample and LOB-size validation) is not available. `COMMENT ON` / `LABEL ON` statements *are* parsed out of the DDL and stored in the protocol tables, but they are not yet handed back as table/column comments, so no comment reaches the target.
-- [10]: MySQL and MariaDB use separate connectors. They are largely identical, but MariaDB additionally migrates standalone `SEQUENCE` objects (MariaDB 10.3+), which MySQL does not have. Neither connector converts functions, procedures or triggers.
-- [16]: Whether the connector reads how the SOURCE partitions its tables, so that the run can say what is there before it decides anything - and, with `migration.source_partitioning: preserve` (the default), build the same scheme on the target. Every engine of the twelve which partitions tables is read; SQL Anywhere and SQLite have none and declare it. What each of them keeps, what it reports rather than reproduces, and what stops the run is **[docs/partitioning.md](docs/partitioning.md)**, one section per source. The three findings that page exists for, in short: **five of the engines write an upper bound the source counts as INSIDE the partition** - Db2's `ENDING AT … INCLUSIVE`, ASE's `VALUES <= (x)`, SQL Server's `RANGE LEFT`, Informix's `col <= v` - and PostgreSQL has no inclusive upper bound at all, so every such bound is converted to the exclusive one holding the same rows and refused where the column type has no next value (a bound copied unchanged does not fail: the rows load into the partition next door). **A hash scheme keeps its partition count and not the placement of a row**, because every engine hashes with its own function. And **what an engine calls partitioning which PostgreSQL has no counterpart for is named per table rather than dropped in silence** - Oracle's REFERENCE, SYSTEM and INTERVAL schemes and its global indexes, Db2's DPF and MDC and z/OS's partition-by-growth, Informix's ROUND ROBIN and HYBRID fragmentation, MySQL's partitioning expressions, SQL Server's filegroups and non-aligned indexes - and a scheme which cannot be built stops the run before anything is created. **Verified against a live server of its own engine: PostgreSQL 18, Oracle 21c, Sybase ASE 16.0 SP02, SQL Server 2022, MySQL 9 and MariaDB 10.11** - each read end to end through its own connector against the `migtest` example of `credativ-pg-migrator-tests`, which carries every partitioning flavour that engine has. The three Db2 connectors and Informix are exercised by the test suite and by the parsers running over the real DDL of that same example, but have not yet been read from a running server. Sybase ASE was the least certain of the eleven until it was run: `syspartitions` turned out to have no partition condition at all and `sp_helpartition` to hold the method, the key and the bounds together, which is what the connector reads now.
-- [17]: Creating the target table partitioned, from the `target_partitioning` block of the configuration, whether or not the source table was partitioned. It reads a configuration and writes PostgreSQL and nothing in it looks at what the source was, so it works for every connector: the target scheme is an input and not a derivation. Before anything is created, every entry is checked against the table it really names - the columns exist and can carry the key, the primary key and every unique constraint and unique index contain the partitioning columns, the NULLs have somewhere to go, the partition count is sane and the generated names do not collide - and a check which could not be made is reported as not made rather than as one which passed. The two exceptions are **IBM Db2 for z/OS and IBM Db2 for i**, which are offline: there is no instance to ask what a column holds, so an entry which generates its partitions from a `date_range` is refused against those two before anything is created rather than producing a partitioned table with nothing under it. See [docs/partitioning.md](docs/partitioning.md).
-- [15]: The separate step `--convert-queries`, which converts the SELECT statements an application holds as text for the migrated schema and tests each of them against the target - not a part of a migration, it runs over one which is already done. A connector which does not have it stops the step at its start with "query conversion is not implemented for source type x"; the statements are never passed through unconverted. 
-- [11]: Every connector ships a mapping of the most common source SQL functions to their PostgreSQL equivalents, applied when defaults, views, constraints and routine bodies are converted. Coverage differs per engine and is extended on demand, hence WIP everywhere. For PostgreSQL as a source no mapping is needed.
-- [14]: Aggregate functions created with [CREATE AGGREGATE](https://www.postgresql.org/docs/current/sql-createaggregate.html). Migrated for a PostgreSQL source with their state transition, final, parallel and moving-aggregate support functions, initial conditions, sort operator and parallel safety; created after the functions and procedures they reference. Aggregates provided by an extension are not migrated, they come with the extension.
-- [13]: Full text search dictionaries and configurations ([CREATE TEXT SEARCH CONFIGURATION](https://www.postgresql.org/docs/current/sql-createtsconfig.html)) referenced by generated `tsvector` columns, views, indexes and functions. They are migrated for a PostgreSQL source, including the complete token type mapping of a configuration, and recreated in the target schema; the references inside `'name'::regconfig` literals are rewritten accordingly. Objects belonging to an extension are not migrated, they come with the extension itself.
-- [12]: Collations created as standalone objects ([CREATE COLLATION](https://www.postgresql.org/docs/current/sql-createcollation.html)) and referenced by columns and indexes. They are migrated for a PostgreSQL source (ICU and libc provider, locale, tailoring rules, non-deterministic collations and the comment) and recreated in the target schema. Collations of the other engines are named differently (`utf8mb4_general_ci`, `Latin1_General_CI_AS`, ...) and have no PostgreSQL counterpart, so a reference to them is dropped and the column keeps the default collation of the target database.
+## 1. What every connector does
 
-## Tested versions of databases
+Twelve out of twelve, so they are not repeated in the tables below: **tables and their data**;
+**NOT NULL**; **column defaults**, including the implicit rewrites of the defaults PostgreSQL
+cannot take over and the replacements configured in `data_types_substitution` /
+`default_values_substitution`; **identity / auto-increment columns**; **primary keys, unique
+constraints and secondary indexes**; **foreign keys** (the actions they carry are §3);
+**views**, fetched and converted; the **type mapping** of the engine and the configured type
+substitutions; **`--convert-queries`**, the separate conversion of an application's statements;
+and the **row count and checksum** of the validation - with the one exception named in §5.
 
-- IBM DB2 LUW: (latest)
-- IBM DB2 z/OS: DDL + CSV extracts (offline, no live instance)
-- IBM DB2 for i: DDL + CSV extracts (offline, no live instance)
-- Informix: 14.10
-- MS SQL Server: 2022
-- MySQL: 5.7
-- MariaDB: not yet validated against a live instance
-- Oracle: 21.3
-- PostgreSQL: 14, 17
-- SQL Anywhere: 17
-- SQLite: 3.46
-- Sybase ASE: 16.0
+## 2. Columns
 
-## Strange findings during testing
+| | LUW | z/OS | i | IFX | MSSQL | MySQL | MariaDB | ORA | PG | SQLA | SQLite | ASE |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Generated / computed columns | - | - | - | - | - | yes | yes | part¹ | yes | - | yes | yes |
+| Column comments | yes | -² | -² | n/a* | - | yes | yes | yes | yes | - | n/a* | n/a* |
+| Table comments | yes | yes | yes | n/a* | - | yes | yes | yes | yes | - | n/a* | n/a* |
+| Column collation carried over | - | - | - | - | - | - | - | - | yes | - | - | - |
+| Hidden / internal columns recognised | - | - | - | - | - | - | - | part¹ | - | - | yes | yes |
+| Named default objects (`CREATE DEFAULT`) | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a* | n/a | yes |
 
-### Informix to PostgreSQL - iwadb
+¹ Oracle: **virtual** columns only, migrated as PostgreSQL generated columns; a hidden virtual
+column (the one Oracle creates for a function-based index) is excluded deliberately.
+² Db2 z/OS and Db2 for i: the DDL parser stores the real comment in `ddl_columns`, and the
+connector then writes the literal `'Primary Key'` into `column_comment` for every key column
+instead of reading it back - so the target gets that text and not the comment of the source.
 
-#### PostgreSQL does not allow to create foreign key constraint on column which is part of composite primary key?
+## 3. Constraints
 
-2025-05-22 12:40:33,060: [DEBUG] Target table SQL: CREATE TABLE "iwadb"."inventory" ("i_artid" BIGSERIAL , "i_suppid" INTEGER , "i_quantity" INTEGER , "i_descr" VARCHAR )
+| | LUW | z/OS | i | IFX | MSSQL | MySQL | MariaDB | ORA | PG | SQLA | SQLite | ASE |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| CHECK constraints | yes | yes | yes | yes | -¹ | - | - | yes | yes | - | yes | yes |
+| `ON DELETE` action of a foreign key | - | yes | yes | - | - | - | - | yes | yes² | yes | yes | n/a* |
+| `ON UPDATE` action of a foreign key | - | yes | yes | - | - | - | - | n/a | yes² | yes | yes | n/a* |
 
-2025-05-22 12:40:33,094: [DEBUG] Processed index: {'source_schema_name': 'dwa', 'source_table_name': 'inventory', 'source_table_id': 108, 'index_owner': 'informix', 'index_name': 'f10', 'index_type': 'INDEX', 'target_schema_name': 'iwadb', 'target_table_name': 'inventory', 'index_columns': '"i_suppid"', 'index_comment': '', 'index_sql': 'CREATE INDEX "f10_tab_inventory" ON "iwadb"."inventory" ("i_suppid");'}
-2025-05-22 12:40:33,098: [DEBUG] Processed index: {'source_schema_name': 'dwa', 'source_table_name': 'inventory', 'source_table_id': 108, 'index_owner': 'informix', 'index_name': 'p11', 'index_type': 'PRIMARY KEY', 'target_schema_name': 'iwadb', 'target_table_name': 'inventory', 'index_columns': '"i_artid", "i_suppid"', 'index_comment': '', 'index_sql': 'ALTER TABLE "iwadb"."inventory" ADD CONSTRAINT "p11_tab_inventory" PRIMARY KEY ("i_artid", "i_suppid");'}
+¹ MS SQL Server: the docstring of `fetch_constraints()` names `sys.check_constraints` and
+`sys.key_constraints`; the code queries neither - only the foreign keys.
+² PostgreSQL carries the whole `pg_get_constraintdef()` text, the actions with it.
 
-2025-05-22 12:40:44,093: [DEBUG] Worker 92b76014-c1fe-41ae-a9db-6e7aaab0cc9f: Creating constraint with SQL: ALTER TABLE "iwadb"."partlist" ADD CONSTRAINT "f15_tab_partlist" FOREIGN KEY (p_artid) REFERENCES "iwadb"."inventory" (i_artid)
-2025-05-22 12:40:44,127: [ERROR] An error in Orchestrator (constraint_worker 92b76014-c1fe-41ae-a9db-6e7aaab0cc9f f15): there is no unique constraint matching given keys for referenced table "inventory"
+## 4. Schema objects besides tables
 
-2025-05-22 12:40:44,129: [ERROR] Traceback (most recent call last):
-File "/home/josef/github.com/credativ/credativ-pg-migrator-dev/credativ_pg_migrator/orchestrator.py", line 520, in constraint_worker
-worker_target_connection.execute_query(create_constraint_sql)
-File "/home/josef/github.com/credativ/credativ-pg-migrator-dev/credativ_pg_migrator/postgresql_connector.py", line 502, in execute_query
-cursor.execute(query, params)
-psycopg2.errors.InvalidForeignKey: there is no unique constraint matching given keys for referenced table "inventory"
+| | LUW | z/OS | i | IFX | MSSQL | MySQL | MariaDB | ORA | PG | SQLA | SQLite | ASE |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Standalone sequences | yes | yes | yes | - | yes | n/a | yes | yes | yes | yes | n/a | n/a* |
+| Functions / procedures | -¹ | yes | -¹ | yes | yes | - | - | yes | yes | yes | n/a | yes |
+| Triggers | yes | yes | yes | yes | yes | - | - | yes | yes | yes | yes | yes |
+| Aliases / synonyms | yes | yes | yes | yes | yes | n/a | n/a | yes | n/a | - | n/a | n/a* |
+| User-defined types | - | - | - | - | yes | n/a | n/a | yes | yes | - | n/a | yes |
+| Domains / rules | n/a | n/a | n/a | n/a | - | n/a | n/a | yes | yes | - | n/a | yes |
+| Materialized views | -² | -² | -² | n/a* | n/a* | n/a | n/a | yes | yes | - | n/a | n/a* |
+| Collations (`CREATE COLLATION`) | - | - | - | - | - | - | - | - | yes | - | n/a | - |
+| Full text search objects | - | - | - | - | - | - | - | - | yes | - | n/a | - |
+| Aggregates (`CREATE AGGREGATE`) | - | - | - | - | - | n/a | n/a | - | yes | - | n/a | - |
+| Extensions | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | yes | n/a | n/a | n/a |
+
+¹ Db2 LUW and Db2 for i have a routine *converter*, and `fetch_funcproc_names()` answers an
+empty dictionary - so no routine is ever found for it to convert.
+² Db2's counterpart is the materialized query table (MQT), which none of the three reads.
+
+**Collations and full text search are the one place where an empty answer is still ambiguous.**
+Only the PostgreSQL connector reads them; the other eleven inherit the base method, which answers
+an empty dictionary, and none of them declares whether that means *absent* or *not read*. For
+most of the engines *absent* is the likely truth - there is no `CREATE COLLATION` in MySQL, SQL
+Server, Db2, Informix or SQLite - but it has to be declared per engine and it is not, so the `-`
+above is what the code can be held to today. A column's own collation is a different thing: it
+travels with the column for PostgreSQL, and for the other engines the name has no PostgreSQL
+counterpart, so the reference is dropped and reported and the column keeps the default collation.
+
+## 5. Reading the source, analysing it, validating the result
+
+| | LUW | z/OS | i | IFX | MSSQL | MySQL | MariaDB | ORA | PG | SQLA | SQLite | ASE |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Live catalogue (rather than DDL files) | yes | n/a¹ | n/a¹ | yes | yes | yes | yes | yes | yes | yes | yes | yes |
+| Chunked reading (`chunk_size`) | yes | n/a¹ | n/a¹ | yes | yes | yes | yes | yes | yes | yes | yes | -² |
+| Database size for the report | yes | - | - | - | yes | yes | yes | yes | yes | yes | yes | yes |
+| Top-N tables for the report | yes | - | - | yes | yes | yes | yes | yes | yes | yes | yes | yes |
+| Foreign-key dependency ranking | - | - | - | yes | - | - | - | yes | - | - | - | - |
+| Row count + table checksum | yes | yes | - | yes | yes | yes | yes | yes | yes | yes | yes | yes |
+| Random-sample row hashing | - | - | - | - | - | - | - | yes | yes | - | yes | - |
+| LOB size verification | - | - | - | - | - | - | - | yes | yes | - | yes | - |
+
+¹ Db2 for z/OS and Db2 for i are **offline** connectors: they never open a connection to the
+source. The structure comes from `.sql` / DDL extracts (`connectivity: "ddl"`) and the data from
+CSV files, so everything which needs a live instance is not a gap but the shape of the connector.
+² Sybase ASE reads `chunk_size` and cannot page: older ASE has no `LIMIT … OFFSET`, so a table is
+read in one pass whatever the setting says.
+
+## 6. Converting code
+
+| | LUW | z/OS | i | IFX | MSSQL | MySQL | MariaDB | ORA | PG | SQLA | SQLite | ASE |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| View text converted | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes |
+| Routine bodies converted | -¹ | yes | -¹ | yes | yes | - | - | yes | yes | yes | n/a | yes |
+| Trigger bodies converted | yes | yes | yes | yes | yes | - | - | yes | yes | yes | yes | yes |
+| `--convert-queries` | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes |
+| Compile-only test on the **source** | - | n/a | n/a | jdbc² | `SET NOEXEC` | `EXPLAIN` | `EXPLAIN` | `Cursor.parse` | `PREPARE` | - | `EXPLAIN` | `SET NOEXEC` |
+| Names inside a routine body converted | - | - | - | part³ | yes | n/a | n/a | - | yes | - | n/a | yes |
+
+¹ the converter is there and no routine ever reaches it, because the names are not fetched - §4.
+² only when the connection is configured with `connectivity: "jdbc"`, where the driver's
+`prepareStatement` compiles the statement. Db2 LUW connects natively only and has no native
+mechanism, so it has none at all; SQL Anywhere has neither; the offline pair has no source to
+compile against.
+³ the connectors declare this themselves, in `ROUTINE_BODY_NAMES_NOT_CONVERTED`. Informix gives
+the tables and views of a body the names of the target and leaves the **columns** as the source
+wrote them; Db2 z/OS, Oracle and SQL Anywhere leave tables and columns both and re-point only the
+schema in front of them. Unquoted names are folded to lower case by PostgreSQL, which is why this
+works with `names_case_handling: lower` and breaks with `upper` and `keep` - the run warns per
+routine when it does.
+
+## 7. Partitioning
+
+| | LUW | z/OS | i | IFX | MSSQL | MySQL | MariaDB | ORA | PG | SQLA | SQLite | ASE |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| The partitioning of the source is read | yes | yes | yes | yes | yes | yes | yes | yes | yes | n/a | n/a | yes |
+| Facts for the feasibility check | yes | -¹ | -¹ | yes | yes | yes | yes | yes | yes | n/a | n/a | yes |
+| Bounds probed in the data | yes | n/a¹ | n/a¹ | yes | yes | yes | yes | yes | yes | yes | yes | yes |
+| Target built partitioned (`target_partitioning`) | yes | part² | part² | yes | yes | yes | yes | yes | yes | yes | yes | yes |
+
+¹ the offline pair: there is no instance to ask, so the feasibility facts are not gathered, and
+the bound probe **refuses** with a message naming the alternative rather than sending a SELECT
+down a connection which does not exist.
+² an entry which generates its partitions from a `date_range` is refused for these two before
+anything is created, because the range would have to be read from data nobody can query.
+
+What each engine calls partitioning, what survives the trip and what is reported rather than
+reproduced is one section per source in **[docs/partitioning.md](docs/partitioning.md)**. In
+short: five of the engines write an upper bound the source counts as *inside* the partition
+(Db2's `ENDING AT … INCLUSIVE`, ASE's `VALUES <= (x)`, SQL Server's `RANGE LEFT`, Informix's
+`col <= v`) and PostgreSQL has no inclusive upper bound at all, so every such bound is converted
+to the exclusive one holding the same rows; a hash scheme keeps its partition **count** and not
+the placement of a row, because every engine hashes with its own function; and a scheme
+PostgreSQL has no counterpart for - Oracle's REFERENCE, SYSTEM and INTERVAL, Db2's DPF and MDC,
+z/OS's partition-by-growth, Informix's ROUND ROBIN and HYBRID, SQL Server's filegroups - is named
+per table rather than dropped in silence, and stops the run when it cannot be built.
+
+---
+
+## 8. How far each connector has been taken
+
+| connector | connectivity | tested against | partitioning read from a live server |
+|---|---|---|---|
+| Db2 LUW | native (`ibm_db`) | latest | not yet - parsers run over the DDL of the examples |
+| Db2 for z/OS | **offline**: DDL + CSV extracts | no live instance by design | not yet |
+| Db2 for i | **offline**: DDL + CSV extracts | no live instance by design | not yet |
+| Informix | odbc, jdbc | 14.10 | not yet |
+| MS SQL Server | odbc, jdbc | 2022 | **yes** - SQL Server 2022 |
+| MySQL | native, odbc, jdbc | 5.7; 9 for the partitioning | **yes** - MySQL 9 |
+| MariaDB | native, odbc, jdbc | 10.11, partitioning only | **yes** - MariaDB 10.11 |
+| Oracle | native (`oracledb`), jdbc | 21.3 / 21c | **yes** - Oracle 21c, all six flavours |
+| PostgreSQL | native (`psycopg2`) | 14, 17, 18 | **yes** - PostgreSQL 18 |
+| SQL Anywhere | native (`sqlanydb`), odbc | 17 | n/a - the engine has no partitioning |
+| SQLite | native (`sqlite3`), ddl | 3.46 | n/a - the engine has no partitioning |
+| Sybase ASE | odbc, jdbc | 16.0 SP02 | **yes** - ASE 16.0 SP02 |
+
+The two live runs which found what no unit test could: ASE's `syspartitions` holds no partition
+condition at all (the bounds are in `sp_helpartition`), and SQL Server's
+`sys.partition_range_values.value` is a `sql_variant` which this connector's own output converter
+was turning into nonsense - every RANGE scheme of every SQL Server source had wrong bounds.
+
+## 9. Per-connector notes
+
+**Db2 LUW** · Distinct types are declared as *present and not read* (`SYSCAT.DATATYPES`); Db2 has
+no `CREATE DOMAIN` and says so. Routines are not fetched, so the routine converter never runs.
+`migrate_sequences()` is defined **twice** in the class - only the second definition is used.
+
+**Db2 for z/OS**, **Db2 for i** · Offline. Everything comes from the DDL extract and the CSV
+files, which is why the analysis, the live probes and (for Db2 for i) the checksum are absent
+rather than missing. Distinct types are declared as not read. Db2 for i does not fetch routines.
+
+**Informix** · Distinct and named ROW types declared as not read; no `CREATE DOMAIN`. The view
+conversion has no SQL parser behind it - no parser of this migrator models Informix - so the
+defining query is rewritten construct by construct and anything outside that list is left as it
+stands and reported. One of the two connectors which rank foreign-key dependencies.
+
+**MS SQL Server** · Rules (`CREATE RULE`) declared as *present and not read*. CHECK constraints
+and computed columns are not read either, and the docstring of `fetch_constraints()` claims two
+catalogue views the code never opens.
+
+**MySQL**, **MariaDB** · No `CREATE TYPE` and no `CREATE DOMAIN`, both declared. Triggers and
+routines are **placeholders**: `fetch_triggers()`, `fetch_funcproc_names()` and
+`fetch_funcproc_code()` are `pass`, and `convert_funcproc_code()` returns the empty string.
+MariaDB additionally migrates standalone `SEQUENCE` objects (10.3+), which MySQL does not have.
+
+**Oracle** · The widest connector after PostgreSQL: CHECK constraints, standalone sequences with
+their bounds clamped to the PostgreSQL `bigint` range, object and collection types, 23ai domains,
+materialized views, virtual columns, packages split into `<package>_<routine>` functions with
+their call sites rewritten - **package state is not migrated**. The second connector which ranks
+foreign-key dependencies.
+
+**PostgreSQL** · The only connector which reads collations, full text search objects, aggregates,
+extensions and the collation of a column; the only one whose foreign keys carry their actions
+through the full `pg_get_constraintdef()` text.
+
+**SQL Anywhere** · `CREATE DOMAIN` and `CREATE DATATYPE` make one and the same object there, and
+both the user-defined types and the domains are declared as *present and not read*. Partitioning
+is declared absent. It does read the referential actions of a foreign key, which most connectors
+do not. It has no compile-only source test at all.
+
+**SQLite** · No data dictionary for CHECK constraints, generated expressions, `AUTOINCREMENT` or
+functional index expressions - all of them are parsed out of the `CREATE` statements in
+`sqlite_master`. Partitioning, user-defined types and domains are declared absent. Values are
+coerced to the target type during the data migration, because SQLite is dynamically typed.
+Partial indexes lose their `WHERE` condition, which is recorded in the index comment.
+
+**Sybase ASE** · The richest connector after PostgreSQL and Oracle for schema objects: named
+default objects, rules migrated as domains or CHECK constraints, user-defined types, procedure
+groups (`p;1`, `p;2`) split into separate routines, computed columns, and the hidden computed
+columns ASE creates for function-based indexes. It cannot page a result, so `chunk_size` has no
+effect.
+
+## 10. A gotcha which is not a connector's fault
+
+PostgreSQL refuses a foreign key which references columns that are not covered by a unique
+constraint on their own. A source which allows a foreign key to reference *part* of a composite
+primary key - Informix does - produces
+`there is no unique constraint matching given keys for referenced table` when the constraint is
+created. The reference has to be widened to the whole key, or a unique constraint added to the
+referenced columns, in the source or by hand in the target.

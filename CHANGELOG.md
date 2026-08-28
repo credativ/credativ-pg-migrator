@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.16.0 - 2026.08.26
+## 0.16.0 - 2026.08.28
+
+- 2026.08.28
+
+  - Fix - **The protocol tables count the rows of a table in `BIGINT`.** A source with tables of billions of rows ended the migration in the protocol layer rather than in the data: the row counts were recorded in `INTEGER` columns, which stop at 2147483647, so the first table past that count was refused by the protocol database with `integer out of range` - the rows were read and written, and the run failed while recording how many. Every column which holds a count of rows is `BIGINT` now: `source_table_rows_all`, `source_table_rows_limited` and `target_table_rows` of the data migration protocol and of `mapping_tables`, `row_count` of `mapping_unmatched_objects`, `batch_rows` of the batch statistics, `file_lines` of the data sources, and the `row_limit` of `data_migration_limitation`, which is compared against those counts and could not have described a table larger than the limit it holds. The data chunks and the anonymization statistics already used `BIGINT`. The protocol schema is created from scratch at the start of every run, so nothing has to be altered - the next run writes the wider columns.
 
 - 2026.08.26
 

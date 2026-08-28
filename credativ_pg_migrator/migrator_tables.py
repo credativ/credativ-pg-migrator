@@ -309,7 +309,7 @@ class MigratorTables:
         source_table_name TEXT,
         where_limitation TEXT,
         use_when_column_present TEXT,
-        row_limit INTEGER,
+        row_limit BIGINT,
         inserted TIMESTAMP DEFAULT clock_timestamp()
         )
         """)
@@ -705,9 +705,9 @@ class MigratorTables:
                 target_table_name TEXT,
                 match_type TEXT NOT NULL,
                 similarity_score FLOAT,
-                source_table_rows_all INTEGER,
-                source_table_rows_limited INTEGER,
-                target_table_rows INTEGER,
+                source_table_rows_all BIGINT,
+                source_table_rows_limited BIGINT,
+                target_table_rows BIGINT,
                 info TEXT,
                 is_forced_mapping BOOLEAN DEFAULT FALSE
             );
@@ -781,7 +781,7 @@ class MigratorTables:
                 side TEXT,
                 parent_object TEXT,
                 object_name TEXT,
-                row_count INTEGER,
+                row_count BIGINT,
                 info TEXT
             );
         """)
@@ -2358,12 +2358,12 @@ class MigratorTables:
             source_schema_name TEXT,
             source_table_name TEXT,
             source_table_id INTEGER,
-            source_table_rows_all INTEGER,
-            source_table_rows_limited INTEGER,
+            source_table_rows_all BIGINT,
+            source_table_rows_limited BIGINT,
             worker_id TEXT,
             target_schema_name TEXT,
             target_table_name TEXT,
-            target_table_rows INTEGER,
+            target_table_rows BIGINT,
             task_created TIMESTAMP DEFAULT clock_timestamp(),
             task_started TIMESTAMP DEFAULT clock_timestamp(),
             task_completed TIMESTAMP,
@@ -2396,7 +2396,7 @@ class MigratorTables:
             batch_number INTEGER,
             batch_start TIMESTAMP,
             batch_end TIMESTAMP,
-            batch_rows INTEGER,
+            batch_rows BIGINT,
             batch_seconds FLOAT,
             reading_seconds FLOAT,
             transforming_seconds FLOAT,
@@ -3070,7 +3070,7 @@ class MigratorTables:
             lob_columns TEXT,
             file_name TEXT,
             file_size BIGINT,
-            file_lines INTEGER,
+            file_lines BIGINT,
             file_found BOOLEAN,
             converted_file_name TEXT,
             format_options TEXT,

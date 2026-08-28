@@ -62,7 +62,7 @@ Architecture:
 
 Configuration is done via the YAML config file and the command line.
 
-For a deep dive into the technical execution and process mapping of these components, see the [Standard Migration Workflow](workflow/standard/migration_workflow.md) and the [Data Anonymization Workflow](workflow/anonymization.md).
+For a deep dive into the technical execution and process mapping of these components, see the [Standard Migration Workflow](workflow/standard.md) and the [Data Anonymization Workflow](workflow/anonymization.md).
 
 ### 2.3 Databases involved
 
@@ -83,7 +83,7 @@ There are three logical databases in a migration:
     - generated PostgreSQL code
     - success/failure indicators and timestamps for each migrated object
   - Often this is the same database as the target (same cluster), but it can also be a separate PostgreSQL database.
-  - For the exact details on tracking tables and multithreading chunk coordination, see the [Migration Database Tables](workflow/standard/migration_tables.md) document.
+  - For the exact details on tracking tables and multithreading chunk coordination, see the [Migration Database Tables](migration_tables.md) document.
 
 ---
 
@@ -364,7 +364,9 @@ under an `OR`. A join written as ANSI in the source is not touched at all. What 
 attributed to a table of the FROM clause is **reported and not converted** — the alternative is the
 comma join it started from, which is an inner join PostgreSQL accepts without complaint.
 
-**Data types worth knowing about (Sybase ASE):** the `TIMESTAMP` of Sybase is **not** a point in time — it is the row version of the row, a `VARBINARY(8)` the server writes on every change (the `ROWVERSION` of MS SQL), and it is migrated as `BYTEA`. PostgreSQL does not maintain such a column; the values of the source are copied, they are not updated afterwards. `MONEY` / `SMALLMONEY` become `NUMERIC(19,4)` / `NUMERIC(10,4)`, `BIGTIME` becomes `TIME` (it holds a time of the day, not a point in time) and `BIGDATETIME` becomes `TIMESTAMP`.
+**A table named with its database in front of it (Sybase ASE):** `ccd..batch_task` and `ccd.dbo.batch_task` — the shapes old Transact-SQL writes out of habit — are resolved by the conversion itself whenever `ccd` is the database being migrated (`source.database`): the qualifier is dropped and the table is given the schema of the target. An owner the source wrote is kept and then mapped like any other schema (`ccd.reporting.t` becomes `reporting.t`), and a qualified call such as `ccd.dbo.fn_calc(a)` is pointed at the target schema. **No configuration is needed for this.** A reference to *another* database or a linked server (`otherdb..archive`, `SRV1.otherdb.dbo.t`) is left exactly as the source wrote it and the object is reported by name — PostgreSQL reaches such a table through a foreign data wrapper, which is a decision about the target and not a conversion of the source; the deprecated `remote_objects_substitution` is still the way to rewrite one. The decision is made on the parsed statement, so a database name inside a string literal or a comment is left alone. Two shapes are **not** covered and need manual work: `exec otherdb..sp_x`, and a qualified name in the header of a routine.
+
+**Data types worth knowing about (Sybase ASE):** the `TIMESTAMP` of Sybase is **not** a point in time — it is the row version of the row, a `VARBINARY(8)` the server writes on every change (the `ROWVERSION` of MS SQL), and it is migrated as `BYTEA`. PostgreSQL does not maintain such a column; the values of the source are copied, they are not updated afterwards. `MONEY` / `SMALLMONEY` become `NUMERIC(19,4)` / `NUMERIC(10,4)`, `BIGTIME` becomes `TIME` (it holds a time of the day, not a point in time) and `BIGDATETIME` becomes `TIMESTAMP`. PostgreSQL has **no unsigned integer**, so each of them is migrated to the next type up: `usmallint` → `INTEGER`, `uint` → `BIGINT`, `ubigint` → `NUMERIC(20,0)` — twenty digits, which no integer type of PostgreSQL holds. Both spellings are recognised, the one the catalog returns (`usmallint`) and the `unsigned smallint` a routine or a view writes. The **lower** bound is not carried over: the target accepts a negative value the source refuses. One exception: an identity column typed `ubigint` is still created as `BIGINT`, because an identity column has to be an integer type — the override is recorded in `protocol_target_columns_alterations` with the reason `IDENTITY`, and it only matters for an identity which has counted past 9.2×10¹⁸.
 
 **Known limitations (Sybase ASE):** foreign-key `ON DELETE` actions, table/column comments and standalone sequences have no Sybase counterpart or are not migrated. Note that older ASE versions do not support `LIMIT ... OFFSET`, so the migrator always drops and reloads unfinished tables when resuming after a crash for this source (it cannot skip already-loaded rows reliably).
 
@@ -690,6 +692,7 @@ When `migration.migrate_lob_values` is `false`, `BLOB`-backed columns are migrat
 - **Migrated**: tables and data, primary keys, indexes, foreign keys, IDENTITY columns, sequences (SQL Server 2012+ standalone sequence objects), user-defined types, aliases/synonyms, views, functions, procedures and triggers (T-SQL converted to PL/pgSQL through the shared T-SQL parser).
 
 - **The `*=` / `=*` outer joins of the old Transact-SQL** are rewritten as ANSI `LEFT` / `RIGHT JOIN`s, in views and in the statements of an application alike. The asterisk stands next to the table whose rows are kept, so `c.id *= o.cid` becomes `customer LEFT JOIN orders`. The half which decides whether the result is right is the WHERE clause: a condition which restricts the **inner** table belongs to the join in this dialect, and in the WHERE clause of PostgreSQL it is applied to the result of the join, where it throws away exactly the rows the outer join added — the `LEFT JOIN` would be an inner join again, valid and answering fewer rows. Such a condition is moved into the `ON` clause and the move is reported, because it decides which rows come back. Three things are deliberately left where they stand: `AND inner.col IS NULL`, which is how this dialect asks for the rows without a match and which inside an `ON` clause is never true; a condition which reads more than one table; and anything under an `OR`. A join written as ANSI in the source is not touched at all. What cannot be attributed to a table of the FROM clause is **reported and not converted** — the alternative is the comma join it started from, which is an inner join PostgreSQL accepts without complaint. The rewrite is shared by the two connectors of the family and lives in `query_conversion/outer_joins.py`.
+- **A table named with its database in front of it** — `db..table`, `db.owner.table`, `SRV1.db.owner.table` — is handled exactly as in the Sybase ASE section above: a qualifier naming the database being migrated (`source.database`) is dropped and the table is given the schema of the target, with **no configuration**, while a reference to another database or a linked server is left as the source wrote it and the object is reported by name. `exec otherdb..sp_x` and a qualified name in the header of a routine are not covered.
 - **Not migrated**: CHECK constraints, foreign-key `ON DELETE` actions, table and column comments (extended properties such as `MS_Description`), computed columns and domains/rules.
 
 ### 4.9 MySQL and MariaDB
@@ -791,6 +794,16 @@ Beyond the basics, the configuration file supports several advanced features:
 
 - **Pre-migration Analysis (`pre_migration_analysis`)**:
   - Settings to list TOP N tables by rows, size, columns, indexes, etc. to help plan the migration strategy.
+
+- **Session settings and the owner of the migrated objects (`target.settings`)**:
+  - A map of `name: value` applied to every session the migrator opens on the target, with `role` applied last so that a setting needing more rights is not blocked by the switch to it. A name PostgreSQL does not know is reported as a warning and not applied.
+  - Because every connection runs with them, **`role` is also the owner of everything the migration creates**. The login role of `target.username` has to be a member of that role.
+  - What follows the **table** rather than the session: indexes, constraints, triggers and the sequence of an identity column belong to the owner of their table, whoever created them.
+  - An object which already exists keeps its owner — `CREATE SCHEMA IF NOT EXISTS` and the like change nothing that is already there — so a second run over a schema built without the role leaves a mixture.
+  - A session-level `SET` does not survive reliably through a connection pooler in transaction mode (pgbouncer `pool_mode = transaction`), and the ownership then comes out mixed for no visible reason. Point the migration at the server directly.
+  - Nothing verifies the result today. Ask the catalogue afterwards:
+    `SELECT relkind, pg_get_userbyid(relowner) AS owner, count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = '<target schema>' AND relkind IN ('r','p','v','m','S') GROUP BY 1,2;`
+  - The metadata schema of the migrator (`migrator.schema`) is opened with the credentials of the `migrator` section and is **not** affected by `target.settings`.
 
 ---
 
@@ -1113,9 +1126,8 @@ For full details on the available transformation methods, see the [Data Anonymiz
 
 ### 8.7 Roadmap
 
-Planned features:
-- Partitioning support for target tables.
-- Pre‑migration analysis to suggest partitioning strategies based on source data distribution.
+What is not built yet — planned features, half-built ones and the gaps a future version has to
+close — is listed in the order it is worth doing in [To Do](todo.md).
 
 ---
 
